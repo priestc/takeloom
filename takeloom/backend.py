@@ -1392,6 +1392,7 @@ class LocalBackend(Backend):
             self._emit("recording_status", {
                 "phase": "waiting",
                 "status": status_prefix + "No more tracks need a take — press Stop to end the session.",
+                "track_name": None,
             })
             return None
         config = self.get_config()

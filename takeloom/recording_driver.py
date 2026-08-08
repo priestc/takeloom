@@ -53,6 +53,7 @@ class RecordingDeckDriver:
         self.streamdeck = StreamDeckController()
         self.phase = "idle"  # "idle" | "waiting" | "recording"
         self.video_check_phase = "idle"  # "idle" | "recording"
+        self.track_name: str | None = None  # currently loaded/playing backing track — see _on_backend_event
         self._events_subscribed = False
 
     # --- connect / disconnect ---
@@ -88,7 +89,7 @@ class RecordingDeckDriver:
         if not self.streamdeck.connect(key_callback or self.handle_key, device_id=device_id):
             return False
         self.streamdeck.use_recording_layout()
-        self.streamdeck.update_recording_page(self.phase, self.video_check_phase)
+        self.streamdeck.update_recording_page(self.phase, self.video_check_phase, self.track_name)
         self._refresh_monitoring_mode()
         return True
 
@@ -108,8 +109,9 @@ class RecordingDeckDriver:
         self._backend = backend
         self.phase = "idle"
         self.video_check_phase = "idle"
+        self.track_name = None
         self._subscribe_backend_events()
-        self.streamdeck.update_recording_page(self.phase, self.video_check_phase)
+        self.streamdeck.update_recording_page(self.phase, self.video_check_phase, self.track_name)
         self._refresh_monitoring_mode()
 
     def _refresh_monitoring_mode(self) -> None:
@@ -190,9 +192,13 @@ class RecordingDeckDriver:
 
     def _on_backend_event(self, event: str, data: dict) -> None:
         if event == "recording_status":
+            if "track_name" in data:
+                self.track_name = data["track_name"]
             if "phase" in data:
                 self.phase = data["phase"]
-                self.streamdeck.update_recording_page(self.phase, self.video_check_phase)
+                if self.phase == "idle":
+                    self.track_name = None
+                self.streamdeck.update_recording_page(self.phase, self.video_check_phase, self.track_name)
                 # update_recording_page blanks every key the idle layout
                 # doesn't use whenever phase crosses the idle boundary —
                 # including the monitor toggle (idx 3), which only exists
@@ -214,7 +220,7 @@ class RecordingDeckDriver:
                 self._log(data["status"])
             if "phase" in data:
                 self.video_check_phase = data["phase"]
-                self.streamdeck.update_recording_page(self.phase, self.video_check_phase)
+                self.streamdeck.update_recording_page(self.phase, self.video_check_phase, self.track_name)
             if self.video_check_phase == "idle" and "result_path" in data and self._on_video_check_result:
                 self._on_video_check_result(Path(data["result_path"]), bool(data.get("has_video")))
         elif event == "monitoring_mode_changed":

@@ -514,7 +514,9 @@ class StreamDeckController:
             if self._has_dials:
                 self._update_touchscreen()
 
-    def update_recording_page(self, phase: str, video_check_phase: str = "idle") -> None:
+    def update_recording_page(
+        self, phase: str, video_check_phase: str = "idle", track_name: str | None = None,
+    ) -> None:
         """Refresh the session toggle and dim/light Next/Restart/volume for
         the current phase, swapping the whole button layout the moment
         phase crosses the idle boundary in either direction — idle shows
@@ -524,12 +526,18 @@ class StreamDeckController:
         a Remote client; there's no Stream Deck button for it — holds the
         audio/camera hardware, since the two are mutually exclusive at the
         backend level. `phase` is one of "idle"/"waiting"/"recording";
-        `video_check_phase` is "idle"/"recording". Shared verbatim by the
-        Tk UI, headless server, and CLI drivers (and mirrored on-screen by
-        the Tk UI's emulator via the same recording_toggle_visual()/
-        button_visual() helpers). The monitor-mode toggle key (index 3) is
-        refreshed separately — see update_monitoring_mode() — and only
-        exists in the active layout."""
+        `video_check_phase` is "idle"/"recording". `track_name`, on a dial
+        deck, is shown on the touchscreen above the dial labels — same
+        touchscreen area update_inspiration() uses for the same purpose,
+        just fed from RecordingDeckDriver's own idea of "currently loaded/
+        playing backing track" instead of the inspiration filter's. Shared
+        verbatim by the Tk UI, headless server, and CLI drivers (and
+        mirrored on-screen by the Tk UI's emulator via the same
+        recording_toggle_visual()/button_visual() helpers — the emulator
+        has no touchscreen of its own, so track_name only ever reaches the
+        physical deck). The monitor-mode toggle key (index 3) is refreshed
+        separately — see update_monitoring_mode() — and only exists in the
+        active layout."""
         if not self.connected:
             return
         is_idle = phase == "idle"
@@ -551,7 +559,7 @@ class StreamDeckController:
                 icon, label, color = button_visual(btn, phase)
                 self._deck.set_key_image(idx, self._make_key_image(icon, label, color))
             if self._has_dials:
-                self._update_touchscreen()
+                self._update_touchscreen(track_name)
 
     def update_monitoring_mode(self, mode: str) -> None:
         """Redraw the monitor-mode toggle key (index 3) to reflect the
