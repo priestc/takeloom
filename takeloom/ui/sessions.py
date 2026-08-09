@@ -222,9 +222,13 @@ class SessionsFrame(ttk.Frame):
         row = ttk.Frame(self.detail_frame)
         row.pack(fill="x", pady=1)
         ttk.Label(row, text="", width=28).pack(side="left")  # aligns under the track name above
-        ttk.Label(row, text=f"[{old_instrument}] {take['filename']}", foreground="#666666").pack(
-            side="left", padx=(0, 8)
-        )
+        # Instrument called out as its own bold label, not just bracketed
+        # into the filename text below it — the filename usually repeats
+        # the instrument name too, but this is what actually answers "what
+        # was this recorded as" at a glance, including for a take pulled
+        # in from a filter-slot draw's shared inspiration-take index.
+        ttk.Label(row, text=old_instrument, font=("TkDefaultFont", 9, "bold")).pack(side="left", padx=(0, 6))
+        ttk.Label(row, text=take["filename"], foreground="#666666").pack(side="left", padx=(0, 8))
         if not reassignable:
             self._build_analyze_controls(row, session_dir, track_name, old_instrument)
             return
