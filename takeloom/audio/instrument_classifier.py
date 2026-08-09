@@ -22,15 +22,21 @@ will *not* reliably distinguish two instruments with overlapping ranges
 (e.g. two different electric guitars) — that would need real timbral
 analysis, not just a frequency band.
 
-Also home to the single-purpose test tools behind Studio Setup: NoteCapture
-(autocorrelation-based single-note pitch capture behind the per-instrument
-"Train" button, for "what's the actual Hz of the note just played" —
-answered by estimate_pitch rather than _energy_in_band) and
-ChannelActivityDetector (behind the single top-of-section "Detect" button,
-for "is there any signal at all on this instrument's own dedicated
-channel" — deliberately not frequency-based, since with all instruments
-listened to at once on their own already-distinct hardware channels,
-there's no ambiguity left for a frequency guess to resolve).
+Also home to NoteCapture — autocorrelation-based single-note pitch
+capture behind Studio Setup's per-instrument "Train" button, for "what's
+the actual Hz of the note just played" — answered by estimate_pitch
+rather than _energy_in_band.
+
+Studio Setup's single top-of-section "Detect" button (backend.py's
+start_detect_all) also uses InstrumentClassifier, but one instance per
+physical input channel rather than one global instance: a channel with
+only one instrument assigned to it needs no classification at all (any
+signal on it must be that instrument), and a channel shared by several
+instruments (e.g. bass and electric guitar through the same DI) gets a
+classifier scoped to just those instruments — narrower, and much less
+prone to this module's overlapping-range weakness, than comparing
+against every configured instrument regardless of which channel is
+actually shared.
 """
 
 from __future__ import annotations
@@ -201,34 +207,6 @@ class InstrumentClassifier:
             self._on_detected(best_name, best_score)
 
 
-class ChannelActivityDetector:
-    """One per physical input channel, used by Studio Setup's single
-    top-of-section "Detect" button (backend.py's start_detect_all) to
-    confirm each configured instrument actually has signal coming in on
-    its own dedicated channel. Every instrument's channel is listened to
-    at once, so unlike InstrumentClassifier/the old per-instrument
-    Detect this needs no frequency-range guessing at all — whichever
-    channel a sound shows up on already tells you which instrument it
-    is, by construction of the input routing itself.
-
-    on_detected() fires once, from a background thread, the first time a
-    block's peak clears the noise floor. Does nothing further after
-    that — the caller creates a fresh instance if it wants to detect
-    again on the same channel."""
-
-    def __init__(self, on_detected: Callable[[], None]) -> None:
-        self._on_detected = on_detected
-        self._done = False
-
-    def process_block(self, block: np.ndarray) -> None:
-        if self._done:
-            return
-        if float(np.max(np.abs(block))) < _SILENCE_THRESHOLD:
-            return
-        self._done = True
-        threading.Thread(target=self._on_detected, daemon=True).start()
-
-
 class NoteCapture:
     """Captures one played note over a fixed duration and estimates its
     fundamental frequency — the "play your highest/lowest note" step of
@@ -237,11 +215,11 @@ class NoteCapture:
     via process_block(); pitch_hz is None if nothing periodic enough was
     found anywhere in the window (e.g. nothing was played).
 
-    Unlike InstrumentClassifier/ChannelActivityDetector, this doesn't
-    silence-gate individual blocks — the window has to fill up regardless of
-    when in it the performer actually starts playing, so silence at the
-    start just means fewer valid per-chunk pitch estimates once analysis
-    runs, not blocks that never counted toward the window at all."""
+    Unlike InstrumentClassifier, this doesn't silence-gate individual
+    blocks — the window has to fill up regardless of when in it the
+    performer actually starts playing, so silence at the start just
+    means fewer valid per-chunk pitch estimates once analysis runs, not
+    blocks that never counted toward the window at all."""
 
     def __init__(self, sample_rate: int, duration_seconds: float, on_captured: Callable[[float | None], None]) -> None:
         self._sample_rate = sample_rate

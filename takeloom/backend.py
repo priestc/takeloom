@@ -30,7 +30,7 @@ from typing import Callable
 
 from .audio.filters import CompressorSettings
 from .audio.scarlett2_direct_monitor import FOCUSRITE_DEVICE_NAME, set_channel_gain
-from .config import DEFAULT_CONFIG_PATH, StudioConfig
+from .config import DEFAULT_CONFIG_PATH, Instrument, StudioConfig
 from .project import Project, Setlist, TakeInfo, TrackEntry
 from .utils import ensure_dir, timestamp_now, wall_timestamp
 
@@ -454,16 +454,21 @@ class Backend(ABC):
     # --- detect-all (local-only; RemoteBackend refuses) ---
     #
     # Studio Setup's single "Detect" button, above the instrument table
-    # rather than next to any one row — see audio/instrument_classifier.
-    # py's ChannelActivityDetector. Unlike the old per-instrument Detect,
-    # this opens every configured instrument's own channel at once
-    # (grouped by physical device) and just watches each one for signal,
-    # rather than guessing an instrument from frequency content — so it
-    # sidesteps the classifier's frequency-band bias entirely: whichever
-    # channel a sound shows up on already tells you which instrument it
-    # is. Meant to be left running while the performer walks around
-    # playing each instrument in turn, so — unlike start_instrument_
-    # train — it does not stop itself once something is detected.
+    # rather than next to any one row — opens every configured
+    # instrument's own channel at once (grouped by physical device) and
+    # listens on each. A channel with only one instrument assigned to it
+    # is unambiguous — any signal on it is that instrument, no frequency
+    # guessing needed. A channel shared by more than one instrument (e.g.
+    # bass and electric guitar wired through the same DI, swapped between
+    # takes) is told apart by an InstrumentClassifier (audio/instrument_
+    # classifier.py) scoped to just the instruments actually on that
+    # channel — unlike the old per-instrument Detect, which compared
+    # every configured instrument's frequency band against whatever
+    # channel was under test and so was biased toward whichever unrelated
+    # instrument elsewhere had the widest default range. Meant to be left
+    # running while the performer walks around playing each instrument in
+    # turn, so — unlike start_instrument_train — it does not stop itself
+    # once something is detected.
 
     @abstractmethod
     def start_detect_all(self) -> None:
@@ -471,14 +476,16 @@ class Backend(ABC):
         and starts listening. Emits "detect_all_status" events: phase
         "started" right away (its `status` notes any instrument skipped
         because its input isn't available right now, e.g. the interface
-        is powered off), then phase "detected" with `instrument` set,
-        once per instrument, the moment signal is heard on that
-        instrument's own channel — order and timing depend entirely on
-        what the performer plays. Runs until stop_detect_all() or the
-        Studio Setup tab closing. Raises BackendError immediately if a
-        session, video check, latency test, or an instrument train is
-        already active — same mutual exclusion as those — or if no
-        instrument's input can currently be opened at all."""
+        is powered off), then phase "detected" with `instrument` set
+        whenever an instrument's channel (or, for a channel shared by
+        several instruments, the frequency classifier's current best
+        guess among just those) reports a match — order and timing
+        depend entirely on what the performer plays. Runs until
+        stop_detect_all() or the Studio Setup tab closing. Raises
+        BackendError immediately if a session, video check, latency
+        test, or an instrument train is already active — same mutual
+        exclusion as those — or if no instrument's input can currently
+        be opened at all."""
         ...
 
     @abstractmethod
@@ -2294,7 +2301,7 @@ class LocalBackend(Backend):
     # --- Detect-all (local-only; RemoteBackend refuses) ---
 
     def start_detect_all(self) -> None:
-        from .audio.instrument_classifier import ChannelActivityDetector
+        from .audio.instrument_classifier import InstrumentClassifier
         with self._record_lock:
             if (
                 self._active_session is not None or self._active_video_check is not None
@@ -2318,7 +2325,7 @@ class LocalBackend(Backend):
             # An instrument whose input can't be resolved right now (e.g.
             # its interface is powered off) is skipped rather than
             # failing the whole run.
-            by_device: dict[int, list[tuple[str, int]]] = {}
+            by_device: dict[int, list[tuple[Instrument, int]]] = {}
             skipped: list[str] = []
             for inst in config.instruments:
                 input_info = config.resolve_input(inst.input_label)
@@ -2330,7 +2337,7 @@ class LocalBackend(Backend):
                 if input_info.channel > in_info["max_input_channels"]:
                     skipped.append(inst.name)
                     continue
-                by_device.setdefault(in_dev, []).append((inst.name, input_info.channel - 1))
+                by_device.setdefault(in_dev, []).append((inst, input_info.channel - 1))
 
             if not by_device:
                 raise BackendError("None of the configured instruments' inputs are available right now.")
@@ -2338,27 +2345,35 @@ class LocalBackend(Backend):
             self._close_active_monitor()  # always opens its own streams, never reuses the ambient one
             stop_event = threading.Event()
 
-            def make_callback(entries: list[tuple[str, int]]):
-                # Keyed by channel -> list of detectors, not a single
-                # detector, since more than one instrument can share the
-                # same physical channel (e.g. bass and electric guitar
-                # both plugged into the same DI, swapped between takes) —
-                # a dict keyed by channel alone would silently keep only
-                # the last instrument registered for it and drop the
-                # others.
-                detectors_by_channel: dict[int, list[ChannelActivityDetector]] = {}
-                for name, ch in entries:
-                    def on_channel_detected(name: str = name) -> None:
+            def make_callback(entries: list[tuple[Instrument, int]]):
+                # Group by channel — more than one instrument can share a
+                # physical channel (e.g. bass and electric guitar both
+                # wired through the same DI, swapped between takes). A
+                # channel with just one instrument on it is unambiguous
+                # (whatever's heard there must be it); a channel with
+                # several is told apart by an InstrumentClassifier scoped
+                # to just those instruments — narrower and much less
+                # bias-prone than comparing against every configured
+                # instrument the way the old per-row "Detect" did (see
+                # start_detect_all's replacement of start_instrument_
+                # detect), since it's never dragged toward some unrelated
+                # instrument elsewhere that happens to have the widest
+                # default frequency range.
+                by_channel: dict[int, list] = {}
+                for inst, ch in entries:
+                    by_channel.setdefault(ch, []).append(inst)
+
+                classifiers = {}
+                for ch, insts in by_channel.items():
+                    def on_channel_detected(name: str, _confidence: float) -> None:
                         if not stop_event.is_set():
                             self._emit("detect_all_status", {"phase": "detected", "instrument": name})
-                    detectors_by_channel.setdefault(ch, []).append(ChannelActivityDetector(on_channel_detected))
+                    classifiers[ch] = InstrumentClassifier(config.sample_rate, insts, on_channel_detected)
 
                 def _callback(indata, frames, time_info, status) -> None:
-                    for ch, detectors in detectors_by_channel.items():
+                    for ch, classifier in classifiers.items():
                         if ch < indata.shape[1]:
-                            block = indata[:, ch]
-                            for detector in detectors:
-                                detector.process_block(block)
+                            classifier.process_block(indata[:, ch])
                 return _callback
 
             streams = []
