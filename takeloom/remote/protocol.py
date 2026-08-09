@@ -85,6 +85,8 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
             args["session_dir"], args["track_name"], args["old_instrument"], args["new_instrument"],
         )
         return {}
+    if op == "analyze_take":
+        return backend.analyze_take(args["session_dir"], args["track_name"], args["instrument_name"])
     if op == "search_inspiration_artists":
         return {"suggestions": backend.search_inspiration_artists(args["partial"])}
     if op == "search_inspiration_by_filter":

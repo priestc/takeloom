@@ -3,9 +3,9 @@ they were recorded under, for the case where the "Instrument" dropdown on
 the Record tab was left on the wrong one (e.g. a bass take recorded while
 still set to "electric").
 
-Two separate, independently-usable actions per session — see backend.py's
-list_sessions/get_session_detail/correct_session_instrument/reassign_take
-for exactly what each one touches and why they're kept apart:
+Three separate, independently-usable actions per session — see backend.py's
+list_sessions/get_session_detail/correct_session_instrument/reassign_take/
+analyze_take for exactly what each one touches and why they're kept apart:
 
 1. "Correct instrument" fixes the session's own historical record
    (session_log.json) — always safe, no ambiguity.
@@ -14,6 +14,12 @@ for exactly what each one touches and why they're kept apart:
    dialog naming the exact file before anything on disk moves. Not offered
    for an inspiration filter-slot draw (see backend.py's reassign_take
    docstring for why that case can't be done reliably).
+3. "Analyze" is read-only: runs the take's actual recorded audio through
+   the frequency-based instrument classifier (audio/instrument_
+   classifier.py) and reports which configured instrument it most
+   resembles, right next to the "Reassign" row for the same take — a hint
+   for whether Reassign is actually warranted, not a replacement for it
+   (it never touches anything itself).
 
 Everything here goes through app_state.backend, same as every other tab —
 works identically pointed at local hardware or a Remote connection.
@@ -226,6 +232,17 @@ class SessionsFrame(ttk.Frame):
             ),
         ).pack(side="left", padx=(6, 0))
 
+        # "Analyze" is read-only (see backend.py's analyze_take) — its
+        # result just updates analyze_var in place, no _refresh_after_
+        # change/rebuild, so it survives sitting next to Reassign without
+        # the two interfering with each other.
+        analyze_var = tk.StringVar(value="")
+        ttk.Button(
+            row, text="Analyze",
+            command=lambda: self._on_analyze_take(session_dir, track_name, old_instrument, analyze_var),
+        ).pack(side="left", padx=(10, 0))
+        ttk.Label(row, textvariable=analyze_var, foreground="#2a6db0").pack(side="left", padx=(6, 0))
+
     # --- actions ---
 
     def _on_correct_instrument(self, session_dir: str, new_instrument: str) -> None:
@@ -268,6 +285,34 @@ class SessionsFrame(ttk.Frame):
             return
         self.status_var.set(f"'{track_name}' reassigned to '{new_instrument}'.")
         self._refresh_after_change(session_dir)
+
+    def _on_analyze_take(
+        self, session_dir: str, track_name: str, instrument_name: str, result_var: tk.StringVar,
+    ) -> None:
+        result_var.set("Analyzing...")
+        backend = self.app_state.backend
+        self._run_backend(
+            lambda: backend.analyze_take(session_dir, track_name, instrument_name),
+            lambda result, error: self._on_analyze_result(instrument_name, result_var, result, error),
+        )
+
+    def _on_analyze_result(
+        self, old_instrument: str, result_var: tk.StringVar, result: dict | None, error: str | None,
+    ) -> None:
+        if not self.winfo_exists():
+            return  # a different session was selected (or the tab left) before this reply arrived
+        if error:
+            result_var.set("")
+            messagebox.showerror("Could not analyze take", error)
+            return
+        guess = (result or {}).get("guess")
+        confidence = (result or {}).get("confidence") or 0.0
+        if guess is None:
+            result_var.set("Couldn't tell — too quiet or unreadable.")
+        elif guess == old_instrument:
+            result_var.set(f"Matches: {guess} ({confidence:.0%})")
+        else:
+            result_var.set(f"Sounds more like: {guess} ({confidence:.0%})")
 
     def _refresh_after_change(self, session_dir: str) -> None:
         backend = self.app_state.backend

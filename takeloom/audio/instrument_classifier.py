@@ -43,6 +43,7 @@ actually shared.
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from typing import Callable
 
 import numpy as np
@@ -94,7 +95,7 @@ def effective_frequency_range(instrument) -> tuple[float, float]:
 
 def _energy_in_band(samples: np.ndarray, sample_rate: int, low_hz: float, high_hz: float) -> float:
     """Fraction of `samples`'s spectral energy falling within
-    [low_hz, high_hz] — the scoring primitive behind InstrumentClassifier
+    [low_hz, high_hz] — the scoring primitive behind classify_samples
     (compares every configured instrument's band, picks the best
     match)."""
     windowed = samples * np.hanning(len(samples))
@@ -105,6 +106,75 @@ def _energy_in_band(samples: np.ndarray, sample_rate: int, low_hz: float, high_h
     freqs = np.fft.rfftfreq(len(samples), d=1.0 / sample_rate)
     mask = (freqs >= low_hz) & (freqs <= high_hz)
     return float(spectrum[mask].sum()) / total_energy
+
+
+def classify_samples(
+    samples: np.ndarray, sample_rate: int, candidates: list[tuple[str, tuple[float, float]]],
+) -> tuple[str | None, float]:
+    """One-shot best-match classification of a batch of (already
+    concatenated, already silence-checked) audio: scores every (name,
+    (low_hz, high_hz)) candidate via _energy_in_band and returns the
+    highest-scoring name and its score — (None, 0.0) if candidates is
+    empty. The shared scoring step behind both InstrumentClassifier's
+    realtime per-window pass (_classify, above) and classify_audio_file's
+    whole-take analysis (below); pulled out on its own so anything else
+    that needs "which of these labeled frequency bands best explains this
+    audio" doesn't have to reimplement the comparison loop."""
+    best_name, best_score = None, -1.0
+    for name, (low_hz, high_hz) in candidates:
+        score = _energy_in_band(samples, sample_rate, low_hz, high_hz)
+        if score > best_score:
+            best_name, best_score = name, score
+    return best_name, best_score
+
+
+def classify_audio_file(path: Path, instruments: list) -> tuple[str | None, float]:
+    """Best-guess instrument name for an already-recorded audio file, by
+    frequency content — used by backend.py's analyze_take (Sessions tab's
+    "Analyze" button) to flag a completed take that may have been filed
+    under the wrong instrument. `instruments` is scored the same way
+    InstrumentClassifier scores a live signal: each instrument's
+    effective_frequency_range (its own trained/hand-set freq_min_hz/
+    freq_max_hz, or its label's default).
+
+    Reads the whole file in ~1s windows (matching _ANALYSIS_WINDOW_
+    SECONDS, the realtime classifier's own window), silence-gates each
+    one, classifies it independently, and returns whichever instrument
+    won the most windows — a plurality vote across the take rather than
+    one FFT over the entire file, so a long take with a quiet intro or a
+    trailing pause doesn't get diluted or misjudged by a single unlucky
+    global spectrum. confidence is the fraction of analyzed (non-silent)
+    windows that agreed with the winner. Returns (None, 0.0) if
+    `instruments` is empty, the file has no non-silent audio, or the
+    file can't be read."""
+    if not instruments:
+        return None, 0.0
+    candidates = [(inst.name, effective_frequency_range(inst)) for inst in instruments]
+
+    import soundfile as sf
+    try:
+        votes: dict[str, int] = {}
+        total_windows = 0
+        with sf.SoundFile(str(path)) as f:
+            window_samples = int(f.samplerate * _ANALYSIS_WINDOW_SECONDS)
+            while True:
+                block = f.read(window_samples, dtype="float64", always_2d=True)
+                if len(block) < 2:
+                    break
+                mono = block[:, 0]
+                if float(np.max(np.abs(mono))) < _SILENCE_THRESHOLD:
+                    continue
+                name, _score = classify_samples(mono, f.samplerate, candidates)
+                if name is not None:
+                    votes[name] = votes.get(name, 0) + 1
+                    total_windows += 1
+    except Exception:
+        return None, 0.0
+
+    if not votes:
+        return None, 0.0
+    best_name = max(votes, key=votes.get)
+    return best_name, votes[best_name] / total_windows
 
 
 # Autocorrelation peak must retain at least this fraction of the signal's
@@ -198,12 +268,7 @@ class InstrumentClassifier:
         samples = np.concatenate(blocks).astype(np.float64)
         if len(samples) < 2:
             return
-        best_name, best_score = None, -1.0
-        for name, (low_hz, high_hz) in self._ranges:
-            score = _energy_in_band(samples, self._sample_rate, low_hz, high_hz)
-            if score > best_score:
-                best_name, best_score = name, score
-
+        best_name, best_score = classify_samples(samples, self._sample_rate, self._ranges)
         if best_name is not None and best_name != self._last_emitted:
             self._last_emitted = best_name
             self._on_detected(best_name, best_score)

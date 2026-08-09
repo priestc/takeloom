@@ -244,6 +244,30 @@ class Backend(ABC):
         filed under `old_instrument` to reassign."""
         ...
 
+    @abstractmethod
+    def analyze_take(self, session_dir: str, track_name: str, instrument_name: str) -> dict:
+        """Run the take currently filed under `instrument_name` for
+        `track_name` (same lookup as reassign_take) through the frequency
+        -based instrument classifier (audio/instrument_classifier.py's
+        classify_audio_file) and report which configured instrument its
+        actual recorded audio most resembles — a read-only diagnostic
+        behind the Sessions tab's "Analyze" button, to flag a take that
+        may have been filed under the wrong instrument in the first
+        place (the reason to reach for reassign_take). Only compares
+        against other instruments sharing `instrument_name`'s own
+        input_label (the same physical channel) — the only ones a
+        mix-up during recording could plausibly have actually been, and
+        comparing against unrelated hardware inputs would just
+        reintroduce the classifier's bias toward whichever candidate has
+        the widest default frequency range. Returns {"guess": str | None,
+        "confidence": float} — guess is None if the take's audio had no
+        non-silent windows to analyze, or the file isn't on disk right
+        now. Never modifies anything. Raises BackendError if
+        `track_name` isn't one of session_dir's tracks or there's no
+        take currently filed under `instrument_name`, same as
+        reassign_take."""
+        ...
+
     # --- inspiration ---
 
     @abstractmethod
@@ -1327,6 +1351,40 @@ class LocalBackend(Backend):
                 del shared_entry.preferred_takes[old_instrument]
                 shared_entry.set_preferred_take(new_inst.name, new_take)
                 save_inspiration_index(root, index)
+
+    def analyze_take(self, session_dir: str, track_name: str, instrument_name: str) -> dict:
+        config = self.get_config()
+        _, data = self._read_session_log(session_dir)
+        project = self._open_project(data.get("project", ""))
+        entry = next((t for t in project.setlist.tracks if t.name == track_name), None)
+        if entry is None:
+            raise BackendError(f"Track '{track_name}' no longer exists in project '{project.name}'.")
+        take = entry.get_take_for_instrument(instrument_name)
+        if take is None:
+            raise BackendError(f"No take is currently filed under '{instrument_name}' for '{track_name}'.")
+
+        take_path = project.completed_takes_dir / take.filename
+        if not take_path.exists():
+            return {"guess": None, "confidence": 0.0}
+
+        # Compare only against instruments that share this one's own
+        # input_label (the same physical channel) — the only ones a
+        # mix-up during recording could plausibly have actually been.
+        # Comparing against the full instrument list would also weigh in
+        # instruments on completely unrelated hardware inputs (e.g. a
+        # guitar's DI against a piano on a different device entirely),
+        # which can't be what actually got recorded here regardless of
+        # what the audio sounds like, and re-introduces the classifier's
+        # known bias toward whichever instrument has the widest default
+        # frequency range (see audio/instrument_classifier.py's module
+        # docstring and _DEFAULT_RANGES_BY_LABEL) since a wider range
+        # almost always scores higher on _energy_in_band, right or wrong.
+        inst = config.get_instrument(instrument_name)
+        candidates = [i for i in config.instruments if inst and i.input_label == inst.input_label]
+
+        from .audio.instrument_classifier import classify_audio_file
+        guess, confidence = classify_audio_file(take_path, candidates or config.instruments)
+        return {"guess": guess, "confidence": confidence}
 
     # --- inspiration ---
 

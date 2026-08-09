@@ -128,6 +128,12 @@ class RemoteBackend(Backend):
             },
         )
 
+    def analyze_take(self, session_dir: str, track_name: str, instrument_name: str) -> dict:
+        return self._client.call(
+            "analyze_take",
+            {"session_dir": session_dir, "track_name": track_name, "instrument_name": instrument_name},
+        )
+
     # --- inspiration ---
 
     def search_inspiration_artists(self, partial: str) -> list[str]:
