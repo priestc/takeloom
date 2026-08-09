@@ -13,6 +13,29 @@ DEFAULT_CONFIG_PATH = Path.home() / "studio_config.json"
 VALID_SAMPLE_RATES = [44100, 48000, 96000]
 VALID_BUFFER_SIZES = [128, 256, 512, 1024, 2048]
 
+# The fixed, closed vocabulary for Instrument.label — a controlled
+# instrument-type category, distinct from both Instrument.name (whatever
+# this specific instrument is called in this studio, e.g. "Stratocaster")
+# and Instrument.full_name (manufacturer/model). Not user-editable/
+# renamable — picked from a Studio Setup dropdown built from this exact
+# list (see ui/studio_setup.py's _InstrumentRow). What it's for: more
+# than one Instrument can share a label (e.g. a Stratocaster and a
+# Telecaster both "electric-guitar"), and take-tracking (see
+# StudioConfig.instrument_names_sharing_label, used by backend.py's
+# next_untaken_track_index/_resolve_filter_slot/_advance_locked) treats
+# a song as satisfied for a label the moment *any* instrument sharing it
+# has a completed take — so recording a song with the Telecaster after
+# the Stratocaster already covered it won't have it drawn/offered again.
+INSTRUMENT_LABELS = [
+    "acoustic-guitar",
+    "electric-guitar",
+    "electric-bass",
+    "electric-bass-fretless",
+    "drums",
+    "piano",
+    "organ",
+]
+
 
 @dataclass
 class InputLabel:
@@ -28,6 +51,11 @@ class Instrument:
     name: str
     input_label: str   # references an InputLabel.label
     full_name: str = ""  # manufacturer and model, e.g. "Fender American Stratocaster"
+    # Instrument-type category, one of INSTRUMENT_LABELS — see that
+    # constant's comment for what it's used for. "" only for a config
+    # saved before this field existed; Studio Setup requires a real
+    # value going forward (see StudioConfig.validate()).
+    label: str = ""
     musician: str = ""
     # Expected fundamental-frequency range for the realtime instrument
     # classifier (see audio/instrument_classifier.py) — both 0.0 (the
@@ -161,7 +189,26 @@ class StudioConfig:
             errors.append(f"Invalid vault mode: {self.session_vault_mode}. Must be 'local', 'remote', or 'both'.")
         if self.session_vault_mode in ("remote", "both") and not self.backup_server.strip():
             errors.append(f"Vault mode is '{self.session_vault_mode}' but no backup server is set.")
+        for inst in self.instruments:
+            if inst.label not in INSTRUMENT_LABELS:
+                errors.append(f"Instrument '{inst.name}' needs a label (one of {', '.join(INSTRUMENT_LABELS)}).")
         return errors
+
+    def instrument_names_sharing_label(self, instrument_name: str) -> set[str]:
+        """Every configured instrument's name that shares instrument_name's
+        own label — including instrument_name itself. Used wherever "does
+        this song still need a take" is decided (backend.py's
+        next_untaken_track_index/_resolve_filter_slot/_advance_locked, ui/
+        record.py's setlist checkmark) so that, say, a Telecaster take
+        counts as satisfying a slot for a Stratocaster too, since both are
+        "electric-guitar" — see TrackEntry.take_for_any(), which these
+        names get passed into. instrument_name not found, or with no label
+        set, resolves to just {instrument_name} — no broader match, but
+        still enough to look up its own exact take."""
+        inst = self.get_instrument(instrument_name)
+        if inst is None or not inst.label:
+            return {instrument_name}
+        return {i.name for i in self.instruments if i.label == inst.label}
 
     def get_instrument(self, name: str) -> Instrument | None:
         for inst in self.instruments:

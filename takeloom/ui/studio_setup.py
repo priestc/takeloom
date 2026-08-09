@@ -19,7 +19,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from ..backend import BackendError
-from ..config import Instrument, InputLabel, StudioConfig
+from ..config import INSTRUMENT_LABELS, Instrument, InputLabel, StudioConfig
 from .app_state import AppState
 
 FIELDS = [
@@ -124,6 +124,7 @@ class _InstrumentRow:
         name: str = "",
         input_label: str = "",
         full_name: str = "",
+        label: str = "",
         musician: str = "",
         freq_min_hz: float = 0.0,
         freq_max_hz: float = 0.0,
@@ -133,6 +134,7 @@ class _InstrumentRow:
         self.name_var = tk.StringVar(value=name)
         self.input_label_var = tk.StringVar(value=input_label or (input_label_names[0] if input_label_names else ""))
         self.full_name_var = tk.StringVar(value=full_name)
+        self.label_var = tk.StringVar(value=label or INSTRUMENT_LABELS[0])
         self.musician_var = tk.StringVar(value=musician)
         self.freq_min_var = tk.StringVar(value=(f"{freq_min_hz:g}" if freq_min_hz else ""))
         self.freq_max_var = tk.StringVar(value=(f"{freq_max_hz:g}" if freq_max_hz else ""))
@@ -144,6 +146,7 @@ class _InstrumentRow:
 
         self.widgets = [
             ttk.Entry(table, textvariable=self.name_var, width=10),
+            ttk.Combobox(table, textvariable=self.label_var, values=INSTRUMENT_LABELS, state="readonly", width=16),
             ttk.Combobox(table, textvariable=self.input_label_var, values=input_label_names, state="readonly", width=12),
             ttk.Entry(table, textvariable=self.full_name_var, width=16),
             ttk.Entry(table, textvariable=self.musician_var, width=10),
@@ -176,6 +179,7 @@ class _InstrumentRow:
         return Instrument(
             name=name, input_label=input_label,
             full_name=self.full_name_var.get().strip(),
+            label=self.label_var.get().strip(),
             musician=self.musician_var.get().strip(),
             freq_min_hz=self._parse_hz(self.freq_min_var),
             freq_max_hz=self._parse_hz(self.freq_max_var),
@@ -509,11 +513,14 @@ class StudioSetupFrame(ttk.Frame):
             return row
 
         ttk.Label(
-            self, text="Min/Max Hz is the frequency range the Record tab's live instrument detector "
-                        "compares against — leave blank to fall back to a guess from the instrument's "
-                        "name. \"Train\" sets it automatically from two notes you play. \"Detect\" above "
-                        "listens on every instrument's own input at once and marks each row \"Detected!\" "
-                        "as you play it — handy for confirming cabling before a session.",
+            self, text="Label is the instrument's type (e.g. \"electric-guitar\") — different instruments "
+                        "sharing a label (a Stratocaster and a Telecaster, say) count as satisfying the same "
+                        "song's need for a take, so recording one with either won't have the setlist offer "
+                        "it again for the other. Min/Max Hz is the frequency range the Record tab's live "
+                        "instrument detector compares against — leave blank to fall back to a guess from "
+                        "the instrument's name. \"Train\" sets it automatically from two notes you play. "
+                        "\"Detect\" above listens on every instrument's own input at once and marks each "
+                        "row \"Detected!\" as you play it — handy for confirming cabling before a session.",
             foreground="#666666", wraplength=760, justify="left",
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(2, 6))
         row += 1
@@ -529,14 +536,14 @@ class StudioSetupFrame(ttk.Frame):
         row += 1
 
         for col, text in enumerate(
-            ["Name", "Input", "Full name", "Musician", "Min Hz", "Max Hz", "", "", "", "Status"]
+            ["Name", "Label", "Input", "Full name", "Musician", "Min Hz", "Max Hz", "", "", "", "Status"]
         ):
             ttk.Label(self.table, text=text).grid(row=0, column=col, sticky="w", padx=(0, 6))
 
         for inst in self.config_obj.instruments:
             self._add_instrument_row(
                 input_label_names, name=inst.name, input_label=inst.input_label,
-                full_name=inst.full_name, musician=inst.musician,
+                full_name=inst.full_name, label=inst.label, musician=inst.musician,
                 freq_min_hz=inst.freq_min_hz, freq_max_hz=inst.freq_max_hz,
             )
         if not self.config_obj.instruments:
@@ -554,7 +561,8 @@ class StudioSetupFrame(ttk.Frame):
 
     def _add_instrument_row(
         self, input_label_names: list[str], name: str = "", input_label: str = "",
-        full_name: str = "", musician: str = "", freq_min_hz: float = 0.0, freq_max_hz: float = 0.0,
+        full_name: str = "", label: str = "", musician: str = "",
+        freq_min_hz: float = 0.0, freq_max_hz: float = 0.0,
     ) -> None:
         if self.table is None:
             return
@@ -562,7 +570,7 @@ class StudioSetupFrame(ttk.Frame):
         row = _InstrumentRow(
             self.table, row_index, input_label_names, self._remove_instrument_row,
             on_train=self._on_train_instrument, on_stop=self._on_stop_instrument_test,
-            name=name, input_label=input_label, full_name=full_name, musician=musician,
+            name=name, input_label=input_label, full_name=full_name, label=label, musician=musician,
             freq_min_hz=freq_min_hz, freq_max_hz=freq_max_hz,
         )
         self._instrument_rows.append(row)

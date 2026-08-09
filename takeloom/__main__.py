@@ -20,6 +20,7 @@ from .config import (
     StudioConfig,
     InputLabel,
     Instrument,
+    INSTRUMENT_LABELS,
     VALID_SAMPLE_RATES,
     VALID_BUFFER_SIZES,
 )
@@ -422,6 +423,21 @@ def server_command(disable_color: bool) -> None:
         backend.join_session_processing()
 
 
+def _prompt_instrument_label() -> str:
+    """Shared "pick a label number" prompt used everywhere a CLI command
+    interactively creates a new Instrument (setup_instruments,
+    start_session, measure_latency) — mirrors Studio Setup's Label
+    dropdown (see config.INSTRUMENT_LABELS)."""
+    click.echo("  Label (instrument type):")
+    for i, lbl in enumerate(INSTRUMENT_LABELS):
+        click.echo(f"    [{i + 1}] {lbl}")
+    choice = click.prompt("  Label number", type=int, default=1)
+    if 1 <= choice <= len(INSTRUMENT_LABELS):
+        return INSTRUMENT_LABELS[choice - 1]
+    click.echo("  Invalid choice, using first label.")
+    return INSTRUMENT_LABELS[0]
+
+
 @main.command()
 def setup_instruments() -> None:
     """Configure instruments and their input assignments."""
@@ -456,10 +472,11 @@ def setup_instruments() -> None:
             click.echo(f"  Invalid choice, using first input.")
             input_label_name = existing.input_labels[0].label
         full_name = click.prompt("  Full name (manufacturer & model)", default="", show_default=False)
+        label = _prompt_instrument_label()
         musician = click.prompt("  Musician name", default="", show_default=False)
         instruments.append(Instrument(
             name=name, input_label=input_label_name,
-            full_name=full_name, musician=musician,
+            full_name=full_name, label=label, musician=musician,
         ))
         click.echo(f"  Added '{name}'.\n")
 
@@ -727,10 +744,11 @@ def start_session(instrument: str, project_name: str | None) -> None:
             click.echo(f"  Invalid choice, using first input.")
             input_label_name = config.input_labels[0].label
         full_name = click.prompt("  Full name (manufacturer & model)", default="", show_default=False)
+        label = _prompt_instrument_label()
         musician = click.prompt("  Musician name", default=config.studio_musician, show_default=bool(config.studio_musician))
         inst = Instrument(
             name=instrument, input_label=input_label_name,
-            full_name=full_name, musician=musician,
+            full_name=full_name, label=label, musician=musician,
         )
         config.instruments.append(inst)
         config.save()
@@ -842,10 +860,11 @@ def measure_latency(instrument: str) -> None:
             click.echo("  Invalid choice, using first input.")
             input_label_name = config.input_labels[0].label
         full_name = click.prompt("  Full name (manufacturer & model)", default="", show_default=False)
+        label = _prompt_instrument_label()
         musician = click.prompt("  Musician name", default=config.studio_musician, show_default=bool(config.studio_musician))
         inst = Instrument(
             name=instrument, input_label=input_label_name,
-            full_name=full_name, musician=musician,
+            full_name=full_name, label=label, musician=musician,
         )
         config.instruments.append(inst)
         config.save()

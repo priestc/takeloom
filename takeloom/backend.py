@@ -121,17 +121,20 @@ class Backend(ABC):
         self, project_name: str, instrument_name: str, start_index: int = 0,
     ) -> int | None:
         """Index of the first setlist track from start_index onward that
-        doesn't already have a take for instrument_name, or None if every
-        remaining track already has one. Pure setlist query on top of
-        get_setlist() — concrete here (not per-subclass) since it needs no
-        hardware access and works identically for Local and Remote.
+        doesn't already have a take for instrument_name's label (any
+        instrument sharing it counts — see StudioConfig.instrument_names_
+        sharing_label), or None if every remaining track already has one.
+        Pure setlist query on top of get_setlist() — concrete here (not
+        per-subclass) since it needs no hardware access and works
+        identically for Local and Remote.
 
         The single shared "what's next" primitive every recording-driving
         context (Tk UI's StreamDeck Next key, headless takeloom server,
         the CLI) uses instead of each reimplementing this search."""
         setlist = Setlist.from_dict(self.get_setlist(project_name))
+        sharing = self.get_config().instrument_names_sharing_label(instrument_name)
         for i in range(start_index, len(setlist.tracks)):
-            if setlist.tracks[i].get_take_for_instrument(instrument_name) is None:
+            if setlist.tracks[i].take_for_any(sharing) is None:
                 return i
         return None
 
@@ -1241,6 +1244,7 @@ class LocalBackend(Backend):
         # getting it wrong.
         data["instrument"] = inst.name
         data["instrument_full_name"] = inst.full_name
+        data["instrument_label"] = inst.label
         if log_path is not None:
             log_path.write_text(json.dumps(data, indent=2))
             return
@@ -1699,16 +1703,18 @@ class LocalBackend(Backend):
 
         Queries the inspiration server for every song matching the
         filter, then prefers one that some *other* project or session has
-        already recorded a take on (but not yet this instrument) — via
-        the shared vault-wide inspiration-take index (vault.py), not just
-        this project's own history — so a later instrument can layer onto
-        the same song instead of the setlist only ever accumulating
-        unrelated one-off takes. Falls back to a genuinely random pick
-        among every match when none qualify. Either way, the setlist
-        itself never gains a new entry here — see TrackEntry's docstring
-        and _resolve_filter_slot_for_session's caching wrapper, which is
-        what actually gets called during a session; this is the pure
-        "pick one" step, split out for testability.
+        already recorded a take on (but not yet for this instrument's
+        label — any instrument sharing it counts, see StudioConfig.
+        instrument_names_sharing_label) — via the shared vault-wide
+        inspiration-take index (vault.py), not just this project's own
+        history — so a later instrument can layer onto the same song
+        instead of the setlist only ever accumulating unrelated one-off
+        takes. Falls back to a genuinely random pick among every match
+        when none qualify. Either way, the setlist itself never gains a
+        new entry here — see TrackEntry's docstring and _resolve_filter_
+        slot_for_session's caching wrapper, which is what actually gets
+        called during a session; this is the pure "pick one" step, split
+        out for testability.
 
         `exclude_id` (redraw_current_track's use) leaves one specific
         inspiration_track_id out of consideration — so "give me a
@@ -1730,10 +1736,11 @@ class LocalBackend(Backend):
 
         from .vault import load_inspiration_index, vault_root
         index = load_inspiration_index(vault_root(config))
+        sharing = config.instrument_names_sharing_label(instrument_name)
         reusable = []
         for m in candidates:
             shared = index.get(str(m.get("id")))
-            if shared is not None and shared.preferred_takes and instrument_name not in shared.preferred_takes:
+            if shared is not None and shared.preferred_takes and shared.take_for_any(sharing) is None:
                 reusable.append(m)
         chosen = random.choice(reusable) if reusable else random.choice(candidates)
         return build_inspiration_track_entry(chosen)
@@ -1787,21 +1794,24 @@ class LocalBackend(Backend):
 
     def _advance_locked(self, session: "_ActiveSession", status_prefix: str = "") -> TrackEntry | None:
         """Find and load the next setlist track after the current one that
-        still needs a take for the session's instrument — skipping both
-        tracks with takes already on disk and ones completed earlier in
-        this same session (the setlist doesn't learn about those until
-        post-processing). Returns the loaded track (resolved, if the
-        setlist position found is a filter slot — see
-        _resolve_filter_slot_for_session), or None (emitting a "waiting"
-        status) when nothing's left. Called with self._record_lock held;
-        playback must already be stopped."""
+        still needs a take for the session's instrument's label (any
+        instrument sharing it counts — see StudioConfig.instrument_names_
+        sharing_label) — skipping both tracks with takes already on disk
+        and ones completed earlier in this same session (the setlist
+        doesn't learn about those until post-processing). Returns the
+        loaded track (resolved, if the setlist position found is a filter
+        slot — see _resolve_filter_slot_for_session), or None (emitting a
+        "waiting" status) when nothing's left. Called with self._record_
+        lock held; playback must already be stopped."""
         tracks = session.project.setlist.tracks
         start = (session.current_track_index + 1) if session.current_track_index is not None else 0
+        config = self.get_config()
+        sharing = config.instrument_names_sharing_label(session.inst.name)
         index = None
         for i in range(start, len(tracks)):
             if i in session.completed_track_indices:
                 continue
-            if tracks[i].get_take_for_instrument(session.inst.name) is None:
+            if tracks[i].take_for_any(sharing) is None:
                 index = i
                 break
         if index is None:
@@ -1814,7 +1824,6 @@ class LocalBackend(Backend):
                 "track_name": None,
             })
             return None
-        config = self.get_config()
         track = self._resolve_filter_slot_for_session(session, config, tracks[index], index)
         self._load_track_locked(session, track, index, config)
         return track
@@ -2979,6 +2988,7 @@ class LocalBackend(Backend):
         data = {
             "instrument": session.inst.name,
             "instrument_full_name": session.instrument_full_name,
+            "instrument_label": session.inst.label,
             "musician": session.musician,
             "project": session.project.name,
             "studio_name": session.studio_name,
