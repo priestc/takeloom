@@ -189,27 +189,35 @@ class SessionsFrame(ttk.Frame):
             side="left"
         )
 
-        if track["is_filter_draw"]:
+        is_filter_draw = track["is_filter_draw"]
+        if is_filter_draw:
             ttk.Label(
-                header_row, text="drawn from an inspiration filter — not reassignable here", foreground="#888888",
+                header_row,
+                text="drawn from an inspiration filter — not reassignable here, but still analyzable",
+                foreground="#888888",
             ).pack(side="left")
-            return
 
         takes = track.get("takes", [])
         if not takes:
-            ttk.Label(header_row, text="no take currently filed for this track", foreground="#888888").pack(
-                side="left"
-            )
+            if not is_filter_draw:
+                ttk.Label(header_row, text="no take currently filed for this track", foreground="#888888").pack(
+                    side="left"
+                )
             return
 
         # A track normally has one take per instrument that's actually
         # recorded it — one row per (instrument, take) currently on file,
-        # each independently reassignable, so a track with takes under
-        # more than one instrument doesn't hide any of them.
+        # each independently reassignable (unless drawn from a filter
+        # slot — see reassign_take's docstring for why), so a track with
+        # takes under more than one instrument doesn't hide any of them.
         for take in takes:
-            self._build_take_row(session_dir, track["track_name"], take, instrument_names)
+            self._build_take_row(
+                session_dir, track["track_name"], take, instrument_names, reassignable=not is_filter_draw,
+            )
 
-    def _build_take_row(self, session_dir: str, track_name: str, take: dict, instrument_names: list[str]) -> None:
+    def _build_take_row(
+        self, session_dir: str, track_name: str, take: dict, instrument_names: list[str], reassignable: bool = True,
+    ) -> None:
         old_instrument = take["instrument"]
         row = ttk.Frame(self.detail_frame)
         row.pack(fill="x", pady=1)
@@ -217,6 +225,9 @@ class SessionsFrame(ttk.Frame):
         ttk.Label(row, text=f"[{old_instrument}] {take['filename']}", foreground="#666666").pack(
             side="left", padx=(0, 8)
         )
+        if not reassignable:
+            self._build_analyze_controls(row, session_dir, track_name, old_instrument)
+            return
         # Default the target to whatever instrument isn't this take's own —
         # the common case (this whole tab exists for) is a 2-instrument
         # mix-up, so this is usually already the right answer.
@@ -231,15 +242,19 @@ class SessionsFrame(ttk.Frame):
                 session_dir, track_name, old_instrument, reassign_var, take["filename"],
             ),
         ).pack(side="left", padx=(6, 0))
+        self._build_analyze_controls(row, session_dir, track_name, old_instrument)
 
-        # "Analyze" is read-only (see backend.py's analyze_take) — its
-        # result just updates analyze_var in place, no _refresh_after_
-        # change/rebuild, so it survives sitting next to Reassign without
-        # the two interfering with each other.
+    def _build_analyze_controls(self, row: ttk.Frame, session_dir: str, track_name: str, instrument: str) -> None:
+        # Read-only (see backend.py's analyze_take) — its result just
+        # updates analyze_var in place, no _refresh_after_change/rebuild,
+        # so it survives sitting next to Reassign without the two
+        # interfering with each other, and works for a filter-slot draw
+        # (no Reassign in that row at all — see _build_take_row) same as
+        # any other take.
         analyze_var = tk.StringVar(value="")
         ttk.Button(
             row, text="Analyze",
-            command=lambda: self._on_analyze_take(session_dir, track_name, old_instrument, analyze_var),
+            command=lambda: self._on_analyze_take(session_dir, track_name, instrument, analyze_var),
         ).pack(side="left", padx=(10, 0))
         ttk.Label(row, textvariable=analyze_var, foreground="#2a6db0").pack(side="left", padx=(6, 0))
 

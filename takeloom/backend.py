@@ -208,7 +208,11 @@ class Backend(ABC):
         reassign the moment someone corrects the log first. Each track's
         entry also reports whether it was an inspiration filter-slot draw
         (session_log.json's filter_slot_draws) — those aren't offered for
-        reassign_take (see its docstring)."""
+        reassign_take (see its docstring), but their takes (looked up from
+        the shared vault-wide inspiration-take index instead of the
+        project's own setlist, since a filter slot's own TrackEntry never
+        holds one — see TrackEntry's docstring) are still included, since
+        analyze_take works on them fine."""
         ...
 
     @abstractmethod
@@ -247,13 +251,19 @@ class Backend(ABC):
     @abstractmethod
     def analyze_take(self, session_dir: str, track_name: str, instrument_name: str) -> dict:
         """Run the take currently filed under `instrument_name` for
-        `track_name` (same lookup as reassign_take) through the frequency
-        -based instrument classifier (audio/instrument_classifier.py's
-        classify_audio_file) and report which configured instrument its
-        actual recorded audio most resembles — a read-only diagnostic
-        behind the Sessions tab's "Analyze" button, to flag a take that
-        may have been filed under the wrong instrument in the first
-        place (the reason to reach for reassign_take). Only compares
+        `track_name` through the frequency-based instrument classifier
+        (audio/instrument_classifier.py's classify_audio_file) and report
+        which configured instrument its actual recorded audio most
+        resembles — a read-only diagnostic behind the Sessions tab's
+        "Analyze" button, to flag a take that may have been filed under
+        the wrong instrument in the first place (the reason to reach for
+        reassign_take). Unlike reassign_take, works for an inspiration
+        filter-slot draw too (looked up from the shared vault-wide
+        inspiration-take index, same as get_session_detail) — there being
+        no reliable stored link back to exactly which shared-index entry
+        an old session produced only matters for a *write* like
+        reassign_take; a read here just needs whatever's on file for the
+        song this session's log says got drawn right now. Only compares
         against other instruments sharing `instrument_name`'s own
         input_label (the same physical channel) — the only ones a
         mix-up during recording could plausibly have actually been, and
@@ -261,11 +271,12 @@ class Backend(ABC):
         reintroduce the classifier's bias toward whichever candidate has
         the widest default frequency range. Returns {"guess": str | None,
         "confidence": float} — guess is None if the take's audio had no
-        non-silent windows to analyze, or the file isn't on disk right
-        now. Never modifies anything. Raises BackendError if
-        `track_name` isn't one of session_dir's tracks or there's no
-        take currently filed under `instrument_name`, same as
-        reassign_take."""
+        non-silent windows to analyze (e.g. it's silence). Never modifies
+        anything. Raises BackendError if `track_name` isn't one of
+        session_dir's tracks, there's no take currently filed under
+        `instrument_name` (same as reassign_take), or the take's file
+        isn't available locally right now (e.g. pruned under "remote"
+        vault mode)."""
         ...
 
     # --- inspiration ---
@@ -1233,9 +1244,15 @@ class LocalBackend(Backend):
         except BackendError:
             project = None  # project may have been deleted/renamed since
 
+        config = self.get_config()
+        filter_slot_draws = data.get("filter_slot_draws", {})
+        from .vault import get_inspiration_entry, vault_root
+        root = vault_root(config)
+
         tracks = []
         for name in track_names:
-            is_filter_draw = track_index_by_name.get(name) in filter_slot_indices
+            track_index = track_index_by_name.get(name)
+            is_filter_draw = track_index in filter_slot_indices
             # Every instrument this track currently has a take filed
             # under, not just whichever one session_log.json's own
             # "instrument" field says right now — that field is exactly
@@ -1243,7 +1260,21 @@ class LocalBackend(Backend):
             # lookup off it would silently stop finding the track's take
             # to reassign the moment someone corrects the log first.
             takes = []
-            if project is not None and not is_filter_draw:
+            if is_filter_draw:
+                # A filter slot's own TrackEntry never holds a take (see
+                # TrackEntry's docstring) — what this session actually
+                # drew and recorded lives in the shared vault-wide
+                # inspiration-take index instead, keyed by the song's
+                # inspiration_track_id (filter_slot_draws[track_index]).
+                draw_info = filter_slot_draws.get(str(track_index))
+                track_id = draw_info.get("inspiration_track_id") if draw_info else None
+                shared = get_inspiration_entry(root, track_id) if track_id else None
+                if shared is not None:
+                    takes = [
+                        {"instrument": take_instrument, **asdict(take)}
+                        for take_instrument, take in shared.preferred_takes.items()
+                    ]
+            elif project is not None:
                 entry = next((t for t in project.setlist.tracks if t.name == name), None)
                 if entry is not None:
                     takes = [
@@ -1356,16 +1387,39 @@ class LocalBackend(Backend):
         config = self.get_config()
         _, data = self._read_session_log(session_dir)
         project = self._open_project(data.get("project", ""))
-        entry = next((t for t in project.setlist.tracks if t.name == track_name), None)
-        if entry is None:
-            raise BackendError(f"Track '{track_name}' no longer exists in project '{project.name}'.")
-        take = entry.get_take_for_instrument(instrument_name)
+
+        track_index = None
+        for e in data.get("events", []):
+            if e.get("track_name") == track_name:
+                track_index = e.get("track_index")
+                break
+        filter_slot_draws = data.get("filter_slot_draws", {})
+
+        take = None
+        if track_index is not None and str(track_index) in filter_slot_draws:
+            # Same reasoning as get_session_detail: a filter slot's own
+            # TrackEntry never holds a take — look the drawn song up in
+            # the shared vault-wide inspiration-take index instead.
+            from .vault import get_inspiration_entry, vault_root
+            track_id = filter_slot_draws[str(track_index)].get("inspiration_track_id")
+            shared = get_inspiration_entry(vault_root(config), track_id) if track_id else None
+            take = shared.get_take_for_instrument(instrument_name) if shared is not None else None
+        else:
+            entry = next((t for t in project.setlist.tracks if t.name == track_name), None)
+            if entry is None:
+                raise BackendError(f"Track '{track_name}' no longer exists in project '{project.name}'.")
+            take = entry.get_take_for_instrument(instrument_name)
         if take is None:
             raise BackendError(f"No take is currently filed under '{instrument_name}' for '{track_name}'.")
 
         take_path = project.completed_takes_dir / take.filename
         if not take_path.exists():
-            return {"guess": None, "confidence": 0.0}
+            # Distinct from the audio-analyzed-but-inconclusive case
+            # below (also {"guess": None}) — this one's a file that
+            # simply isn't here right now (e.g. pruned locally under
+            # "remote" vault mode), not something classify_audio_file
+            # ever got to look at.
+            raise BackendError(f"'{take.filename}' isn't available locally right now.")
 
         # Compare only against instruments that share this one's own
         # input_label (the same physical channel) — the only ones a
