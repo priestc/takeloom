@@ -13,41 +13,39 @@ AppState.recording_active's docstring and record.py's
 _update_recording_active, which both apply regardless of whether
 app_state.backend is local or remote.
 
-On Linux, screen-blanking needs holding off through more than one
-mechanism, since no single one is reliably answered everywhere:
-systemd-inhibit's idle/sleep/lid locks stop logind from actually
-suspending the system, but most desktop environments (GNOME, KDE, XFCE)
-run their own screen-blanking/lock timer entirely separate from logind's
-idle handling — systemd-inhibit alone does nothing to stop that, which is
-why the screensaver could still kick in with it active. xdg-screensaver
-(part of xdg-utils, near-universal on any Linux desktop) targets that
-layer, via aging X11-era screensaver protocols — see
-_set_linux_screensaver_suspended. But xdg-screensaver's suspend call is a
-no-op on plenty of real setups too: any Wayland compositor (and some X11
-desktops with no legacy xscreensaver/gnome-screensaver process actually
-running) never answers it, and it fails silently. org.freedesktop.
-ScreenSaver's Inhibit/UnInhibit D-Bus calls — the same interface browsers
-use to keep the screen on during video playback — is what actually gets
-answered on GNOME Shell, KDE Plasma, and most other modern desktops on
-both X11 and Wayland, so it's held alongside xdg-screensaver rather than
-instead of it: see _set_linux_dbus_inhibited.
+On Linux, screen-blanking is held off by simulating a harmless keypress
+(Shift, via xdotool) every _KEYPRESS_INTERVAL seconds — see
+_linux_keypress_loop. This replaced two earlier attempts (xdg-screensaver's
+suspend/resume, then org.freedesktop.ScreenSaver's Inhibit/UnInhibit
+D-Bus calls): both target the desktop's own idle timer through a protocol
+the desktop has to actually implement and answer, and in practice neither
+got answered on a real Ubuntu laptop this was tested against — still
+blanked with either "held". Simulated real input sidesteps the whole
+protocol question: as far as the desktop's idle timer is concerned, it's
+indistinguishable from an actual person pressing a key, so there's no
+protocol for a given desktop/session type to fail to implement.
+systemd-inhibit (see _spawn_inhibitor) still separately holds off actual
+system suspend/lid-close, which is a logind-level concern the keypress
+loop doesn't touch.
 """
 
 from __future__ import annotations
 
 import atexit
 import ctypes
-import os
 import subprocess
 import sys
+import threading
 
 _ES_CONTINUOUS = 0x80000000
 _ES_SYSTEM_REQUIRED = 0x00000001
 _ES_DISPLAY_REQUIRED = 0x00000002
 
+_KEYPRESS_INTERVAL = 10.0  # seconds
+
 _process: subprocess.Popen | None = None
-_screensaver_suspended = False
-_dbus_inhibit_cookie: str | None = None
+_keypress_thread: threading.Thread | None = None
+_keypress_stop: threading.Event | None = None
 
 
 def _spawn_inhibitor() -> subprocess.Popen | None:
@@ -66,89 +64,40 @@ def _spawn_inhibitor() -> subprocess.Popen | None:
     return None
 
 
-def _screensaver_id() -> str:
-    """A stand-in "window id" for xdg-screensaver's suspend/resume — it
-    only uses this to name a state file pairing a resume with its matching
-    suspend, not to look up a real window (other headless/no-window
-    callers, e.g. mpv, rely on the same thing), which matters since
-    sleep_guard has no window of its own to hand it and runs in headless
-    contexts too."""
-    return f"takeloom-{os.getpid()}"
-
-
-def _set_linux_screensaver_suspended(suspended: bool) -> None:
-    """Best-effort toggle of the desktop's own screensaver/screen-lock via
-    xdg-screensaver, independent of _spawn_inhibitor's systemd-inhibit
-    process (see module docstring for why both are needed). Unlike that
-    subprocess-held lock, xdg-screensaver's suspend/resume are each a
-    plain one-shot call — nothing needs to be kept running between them.
-    Silently does nothing if xdg-screensaver isn't installed or there's no
-    desktop session (e.g. a headless server) to talk to."""
-    global _screensaver_suspended
-    if suspended == _screensaver_suspended:
-        return
-    try:
-        subprocess.run(
-            ["xdg-screensaver", "suspend" if suspended else "resume", _screensaver_id()],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return
-    _screensaver_suspended = suspended
-
-
-def _set_linux_dbus_inhibited(inhibited: bool) -> None:
-    """Best-effort org.freedesktop.ScreenSaver Inhibit/UnInhibit — the same
-    D-Bus interface browsers use to keep the screen on during video
-    playback. Complements _set_linux_screensaver_suspended rather than
-    replacing it: xdg-screensaver's aging X11-era protocols go unanswered
-    on plenty of real setups (any Wayland compositor, or an X11 desktop
-    with no legacy xscreensaver/gnome-screensaver process running) and
-    fail silently, whereas this interface is what GNOME Shell, KDE Plasma,
-    and most other modern desktops actually implement natively on both
-    X11 and Wayland. Inhibit returns a cookie that UnInhibit must be
-    called back with, unlike xdg-screensaver's stateless suspend/resume —
-    hence _dbus_inhibit_cookie. Silently does nothing if dbus-send isn't
-    installed or nothing answers on the session bus (e.g. a headless
-    server)."""
-    global _dbus_inhibit_cookie
-    if inhibited:
-        if _dbus_inhibit_cookie is not None:
-            return
-        try:
-            result = subprocess.run(
-                [
-                    "dbus-send", "--session", "--print-reply",
-                    "--dest=org.freedesktop.ScreenSaver",
-                    "/org/freedesktop/ScreenSaver",
-                    "org.freedesktop.ScreenSaver.Inhibit",
-                    "string:takeloom", "string:Recording in progress",
-                ],
-                capture_output=True, text=True, timeout=5,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return
-        for token in result.stdout.split():
-            if token.isdigit():
-                _dbus_inhibit_cookie = token
-                break
-    else:
-        if _dbus_inhibit_cookie is None:
-            return
+def _linux_keypress_loop(stop_event: threading.Event) -> None:
+    """Press Shift (via xdotool) every _KEYPRESS_INTERVAL seconds until
+    stop_event is set — real synthetic input, indistinguishable to the
+    desktop's idle timer from an actual keypress, so it resets whatever
+    screen-blank countdown is running regardless of desktop environment or
+    X11-vs-Wayland session type (see module docstring). A bare modifier
+    key has no effect if it lands in a focused text field or terminal,
+    unlike a printable key. Exits for good the first time xdotool itself
+    is missing or errors, rather than retrying it every interval forever."""
+    while not stop_event.wait(_KEYPRESS_INTERVAL):
         try:
             subprocess.run(
-                [
-                    "dbus-send", "--session",
-                    "--dest=org.freedesktop.ScreenSaver",
-                    "/org/freedesktop/ScreenSaver",
-                    "org.freedesktop.ScreenSaver.UnInhibit",
-                    f"uint32:{_dbus_inhibit_cookie}",
-                ],
+                ["xdotool", "key", "--clearmodifiers", "shift"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
             )
         except (OSError, subprocess.TimeoutExpired):
-            pass
-        _dbus_inhibit_cookie = None
+            return
+
+
+def _set_linux_keypress_loop_active(active: bool) -> None:
+    global _keypress_thread, _keypress_stop
+    if active:
+        if _keypress_thread is not None and _keypress_thread.is_alive():
+            return
+        _keypress_stop = threading.Event()
+        _keypress_thread = threading.Thread(
+            target=_linux_keypress_loop, args=(_keypress_stop,), daemon=True,
+        )
+        _keypress_thread.start()
+    else:
+        if _keypress_stop is not None:
+            _keypress_stop.set()
+        _keypress_thread = None
+        _keypress_stop = None
 
 
 def set_active(active: bool) -> None:
@@ -161,8 +110,7 @@ def set_active(active: bool) -> None:
         return
 
     if sys.platform.startswith("linux"):
-        _set_linux_screensaver_suspended(active)
-        _set_linux_dbus_inhibited(active)
+        _set_linux_keypress_loop_active(active)
 
     if active:
         if _process is not None and _process.poll() is None:
