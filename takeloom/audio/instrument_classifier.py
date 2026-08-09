@@ -22,14 +22,15 @@ will *not* reliably distinguish two instruments with overlapping ranges
 (e.g. two different electric guitars) — that would need real timbral
 analysis, not just a frequency band.
 
-Also home to the two single-purpose test tools behind Studio Setup's
-per-instrument "Detect"/"Train" buttons (see backend.py's
-start_instrument_detect/start_instrument_train): InstrumentDetector
-(the single-instrument version of the classifier above, for "does audio
-on this channel land in this instrument's own range") and NoteCapture
-(autocorrelation-based single-note pitch capture, for "what's the actual
-Hz of the note just played" — a different question from classification,
-answered by estimate_pitch rather than _energy_in_band).
+Also home to the single-purpose test tools behind Studio Setup: NoteCapture
+(autocorrelation-based single-note pitch capture behind the per-instrument
+"Train" button, for "what's the actual Hz of the note just played" —
+answered by estimate_pitch rather than _energy_in_band) and
+ChannelActivityDetector (behind the single top-of-section "Detect" button,
+for "is there any signal at all on this instrument's own dedicated
+channel" — deliberately not frequency-based, since with all instruments
+listened to at once on their own already-distinct hardware channels,
+there's no ambiguity left for a frequency guess to resolve).
 """
 
 from __future__ import annotations
@@ -85,10 +86,9 @@ def effective_frequency_range(instrument) -> tuple[float, float]:
 
 def _energy_in_band(samples: np.ndarray, sample_rate: int, low_hz: float, high_hz: float) -> float:
     """Fraction of `samples`'s spectral energy falling within
-    [low_hz, high_hz] — the shared scoring primitive behind both
-    InstrumentClassifier (compares every configured instrument's band,
-    picks the best match) and InstrumentDetector (checks one instrument's
-    own band against a pass/fail threshold)."""
+    [low_hz, high_hz] — the scoring primitive behind InstrumentClassifier
+    (compares every configured instrument's band, picks the best
+    match)."""
     windowed = samples * np.hanning(len(samples))
     spectrum = np.abs(np.fft.rfft(windowed))
     total_energy = float(spectrum.sum())
@@ -201,53 +201,32 @@ class InstrumentClassifier:
             self._on_detected(best_name, best_score)
 
 
-class InstrumentDetector:
-    """Single-instrument version of InstrumentClassifier for Studio
-    Setup's "Detect" test: feed captured blocks via process_block();
-    on_detected(confidence) fires once, from a background thread, the
-    first time a ~1s window's energy is concentrated enough in
-    `freq_range` to call it a match (score >= `threshold`). Does nothing
-    further after that — the caller (backend.py's start_instrument_
-    detect) tears the whole test down on the first firing."""
+class ChannelActivityDetector:
+    """One per physical input channel, used by Studio Setup's single
+    top-of-section "Detect" button (backend.py's start_detect_all) to
+    confirm each configured instrument actually has signal coming in on
+    its own dedicated channel. Every instrument's channel is listened to
+    at once, so unlike InstrumentClassifier/the old per-instrument
+    Detect this needs no frequency-range guessing at all — whichever
+    channel a sound shows up on already tells you which instrument it
+    is, by construction of the input routing itself.
 
-    def __init__(
-        self, sample_rate: int, freq_range: tuple[float, float],
-        on_detected: Callable[[float], None], threshold: float = 0.5,
-    ) -> None:
-        self._sample_rate = sample_rate
-        self._freq_range = freq_range
+    on_detected() fires once, from a background thread, the first time a
+    block's peak clears the noise floor. Does nothing further after
+    that — the caller creates a fresh instance if it wants to detect
+    again on the same channel."""
+
+    def __init__(self, on_detected: Callable[[], None]) -> None:
         self._on_detected = on_detected
-        self._threshold = threshold
-        self._window_samples = int(sample_rate * _ANALYSIS_WINDOW_SECONDS)
-        self._buffer: list[np.ndarray] = []
-        self._buffered_samples = 0
         self._done = False
 
-    def process_block(self, mono: np.ndarray) -> None:
+    def process_block(self, block: np.ndarray) -> None:
         if self._done:
             return
-        block = mono[:, 0] if mono.ndim > 1 else mono
         if float(np.max(np.abs(block))) < _SILENCE_THRESHOLD:
             return
-        self._buffer.append(block.copy())
-        self._buffered_samples += len(block)
-        if self._buffered_samples < self._window_samples:
-            return
-        snapshot = self._buffer
-        self._buffer = []
-        self._buffered_samples = 0
-        threading.Thread(target=self._check, args=(snapshot,), daemon=True).start()
-
-    def _check(self, blocks: list[np.ndarray]) -> None:
-        if self._done:
-            return
-        samples = np.concatenate(blocks).astype(np.float64)
-        if len(samples) < 2:
-            return
-        score = _energy_in_band(samples, self._sample_rate, *self._freq_range)
-        if score >= self._threshold:
-            self._done = True
-            self._on_detected(score)
+        self._done = True
+        threading.Thread(target=self._on_detected, daemon=True).start()
 
 
 class NoteCapture:
@@ -258,8 +237,8 @@ class NoteCapture:
     via process_block(); pitch_hz is None if nothing periodic enough was
     found anywhere in the window (e.g. nothing was played).
 
-    Unlike InstrumentClassifier/InstrumentDetector, this doesn't silence-
-    gate individual blocks — the window has to fill up regardless of
+    Unlike InstrumentClassifier/ChannelActivityDetector, this doesn't
+    silence-gate individual blocks — the window has to fill up regardless of
     when in it the performer actually starts playing, so silence at the
     start just means fewer valid per-chunk pitch estimates once analysis
     runs, not blocks that never counted toward the window at all."""
