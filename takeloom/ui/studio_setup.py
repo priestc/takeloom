@@ -99,7 +99,15 @@ class _InputRow(ttk.Frame):
 
 class _InstrumentRow:
     """One editable instrument row, gridded directly into the shared table
-    so its columns line up exactly with the header above."""
+    so its columns line up exactly with the header above.
+
+    Detect/Train/Stop test drive the realtime frequency-range calibration
+    in audio/instrument_classifier.py (via Backend.start_instrument_
+    detect/start_instrument_train/stop_instrument_test) — this class only
+    renders the row and reports clicks upward via on_detect/on_train/
+    on_stop; StudioSetupFrame owns actually talking to the backend and
+    routing "instrument_test_status" events back to whichever row is
+    currently under test (see its _testing_row)."""
 
     def __init__(
         self,
@@ -107,10 +115,15 @@ class _InstrumentRow:
         row: int,
         input_label_names: list[str],
         on_remove,
+        on_detect,
+        on_train,
+        on_stop,
         name: str = "",
         input_label: str = "",
         full_name: str = "",
         musician: str = "",
+        freq_min_hz: float = 0.0,
+        freq_max_hz: float = 0.0,
     ) -> None:
         self._on_remove = on_remove
 
@@ -118,24 +131,41 @@ class _InstrumentRow:
         self.input_label_var = tk.StringVar(value=input_label or (input_label_names[0] if input_label_names else ""))
         self.full_name_var = tk.StringVar(value=full_name)
         self.musician_var = tk.StringVar(value=musician)
+        self.freq_min_var = tk.StringVar(value=(f"{freq_min_hz:g}" if freq_min_hz else ""))
+        self.freq_max_var = tk.StringVar(value=(f"{freq_max_hz:g}" if freq_max_hz else ""))
+        self.status_var = tk.StringVar(value="")
+
+        self.detect_button = ttk.Button(table, text="Detect", command=lambda: on_detect(self))
+        self.train_button = ttk.Button(table, text="Train", command=lambda: on_train(self))
+        self.stop_button = ttk.Button(table, text="Stop test", command=lambda: on_stop(self))
+        self.stop_button.state(["disabled"])
 
         self.widgets = [
-            ttk.Entry(table, textvariable=self.name_var, width=12),
-            ttk.Combobox(table, textvariable=self.input_label_var, values=input_label_names, state="readonly", width=13),
-            ttk.Entry(table, textvariable=self.full_name_var, width=20),
-            ttk.Entry(table, textvariable=self.musician_var, width=12),
+            ttk.Entry(table, textvariable=self.name_var, width=10),
+            ttk.Combobox(table, textvariable=self.input_label_var, values=input_label_names, state="readonly", width=12),
+            ttk.Entry(table, textvariable=self.full_name_var, width=16),
+            ttk.Entry(table, textvariable=self.musician_var, width=10),
+            ttk.Entry(table, textvariable=self.freq_min_var, width=6),
+            ttk.Entry(table, textvariable=self.freq_max_var, width=6),
+            self.detect_button,
+            self.train_button,
+            self.stop_button,
             ttk.Button(table, text="Remove", command=lambda: self._on_remove(self)),
         ]
+        self.status_label = ttk.Label(table, textvariable=self.status_var, foreground="#2a6db0", wraplength=220)
         for col, widget in enumerate(self.widgets):
-            widget.grid(row=row, column=col, sticky="w", padx=(0, 6), pady=2)
+            widget.grid(row=row, column=col, sticky="w", padx=(0, 4), pady=2)
+        self.status_label.grid(row=row, column=len(self.widgets), sticky="w", padx=(6, 0), pady=2)
 
     def set_row(self, row: int) -> None:
         for widget in self.widgets:
             widget.grid(row=row)
+        self.status_label.grid(row=row)
 
     def destroy(self) -> None:
         for widget in self.widgets:
             widget.destroy()
+        self.status_label.destroy()
 
     def to_instrument(self) -> Instrument | None:
         name = self.name_var.get().strip()
@@ -146,7 +176,34 @@ class _InstrumentRow:
             name=name, input_label=input_label,
             full_name=self.full_name_var.get().strip(),
             musician=self.musician_var.get().strip(),
+            freq_min_hz=self._parse_hz(self.freq_min_var),
+            freq_max_hz=self._parse_hz(self.freq_max_var),
         )
+
+    @staticmethod
+    def _parse_hz(var: tk.StringVar) -> float:
+        text = var.get().strip()
+        try:
+            return float(text) if text else 0.0
+        except ValueError:
+            return 0.0
+
+    # --- detect/train test state, driven by StudioSetupFrame ---
+
+    def set_status(self, text: str) -> None:
+        self.status_var.set(text)
+
+    def set_test_buttons_enabled(self, enabled: bool) -> None:
+        state = "!disabled" if enabled else "disabled"
+        self.detect_button.state([state])
+        self.train_button.state([state])
+
+    def set_stop_enabled(self, enabled: bool) -> None:
+        self.stop_button.state(["!disabled" if enabled else "disabled"])
+
+    def apply_trained_range(self, freq_min_hz: float, freq_max_hz: float) -> None:
+        self.freq_min_var.set(f"{freq_min_hz:g}")
+        self.freq_max_var.set(f"{freq_max_hz:g}")
 
 
 class StudioSetupFrame(ttk.Frame):
@@ -161,9 +218,62 @@ class StudioSetupFrame(ttk.Frame):
         self._vars: dict[str, tk.StringVar] = {}
         self._input_rows: list[_InputRow] = []
         self._instrument_rows: list[_InstrumentRow] = []
+        self._testing_row: _InstrumentRow | None = None
+
+        # Subscribed for the tab's whole lifetime (it's non-persistent —
+        # rebuilt from scratch on every visit, but __init__ itself only
+        # runs once per visit — see app.py's rebuild()) so "instrument_
+        # test_status" events reach whichever row started a Detect/Train
+        # test, and so a test still running when the tab's torn down gets
+        # stopped rather than left holding the audio hardware — see
+        # _on_destroy.
+        self.app_state.backend.on_event(self._on_backend_event)
+        self.bind("<Destroy>", self._on_destroy)
 
         ttk.Label(self, text="Loading...").pack(anchor="w")
         self._load()
+
+    def _on_destroy(self, _event: object) -> None:
+        self.app_state.backend.off_event(self._on_backend_event)
+        if self._testing_row is not None:
+            try:
+                self.app_state.backend.stop_instrument_test()
+            except BackendError:
+                pass
+
+    # --- backend events (instrument_test_status) ---
+
+    def _on_backend_event(self, event: str, data: dict) -> None:
+        self.after(0, lambda: self._handle_backend_event(event, data))
+
+    def _handle_backend_event(self, event: str, data: dict) -> None:
+        if not self.winfo_exists():
+            return
+        if event == "instrument_test_status":
+            self._handle_instrument_test_status(data)
+
+    def _handle_instrument_test_status(self, data: dict) -> None:
+        row = self._testing_row
+        if row is None:
+            return
+        row.set_status(data.get("status", ""))
+        phase = data.get("phase")
+        if phase == "trained":
+            freq_min, freq_max = data.get("freq_min_hz"), data.get("freq_max_hz")
+            if freq_min is not None and freq_max is not None:
+                row.apply_trained_range(freq_min, freq_max)
+            self._finish_instrument_test()
+        elif phase in ("detected", "idle"):
+            self._finish_instrument_test()
+        # "detecting"/"train_high"/"train_low" — test still running, just
+        # a status-text update; nothing else to do.
+
+    def _finish_instrument_test(self) -> None:
+        if self._testing_row is not None:
+            self._testing_row.set_stop_enabled(False)
+        self._testing_row = None
+        for row in self._instrument_rows:
+            row.set_test_buttons_enabled(True)
 
     # --- loading ---
 
@@ -365,17 +475,29 @@ class StudioSetupFrame(ttk.Frame):
             row += 1
             return row
 
+        ttk.Label(
+            self, text="Min/Max Hz is the frequency range the Record tab's live instrument detector and "
+                        "\"Detect\" below compare against — leave blank to fall back to a guess from the "
+                        "instrument's name. \"Detect\" confirms the range actually matches what's plugged in; "
+                        "\"Train\" sets it automatically from two notes you play.",
+            foreground="#666666", wraplength=760, justify="left",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(2, 6))
+        row += 1
+
         self.table = ttk.Frame(self)
         self.table.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         row += 1
 
-        for col, text in enumerate(["Name", "Input", "Full name", "Musician", ""]):
+        for col, text in enumerate(
+            ["Name", "Input", "Full name", "Musician", "Min Hz", "Max Hz", "", "", "", "", "Status"]
+        ):
             ttk.Label(self.table, text=text).grid(row=0, column=col, sticky="w", padx=(0, 6))
 
         for inst in self.config_obj.instruments:
             self._add_instrument_row(
                 input_label_names, name=inst.name, input_label=inst.input_label,
                 full_name=inst.full_name, musician=inst.musician,
+                freq_min_hz=inst.freq_min_hz, freq_max_hz=inst.freq_max_hz,
             )
         if not self.config_obj.instruments:
             self._add_instrument_row(input_label_names)
@@ -392,14 +514,17 @@ class StudioSetupFrame(ttk.Frame):
 
     def _add_instrument_row(
         self, input_label_names: list[str], name: str = "", input_label: str = "",
-        full_name: str = "", musician: str = "",
+        full_name: str = "", musician: str = "", freq_min_hz: float = 0.0, freq_max_hz: float = 0.0,
     ) -> None:
         if self.table is None:
             return
         row_index = len(self._instrument_rows) + 1  # row 0 is the header
         row = _InstrumentRow(
             self.table, row_index, input_label_names, self._remove_instrument_row,
+            on_detect=self._on_detect_instrument, on_train=self._on_train_instrument,
+            on_stop=self._on_stop_instrument_test,
             name=name, input_label=input_label, full_name=full_name, musician=musician,
+            freq_min_hz=freq_min_hz, freq_max_hz=freq_max_hz,
         )
         self._instrument_rows.append(row)
 
@@ -417,7 +542,13 @@ class StudioSetupFrame(ttk.Frame):
                 return label
         return _VAULT_MODE_LABELS[0][1]  # "Local only" — the safe default for an unrecognized config value
 
-    def _on_save(self) -> None:
+    def _on_save(self, on_success=None) -> None:
+        """`on_success`, if given, runs after a successful save — used by
+        Detect/Train (see _on_detect_instrument/_on_train_instrument) to
+        make sure the instrument the backend is about to test against
+        (looked up from the *persisted* config, not this form's in-memory
+        state) actually reflects whatever's currently in the row, rather
+        than testing stale settings from the last save."""
         for attr, _label in FIELDS:
             setattr(self.config_obj, attr, self._vars[attr].get())
         for attr, _label in VAULT_FIELDS:
@@ -444,11 +575,11 @@ class StudioSetupFrame(ttk.Frame):
                 error = None
             except BackendError as e:
                 error = str(e)
-            self.after(0, lambda: self._on_saved(error))
+            self.after(0, lambda: self._on_saved(error, on_success))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_saved(self, error: str | None) -> None:
+    def _on_saved(self, error: str | None, on_success=None) -> None:
         if not self.winfo_exists():
             return
         self.save_button.state(["!disabled"])
@@ -457,3 +588,61 @@ class StudioSetupFrame(ttk.Frame):
             return
         target = f"remote ({self.app_state.remote_name})" if self.app_state.backend.is_remote() else "local config"
         self.status_var.set(f"Saved to {target}")
+        if on_success:
+            on_success()
+
+    # --- instrument detect/train ---
+
+    def _on_detect_instrument(self, row: _InstrumentRow) -> None:
+        if self._testing_row is not None:
+            return  # a test is already running (its buttons are disabled, but guard anyway)
+        inst = row.to_instrument()
+        if inst is None:
+            messagebox.showerror("Cannot test", "Enter a name and input for this instrument first.")
+            return
+        self._on_save(on_success=lambda: self._begin_instrument_test(row, inst.name, is_train=False))
+
+    def _on_train_instrument(self, row: _InstrumentRow) -> None:
+        if self._testing_row is not None:
+            return
+        inst = row.to_instrument()
+        if inst is None:
+            messagebox.showerror("Cannot test", "Enter a name and input for this instrument first.")
+            return
+        self._on_save(on_success=lambda: self._begin_instrument_test(row, inst.name, is_train=True))
+
+    def _begin_instrument_test(self, row: _InstrumentRow, instrument_name: str, is_train: bool) -> None:
+        self._testing_row = row
+        for r in self._instrument_rows:
+            r.set_test_buttons_enabled(False)
+        row.set_stop_enabled(True)
+        row.set_status("Starting...")
+        backend = self.app_state.backend
+
+        def worker() -> None:
+            try:
+                if is_train:
+                    backend.start_instrument_train(instrument_name)
+                else:
+                    backend.start_instrument_detect(instrument_name)
+                error = None
+            except BackendError as e:
+                error = str(e)
+            self.after(0, lambda: self._on_instrument_test_start_result(error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_instrument_test_start_result(self, error: str | None) -> None:
+        if not self.winfo_exists():
+            return
+        if error:
+            messagebox.showerror("Cannot start test", error)
+            self._finish_instrument_test()
+
+    def _on_stop_instrument_test(self, _row: _InstrumentRow) -> None:
+        # Fire-and-forget: the resulting "instrument_test_status" (phase
+        # "idle") event arrives through the normal subscription and is
+        # what actually clears _testing_row / re-enables the other rows —
+        # see _handle_instrument_test_status.
+        backend = self.app_state.backend
+        threading.Thread(target=backend.stop_instrument_test, daemon=True).start()

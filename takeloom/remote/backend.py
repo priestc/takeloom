@@ -230,6 +230,17 @@ class RemoteBackend(Backend):
     def stop_latency_test(self) -> None:
         raise BackendError("Camera latency measurement isn't available over Remote connections yet.")
 
+    # --- instrument detect/train (not supported over Remote; see StudioSetupFrame) ---
+
+    def start_instrument_detect(self, instrument_name: str) -> None:
+        raise BackendError("Instrument detect/train isn't available over Remote connections yet.")
+
+    def start_instrument_train(self, instrument_name: str) -> None:
+        raise BackendError("Instrument detect/train isn't available over Remote connections yet.")
+
+    def stop_instrument_test(self) -> None:
+        raise BackendError("Instrument detect/train isn't available over Remote connections yet.")
+
     # --- video check (not supported over Remote; see RecordFrame) ---
 
     def start_video_check(self, req: StartRecordingRequest) -> None:
