@@ -271,6 +271,12 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
         if session_video_ok:
             session_video_raw.unlink(missing_ok=True)
             session_mix_flac.unlink(missing_ok=True)
+            # The instrument-only track muxed into session_video.mp4 above is a
+            # lossless, bit-identical copy of session.flac's samples, so once
+            # the mux succeeds this standalone file is pure redundancy. Kept
+            # only for audio-only sessions (no camera), where it's the sole
+            # recording.
+            session_flac.unlink(missing_ok=True)
 
     take_word = "take" if saved == 1 else "takes"
     summary = f"Session processed: {saved} completed {take_word} saved"

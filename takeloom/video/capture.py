@@ -316,6 +316,8 @@ def mux_video_audio(
         "-c:a:1", "flac",
         "-metadata:s:a:0", "title=Mix",
         "-metadata:s:a:1", "title=Instrument Only",
+        "-disposition:a:0", "0",
+        "-disposition:a:1", "default",
         "-shortest",
         "-movflags", "+faststart",
         str(output_path),
@@ -383,6 +385,8 @@ def clip_session_video(
         "-c:a:1", "flac",
         "-metadata:s:a:0", "title=Mix",
         "-metadata:s:a:1", "title=Instrument Only",
+        "-disposition:a:0", "0",
+        "-disposition:a:1", "default",
         "-movflags", "+faststart",
         str(output_path),
     ]
