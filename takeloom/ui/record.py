@@ -187,6 +187,19 @@ class RecordFrame(ttk.Frame):
         )
         row += 1
 
+        # Live best-guess from the realtime instrument classifier (see
+        # backend.py's "instrument_detected" event / audio/
+        # instrument_classifier.py) — a testing/calibration aid to compare
+        # against the actual instrument being played, not (yet) something
+        # that changes what gets recorded. Blank outside an open session —
+        # cleared in _handle_backend_event's phase=="idle" handling.
+        self.detected_instrument_var = tk.StringVar(value="")
+        ttk.Label(
+            left, textvariable=self.detected_instrument_var,
+            font=("TkDefaultFont", 28, "bold"), foreground="#2a6db0",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 12))
+        row += 1
+
         instrument_names = [inst.name for inst in self.config_obj.instruments]
         default_instrument = self.config_obj.last_selected_instrument
         if default_instrument not in instrument_names:
@@ -1004,7 +1017,11 @@ class RecordFrame(ttk.Frame):
                 self._set_controls_enabled(self._phase == "idle")
                 if self._phase == "idle":
                     self._refresh_setlist_from_server()
+                    self.detected_instrument_var.set("")
                 self._update_start_button_state()
+        elif event == "instrument_detected":
+            if "instrument" in data:
+                self.detected_instrument_var.set(data["instrument"].upper())
         elif event == "video_check_status":
             if "status" in data:
                 self.status_var.set(data["status"])

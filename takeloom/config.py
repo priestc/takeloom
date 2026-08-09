@@ -29,6 +29,13 @@ class Instrument:
     input_label: str   # references an InputLabel.label
     full_name: str = ""  # manufacturer and model, e.g. "Fender American Stratocaster"
     musician: str = ""
+    # Expected fundamental-frequency range for the realtime instrument
+    # classifier (see audio/instrument_classifier.py) — both 0.0 (the
+    # default) means "not set", which falls back to a name-keyword-based
+    # default range instead. Hand-edit these in studio_config.json to tune
+    # the classifier; no Studio Setup UI for them yet.
+    freq_min_hz: float = 0.0
+    freq_max_hz: float = 0.0
 
 
 @dataclass

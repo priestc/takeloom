@@ -2070,6 +2070,20 @@ class LocalBackend(Backend):
         self._apply_hardware_direct_monitor(input_info, self._monitoring_mode == "recording")
         engine.start()
 
+        # Best-effort, testing-stage feature: continuously guesses which
+        # configured instrument is actually playing from the live input's
+        # frequency content, and surfaces it via "instrument_detected" so
+        # the Record tab can show it — purely informational for now, does
+        # not touch `inst`/session metadata. See audio/instrument_classifier.py.
+        if config.instruments:
+            from .audio.instrument_classifier import InstrumentClassifier
+
+            def _on_instrument_detected(name: str, confidence: float) -> None:
+                self._emit("instrument_detected", {"instrument": name, "confidence": confidence})
+
+            classifier = InstrumentClassifier(config.sample_rate, config.instruments, _on_instrument_detected)
+            engine.set_instrument_sink(classifier.process_block)
+
         session_name = wall_timestamp().replace(":", "-").replace(" ", "_")
         from .vault import vault_session_dir
         session_dir = ensure_dir(vault_session_dir(config, project.name, f"{session_name}_{inst.name}"))
@@ -2206,6 +2220,7 @@ class LocalBackend(Backend):
 
             session.engine.set_on_song_end(None)
             session.engine.set_stream_sink(None)
+            session.engine.set_instrument_sink(None)
             session.engine.stop()  # closes the stream and every recorder on it (session/mix)
             self._start_monitoring_locked()
 

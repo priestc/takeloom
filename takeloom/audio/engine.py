@@ -72,6 +72,7 @@ class AudioEngine:
         self._backing_peak_level: float = 0.0
         self._on_song_end: Callable[[], None] | None = None
         self._stream_sink: Callable[[np.ndarray], None] | None = None
+        self._instrument_sink: Callable[[np.ndarray], None] | None = None
 
     @property
     def peak_level(self) -> float:
@@ -92,6 +93,18 @@ class AudioEngine:
         mix_recorder writes to disk, just piped live too. sink is called
         from this callback's own realtime thread, so it must not block."""
         self._stream_sink = sink
+
+    def set_instrument_sink(self, sink: Callable[[np.ndarray], None] | None) -> None:
+        """Live-safe set/clear of an extra consumer of the raw captured
+        instrument input (see _callback's mono — the same signal
+        session_recorder/recorder write to disk and _peak_level is
+        computed from) — used by the realtime instrument classifier
+        (audio/instrument_classifier.py) to see exactly what's being
+        recorded. Called from this callback's own realtime thread, so —
+        same requirement as set_stream_sink — it must not block; the
+        classifier itself only does cheap work here and defers the actual
+        analysis to a background thread."""
+        self._instrument_sink = sink
 
     def set_compressor_settings(self, settings: CompressorSettings) -> None:
         """Swap in new compressor settings, live — safe to call from any
@@ -172,6 +185,8 @@ class AudioEngine:
 
         # Update peak level for VU meter
         self._peak_level = float(np.max(np.abs(mono)))
+        if self._instrument_sink:
+            self._instrument_sink(mono)
 
         # Playback output: mix backing track + input monitoring
         mix_position = self.mixer.position  # captured before read() advances it — see stream_mix below
