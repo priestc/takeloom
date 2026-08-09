@@ -1047,57 +1047,104 @@ class LocalBackend(Backend):
 
     # --- sessions (browse/correct past recordings) ---
 
-    def _session_dir_path(self, session_dir: str) -> Path:
+    def _local_session_dir_path(self, session_dir: str) -> Path | None:
+        """session_dir's local directory, or None if it isn't (or isn't
+        currently) present on local disk — which is normal and expected,
+        not an error, once session_vault_mode "remote" has pushed and
+        pruned it (see vault.sync_and_maybe_prune). Callers needing its
+        session_log.json either way should go through _read_session_log,
+        which falls back to the backup server transparently."""
         from .vault import vault_root
         path = vault_root(self.get_config()) / "sessions" / session_dir
-        if not path.is_dir():
-            raise BackendError(f"Session '{session_dir}' not found.")
-        return path
+        return path if path.is_dir() else None
 
-    def _read_session_log(self, session_dir: str) -> tuple[Path, dict]:
-        log_path = self._session_dir_path(session_dir) / "session_log.json"
-        if not log_path.exists():
-            raise BackendError(f"Session '{session_dir}' has no session_log.json.")
-        try:
-            data = json.loads(log_path.read_text())
-        except json.JSONDecodeError as e:
-            raise BackendError(f"Session '{session_dir}' has a corrupt session_log.json: {e}") from e
-        return log_path, data
-
-    def list_sessions(self) -> list[dict]:
-        from .vault import vault_root
-        sessions_dir = vault_root(self.get_config()) / "sessions"
-        if not sessions_dir.exists():
-            return []
-        results = []
-        for session_dir in sessions_dir.iterdir():
-            if not session_dir.is_dir():
-                continue
-            log_path = session_dir / "session_log.json"
+    def _read_session_log(self, session_dir: str) -> tuple[Path | None, dict]:
+        """session_dir's session_log.json, from local disk if it's there,
+        else fetched fresh from the backup server (see sync.
+        fetch_remote_session_log) if session_vault_mode allows it —
+        never written to local disk in that case, so there's nothing
+        left behind to double as a second, possibly-stale copy; the
+        vault (wherever it currently lives) stays the only copy. Returns
+        (log_path, data) — log_path is None for a remote-only session,
+        which correct_session_instrument checks to decide whether to
+        write the correction back to disk or over SSH instead."""
+        local_dir = self._local_session_dir_path(session_dir)
+        if local_dir is not None:
+            log_path = local_dir / "session_log.json"
             if not log_path.exists():
-                continue
+                raise BackendError(f"Session '{session_dir}' has no session_log.json.")
             try:
                 data = json.loads(log_path.read_text())
-            except (json.JSONDecodeError, OSError):
-                continue
-            events = data.get("events", [])
-            track_names = []
-            for e in events:
-                name = e.get("track_name")
-                if name and name not in track_names:
-                    track_names.append(name)
-            results.append({
-                "session_dir": session_dir.name,
-                # events[0]'s wall_time (real, human-typed timestamp) rather
-                # than parsed back out of the directory name, which is
-                # filename-sanitized and thus lossy/ambiguous.
-                "date": events[0]["wall_time"] if events else "",
-                "project": data.get("project", ""),
-                "instrument": data.get("instrument", ""),
-                "track_names": track_names,
-            })
+            except json.JSONDecodeError as e:
+                raise BackendError(f"Session '{session_dir}' has a corrupt session_log.json: {e}") from e
+            return log_path, data
+
+        config = self.get_config()
+        if config.session_vault_mode in ("remote", "both") and config.backup_server:
+            from .sync import fetch_remote_session_log
+            data = fetch_remote_session_log(config.backup_server, session_dir)
+            if data is not None:
+                return None, data
+        raise BackendError(f"Session '{session_dir}' not found.")
+
+    def list_sessions(self) -> list[dict]:
+        """Every past session this machine can currently see: whatever's
+        on local disk, plus — if session_vault_mode allows a backup
+        server — whatever's on the backup server that isn't already
+        accounted for locally (the common case in "remote" mode: vault.
+        sync_and_maybe_prune deletes each session's local directory
+        right after syncing it, so almost everything normally lives only
+        there). Local always wins on a name collision — vault.py's own
+        migration/collision-avoidance already guarantees names don't
+        collide in practice, but preferring local (the copy this machine
+        can actually still write to) is the safer tiebreak regardless."""
+        config = self.get_config()
+        from .vault import vault_root
+        sessions_dir = vault_root(config) / "sessions"
+        results = []
+        seen = set()
+        if sessions_dir.exists():
+            for session_dir in sessions_dir.iterdir():
+                if not session_dir.is_dir():
+                    continue
+                log_path = session_dir / "session_log.json"
+                if not log_path.exists():
+                    continue
+                try:
+                    data = json.loads(log_path.read_text())
+                except (json.JSONDecodeError, OSError):
+                    continue
+                results.append(self._session_summary(session_dir.name, data))
+                seen.add(session_dir.name)
+
+        if config.session_vault_mode in ("remote", "both") and config.backup_server:
+            from .sync import fetch_remote_session_logs
+            for name, data in fetch_remote_session_logs(config.backup_server).items():
+                if name in seen:
+                    continue
+                results.append(self._session_summary(name, data))
+
         results.sort(key=lambda s: s["date"], reverse=True)
         return results
+
+    @staticmethod
+    def _session_summary(session_dir_name: str, data: dict) -> dict:
+        events = data.get("events", [])
+        track_names = []
+        for e in events:
+            name = e.get("track_name")
+            if name and name not in track_names:
+                track_names.append(name)
+        return {
+            "session_dir": session_dir_name,
+            # events[0]'s wall_time (real, human-typed timestamp) rather
+            # than parsed back out of the directory name, which is
+            # filename-sanitized and thus lossy/ambiguous.
+            "date": events[0]["wall_time"] if events else "",
+            "project": data.get("project", ""),
+            "instrument": data.get("instrument", ""),
+            "track_names": track_names,
+        }
 
     def get_session_detail(self, session_dir: str) -> dict:
         _, data = self._read_session_log(session_dir)
@@ -1152,7 +1199,16 @@ class LocalBackend(Backend):
         # getting it wrong.
         data["instrument"] = inst.name
         data["instrument_full_name"] = inst.full_name
-        log_path.write_text(json.dumps(data, indent=2))
+        if log_path is not None:
+            log_path.write_text(json.dumps(data, indent=2))
+            return
+        # Remote-only session (see _read_session_log) — write the
+        # correction back over SSH instead of to a local file, so the
+        # backup server stays the one true copy rather than this machine
+        # quietly growing a local fork of it.
+        from .sync import write_remote_session_log
+        if not write_remote_session_log(config.backup_server, session_dir, data):
+            raise BackendError(f"Could not write the correction back to {config.backup_server}.")
 
     def reassign_take(self, session_dir: str, track_name: str, old_instrument: str, new_instrument: str) -> None:
         config = self.get_config()

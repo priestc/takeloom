@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import subprocess
+import tempfile
 from pathlib import Path
 
 import click
@@ -126,3 +128,110 @@ def sync_vault_file_down(remote: str, vault_relative: str, local_path: Path) -> 
         return result.returncode == 0 and local_path.exists()
     except (FileNotFoundError, OSError):
         return False
+
+
+def sync_vault_file_up(local_path: Path, vault_relative: str, remote: str) -> bool:
+    """Upload one local file to `vault_relative`'s path relative to the
+    vault root on the backup server — the upload-direction counterpart to
+    sync_vault_file_down, used by backend.py's correct_session_instrument
+    to write a correction back to a session_log.json that only exists on
+    the backup server (session_vault_mode "remote" already pruned the
+    local copy — see vault.sync_and_maybe_prune)."""
+    parent_relative = os.path.dirname(vault_relative)
+    if parent_relative:
+        _ensure_remote_dir(remote, parent_relative)
+    dest = _remote_path(remote, vault_relative)
+    cmd = ["rsync", "-avz", "--checksum", str(local_path), dest]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return result.returncode == 0
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def fetch_remote_session_log(remote: str, session_dir_name: str) -> dict | None:
+    """One session's session_log.json, fetched fresh from the backup
+    server via a scratch temp file that's deleted immediately after —
+    never written into the local vault, so there's nothing here to
+    double as a second, possibly-stale copy of session data. Used by
+    Backend.get_session_detail/correct_session_instrument/reassign_take
+    when session_vault_mode "remote" has already pruned the session's
+    local directory. Returns None on any failure (host unreachable,
+    session doesn't exist there either, malformed JSON)."""
+    vault_relative = f"sessions/{session_dir_name}/session_log.json"
+    with tempfile.TemporaryDirectory() as tmp:
+        local_path = Path(tmp) / "session_log.json"
+        if not sync_vault_file_down(remote, vault_relative, local_path):
+            return None
+        try:
+            return json.loads(local_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+
+
+def write_remote_session_log(remote: str, session_dir_name: str, data: dict) -> bool:
+    """Write `data` back as session_dir_name's session_log.json on the
+    backup server, via the same kind of scratch temp file fetch_remote_
+    session_log uses — nothing persists locally either way. Used by
+    correct_session_instrument for a session that only exists remotely."""
+    vault_relative = f"sessions/{session_dir_name}/session_log.json"
+    with tempfile.TemporaryDirectory() as tmp:
+        local_path = Path(tmp) / "session_log.json"
+        local_path.write_text(json.dumps(data, indent=2))
+        return sync_vault_file_up(local_path, vault_relative, remote)
+
+
+# Marks where one session's session_log.json contents begin in
+# fetch_remote_session_logs' single combined SSH round-trip — chosen to be
+# extremely unlikely to collide with anything inside real JSON content.
+_SESSION_LOG_MARKER = "###TAKELOOM_SESSION###"
+
+
+def fetch_remote_session_logs(remote: str) -> dict[str, dict]:
+    """Every session's session_log.json on the backup server's vault/
+    sessions/ folder, in a single SSH round-trip — used by Backend.
+    list_sessions() when session_vault_mode is "remote" (vault.
+    sync_and_maybe_prune deletes each session's local directory right
+    after syncing it, so there's normally nothing local left to scan at
+    all). One round-trip per session (as fetch_remote_session_log does)
+    would be correct too, just slow once there's a real history of
+    sessions to browse — this instead has the remote shell itself walk
+    every session directory and print each session_log.json prefixed
+    with a marker line, parsed back apart here. Best-effort throughout:
+    returns {} on any failure (host unreachable, ssh/vault path missing,
+    a malformed entry is just skipped) rather than raising — this is a
+    convenience listing the vault itself never depends on."""
+    if ":" not in remote:
+        return {}
+    host, path = remote.split(":", 1)
+    remote_sessions_dir = os.path.join(path, "sessions")
+    script = (
+        f"for d in {shlex.quote(remote_sessions_dir)}/*/; do "
+        f'n=$(basename "$d"); '
+        f'if [ -f "$d/session_log.json" ]; then '
+        f'echo "{_SESSION_LOG_MARKER}$n"; cat "$d/session_log.json"; '
+        f"fi; done"
+    )
+    try:
+        result = subprocess.run(["ssh", host, script], capture_output=True, text=True, timeout=30)
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return {}
+    if result.returncode != 0 or not result.stdout.strip():
+        return {}
+
+    logs: dict[str, dict] = {}
+    # A plain split on the marker, not a line-by-line scan: a
+    # session_log.json with no trailing newline (the common case — none
+    # of backend.py's own writes add one) runs straight into the next
+    # marker's echo on the same line, so anything anchored to "the marker
+    # starts a fresh line" silently misses every session after the first.
+    for chunk in result.stdout.split(_SESSION_LOG_MARKER)[1:]:  # [0] is empty/preamble before the first marker
+        newline = chunk.find("\n")
+        if newline == -1:
+            continue
+        name = chunk[:newline].strip()
+        try:
+            logs[name] = json.loads(chunk[newline + 1:])
+        except json.JSONDecodeError:
+            continue
+    return logs
