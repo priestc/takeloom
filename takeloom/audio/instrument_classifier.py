@@ -12,8 +12,9 @@ follows for the same reason (this and the compressor both run in or near
 the realtime sd.Stream callback).
 
 The heuristic: each Instrument has an expected fundamental-frequency
-range (StudioConfig's freq_min_hz/freq_max_hz, or a name-keyword default
-below if unset). Every ~1 second of captured audio, an FFT is taken and
+range (StudioConfig's freq_min_hz/freq_max_hz, or a default keyed off
+its label — see _DEFAULT_RANGES_BY_LABEL — if unset). Every ~1 second
+of captured audio, an FFT is taken and
 scored against every configured instrument's range by what fraction of
 the spectrum's total energy falls inside that band; the highest-scoring
 instrument wins. This distinguishes instruments whose fundamentals occupy
@@ -46,22 +47,26 @@ from typing import Callable
 
 import numpy as np
 
-# (keyword to match against Instrument.name/full_name, (low_hz, high_hz))
-# checked in order — first match wins. Rough fundamental-frequency
-# registers, not scientific: enough to tell "clearly low" (bass) from
-# "clearly high" (vocals/keys) apart, which is the common real mix-up.
-_DEFAULT_RANGES_BY_KEYWORD: list[tuple[str, tuple[float, float]]] = [
-    ("bass", (40.0, 400.0)),
-    ("kick", (40.0, 200.0)),
-    ("drum", (60.0, 5000.0)),
-    ("guitar", (80.0, 1200.0)),
-    ("vox", (100.0, 1100.0)),
-    ("vocal", (100.0, 1100.0)),
-    ("sing", (100.0, 1100.0)),
-    ("piano", (27.0, 4200.0)),
-    ("keys", (27.0, 4200.0)),
-    ("synth", (27.0, 4200.0)),
-]
+from ..config import INSTRUMENT_LABELS
+
+# Instrument.label -> (low_hz, high_hz) default. Rough fundamental-
+# frequency registers, not scientific: enough to tell "clearly low"
+# (bass) from "clearly high" (keys) apart, which is the common real
+# mix-up. Every entry in INSTRUMENT_LABELS should have one here;
+# effective_frequency_range() falls back to _FALLBACK_RANGE for any
+# that doesn't (e.g. a label added to one list but not the other).
+_DEFAULT_RANGES_BY_LABEL: dict[str, tuple[float, float]] = {
+    "acoustic-guitar": (80.0, 1200.0),
+    "electric-guitar": (80.0, 1200.0),
+    "electric-bass": (40.0, 400.0),
+    "electric-bass-fretless": (40.0, 400.0),
+    "drums": (60.0, 5000.0),
+    "piano": (27.0, 4200.0),
+    "organ": (27.0, 4200.0),
+}
+assert set(_DEFAULT_RANGES_BY_LABEL) == set(INSTRUMENT_LABELS), (
+    "_DEFAULT_RANGES_BY_LABEL is out of sync with config.INSTRUMENT_LABELS"
+)
 _FALLBACK_RANGE = (60.0, 2000.0)
 
 # Below this peak amplitude a block is treated as silence/noise floor and
@@ -79,15 +84,12 @@ _ANALYSIS_WINDOW_SECONDS = 1.0
 def effective_frequency_range(instrument) -> tuple[float, float]:
     """The (low_hz, high_hz) range to classify `instrument` against —
     its own configured freq_min_hz/freq_max_hz if both are set, otherwise
-    a name-keyword default (see _DEFAULT_RANGES_BY_KEYWORD), otherwise
-    _FALLBACK_RANGE."""
+    the default for its label (see _DEFAULT_RANGES_BY_LABEL), otherwise
+    _FALLBACK_RANGE (no label set, e.g. a config saved before that field
+    existed and not yet resaved through Studio Setup)."""
     if instrument.freq_min_hz > 0.0 and instrument.freq_max_hz > instrument.freq_min_hz:
         return (instrument.freq_min_hz, instrument.freq_max_hz)
-    haystack = f"{instrument.name} {instrument.full_name}".lower()
-    for keyword, rng in _DEFAULT_RANGES_BY_KEYWORD:
-        if keyword in haystack:
-            return rng
-    return _FALLBACK_RANGE
+    return _DEFAULT_RANGES_BY_LABEL.get(instrument.label, _FALLBACK_RANGE)
 
 
 def _energy_in_band(samples: np.ndarray, sample_rate: int, low_hz: float, high_hz: float) -> float:
