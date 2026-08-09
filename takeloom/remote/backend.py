@@ -106,6 +106,28 @@ class RemoteBackend(Backend):
             {"project_name": project_name, "label": label, "filter_criteria": filter_criteria},
         )
 
+    # --- sessions (browse/correct past recordings) ---
+
+    def list_sessions(self) -> list[dict]:
+        return self._client.call("list_sessions", {})["sessions"]
+
+    def get_session_detail(self, session_dir: str) -> dict:
+        return self._client.call("get_session_detail", {"session_dir": session_dir})
+
+    def correct_session_instrument(self, session_dir: str, new_instrument: str) -> None:
+        self._client.call(
+            "correct_session_instrument", {"session_dir": session_dir, "new_instrument": new_instrument},
+        )
+
+    def reassign_take(self, session_dir: str, track_name: str, old_instrument: str, new_instrument: str) -> None:
+        self._client.call(
+            "reassign_take",
+            {
+                "session_dir": session_dir, "track_name": track_name,
+                "old_instrument": old_instrument, "new_instrument": new_instrument,
+            },
+        )
+
     # --- inspiration ---
 
     def search_inspiration_artists(self, partial: str) -> list[str]:

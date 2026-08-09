@@ -73,6 +73,18 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
         return backend.add_youtube_backing_track(args["project_name"], args["url"])
     if op == "add_inspiration_filter_slot":
         return backend.add_inspiration_filter_slot(args["project_name"], args["label"], args["filter_criteria"])
+    if op == "list_sessions":
+        return {"sessions": backend.list_sessions()}
+    if op == "get_session_detail":
+        return backend.get_session_detail(args["session_dir"])
+    if op == "correct_session_instrument":
+        backend.correct_session_instrument(args["session_dir"], args["new_instrument"])
+        return {}
+    if op == "reassign_take":
+        backend.reassign_take(
+            args["session_dir"], args["track_name"], args["old_instrument"], args["new_instrument"],
+        )
+        return {}
     if op == "search_inspiration_artists":
         return {"suggestions": backend.search_inspiration_artists(args["partial"])}
     if op == "search_inspiration_by_filter":

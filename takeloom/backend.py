@@ -31,7 +31,7 @@ from typing import Callable
 from .audio.filters import CompressorSettings
 from .audio.scarlett2_direct_monitor import FOCUSRITE_DEVICE_NAME, set_channel_gain
 from .config import DEFAULT_CONFIG_PATH, StudioConfig
-from .project import Project, Setlist, TrackEntry
+from .project import Project, Setlist, TakeInfo, TrackEntry
 from .utils import ensure_dir, timestamp_now, wall_timestamp
 
 
@@ -173,6 +173,66 @@ class Backend(ABC):
         entry's duration_seconds is set to the average across every
         currently-matching track (see inspiration.average_duration),
         since the slot has no single fixed song of its own."""
+        ...
+
+    # --- sessions (browse/correct past recordings) ---
+
+    @abstractmethod
+    def list_sessions(self) -> list[dict]:
+        """Every past session found under the vault's sessions/ directory
+        (see vault.vault_session_dir), newest first: each dict has
+        `session_dir` (opaque id — pass back to the other session methods),
+        `date` (session_log.json's own wall_time, not derived from the
+        directory name, which is filename-sanitized and thus lossy),
+        `project`, `instrument`, and `track_names` (deduplicated, from the
+        session's logged events). Only sessions still present on local
+        disk — one already pruned to a remote-only vault (session_vault_
+        mode "remote", see vault.sync_and_maybe_prune) won't show up here."""
+        ...
+
+    @abstractmethod
+    def get_session_detail(self, session_dir: str) -> dict:
+        """Full session_log.json contents for `session_dir` (a `session_dir`
+        value from list_sessions()), plus, for each track name it touched,
+        whatever take (if any) `preferred_takes` currently holds for it
+        under the session's own logged instrument — so the UI can show
+        "here's what's currently filed" before offering to reassign it.
+        Each track's entry also reports whether it was an inspiration
+        filter-slot draw (session_log.json's filter_slot_draws) — those
+        aren't offered for reassign_take (see its docstring)."""
+        ...
+
+    @abstractmethod
+    def correct_session_instrument(self, session_dir: str, new_instrument: str) -> None:
+        """Fix the historical record alone: rewrite session_log.json's
+        instrument/instrument_full_name fields (pulled from `new_instrument`
+        in the current StudioConfig). Does not touch any take file,
+        setlist.json, the shared inspiration-take index, or the session
+        directory's own name (its instrument suffix is cosmetic — nothing
+        reads it back out) — see reassign_take for the take-file side, a
+        separate and more consequential action. Independent of
+        reassign_take: calling this first does not change what
+        reassign_take treats as the take's old instrument, since that's
+        passed in explicitly rather than re-read from this same field."""
+        ...
+
+    @abstractmethod
+    def reassign_take(self, session_dir: str, track_name: str, old_instrument: str, new_instrument: str) -> None:
+        """Re-file one specific take — the one currently sitting in
+        `track_name`'s preferred_takes under `old_instrument` — under
+        `new_instrument` instead: renames the take file(s) on disk, and
+        re-keys it in the project's setlist.json (and, for an inspiration-
+        sourced track, the shared vault-wide inspiration_takes.json index
+        too). `old_instrument` is passed explicitly (typically whatever
+        get_session_detail's `current_take` reported) rather than re-read
+        from session_dir's session_log.json, so this gives the right
+        answer regardless of whether correct_session_instrument has
+        already been called on the same session. Raises BackendError if
+        `track_name` isn't one of session_dir's tracks, if it was an
+        inspiration filter-slot draw (no reliable stored link from an old
+        session back to exactly which shared-index entry it produced —
+        see the Sessions tab's docs), or if there's no take currently
+        filed under `old_instrument` to reassign."""
         ...
 
     # --- inspiration ---
@@ -909,6 +969,181 @@ class LocalBackend(Backend):
             duration = 0.0
         entry = project.add_inspiration_filter_slot(label, filter_criteria, duration_seconds=duration)
         return entry.to_dict()
+
+    # --- sessions (browse/correct past recordings) ---
+
+    def _session_dir_path(self, session_dir: str) -> Path:
+        from .vault import vault_root
+        path = vault_root(self.get_config()) / "sessions" / session_dir
+        if not path.is_dir():
+            raise BackendError(f"Session '{session_dir}' not found.")
+        return path
+
+    def _read_session_log(self, session_dir: str) -> tuple[Path, dict]:
+        log_path = self._session_dir_path(session_dir) / "session_log.json"
+        if not log_path.exists():
+            raise BackendError(f"Session '{session_dir}' has no session_log.json.")
+        try:
+            data = json.loads(log_path.read_text())
+        except json.JSONDecodeError as e:
+            raise BackendError(f"Session '{session_dir}' has a corrupt session_log.json: {e}") from e
+        return log_path, data
+
+    def list_sessions(self) -> list[dict]:
+        from .vault import vault_root
+        sessions_dir = vault_root(self.get_config()) / "sessions"
+        if not sessions_dir.exists():
+            return []
+        results = []
+        for session_dir in sessions_dir.iterdir():
+            if not session_dir.is_dir():
+                continue
+            log_path = session_dir / "session_log.json"
+            if not log_path.exists():
+                continue
+            try:
+                data = json.loads(log_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            events = data.get("events", [])
+            track_names = []
+            for e in events:
+                name = e.get("track_name")
+                if name and name not in track_names:
+                    track_names.append(name)
+            results.append({
+                "session_dir": session_dir.name,
+                # events[0]'s wall_time (real, human-typed timestamp) rather
+                # than parsed back out of the directory name, which is
+                # filename-sanitized and thus lossy/ambiguous.
+                "date": events[0]["wall_time"] if events else "",
+                "project": data.get("project", ""),
+                "instrument": data.get("instrument", ""),
+                "track_names": track_names,
+            })
+        results.sort(key=lambda s: s["date"], reverse=True)
+        return results
+
+    def get_session_detail(self, session_dir: str) -> dict:
+        _, data = self._read_session_log(session_dir)
+        instrument = data.get("instrument", "")
+        project_name = data.get("project", "")
+        filter_slot_indices = {int(k) for k in data.get("filter_slot_draws", {})}
+
+        track_names: list[str] = []
+        track_index_by_name: dict[str, int] = {}
+        for e in data.get("events", []):
+            name = e.get("track_name")
+            if name and name not in track_names:
+                track_names.append(name)
+                track_index_by_name[name] = e.get("track_index")
+
+        try:
+            project = self._open_project(project_name)
+        except BackendError:
+            project = None  # project may have been deleted/renamed since
+
+        tracks = []
+        for name in track_names:
+            is_filter_draw = track_index_by_name.get(name) in filter_slot_indices
+            current_take = None
+            if project is not None and not is_filter_draw:
+                entry = next((t for t in project.setlist.tracks if t.name == name), None)
+                if entry is not None:
+                    take = entry.get_take_for_instrument(instrument)
+                    if take is not None:
+                        current_take = asdict(take)
+            tracks.append({"track_name": name, "is_filter_draw": is_filter_draw, "current_take": current_take})
+
+        return {**data, "session_dir": session_dir, "tracks": tracks}
+
+    def correct_session_instrument(self, session_dir: str, new_instrument: str) -> None:
+        config = self.get_config()
+        inst = config.get_instrument(new_instrument)
+        if inst is None:
+            raise BackendError(f"Instrument '{new_instrument}' not found.")
+        log_path, data = self._read_session_log(session_dir)
+        # Deliberately doesn't also rename the session directory: its
+        # instrument suffix is cosmetic only (nothing reads it back out —
+        # every actual lookup goes through session_log.json's own
+        # "instrument" field, corrected below), and string-surgery on a
+        # real directory path for a cosmetic fix isn't worth the risk of
+        # getting it wrong.
+        data["instrument"] = inst.name
+        data["instrument_full_name"] = inst.full_name
+        log_path.write_text(json.dumps(data, indent=2))
+
+    def reassign_take(self, session_dir: str, track_name: str, old_instrument: str, new_instrument: str) -> None:
+        config = self.get_config()
+        new_inst = config.get_instrument(new_instrument)
+        if new_inst is None:
+            raise BackendError(f"Instrument '{new_instrument}' not found.")
+        _, data = self._read_session_log(session_dir)
+        filter_slot_indices = {int(k) for k in data.get("filter_slot_draws", {})}
+
+        track_index = None
+        for e in data.get("events", []):
+            if e.get("track_name") == track_name:
+                track_index = e.get("track_index")
+                break
+        if track_index is None:
+            raise BackendError(f"Track '{track_name}' wasn't touched by session '{session_dir}'.")
+        if track_index in filter_slot_indices:
+            raise BackendError(
+                f"'{track_name}' was drawn from an inspiration filter slot — there's no reliable "
+                "record of exactly which shared take it produced, so it can't be reassigned here."
+            )
+
+        project = self._open_project(data.get("project", ""))
+        entry = next((t for t in project.setlist.tracks if t.name == track_name), None)
+        if entry is None:
+            raise BackendError(f"Track '{track_name}' no longer exists in project '{project.name}'.")
+        take = entry.get_take_for_instrument(old_instrument)
+        if take is None:
+            raise BackendError(f"No take is currently filed under '{old_instrument}' for '{track_name}'.")
+
+        from .utils import next_take_number, take_filename
+        old_stem = Path(take.filename).stem
+        old_audio_path = project.completed_takes_dir / take.filename
+        old_video_path = project.completed_takes_dir / f"{old_stem}.mp4"
+        ext = Path(take.filename).suffix.lstrip(".") or "flac"
+
+        new_take_number = next_take_number(project.completed_takes_dir, track_name, new_inst.name)
+        new_filename = take_filename(
+            track_name, new_inst.name, new_take_number, entry.source_label(), entry.backing_track, ext,
+        )
+        new_stem = Path(new_filename).stem
+        new_audio_path = project.completed_takes_dir / new_filename
+        new_video_path = project.completed_takes_dir / f"{new_stem}.mp4"
+
+        if old_audio_path.exists():
+            shutil.move(str(old_audio_path), str(new_audio_path))
+        has_video = take.has_video and old_video_path.exists()
+        if has_video:
+            shutil.move(str(old_video_path), str(new_video_path))
+
+        new_take = TakeInfo(
+            instrument=new_inst.name, take_number=new_take_number, filename=new_filename,
+            volume=take.volume, has_video=has_video,
+        )
+        del entry.preferred_takes[old_instrument]
+        entry.set_preferred_take(new_inst.name, new_take)
+        project.save_setlist()
+
+        if entry.inspiration_track_id:
+            # Non-filter inspiration-sourced track: splicer.py mirrors its
+            # take into the shared vault-wide index alongside the setlist's
+            # own preferred_takes (see process_session) — keep both in
+            # sync here too, so another project referencing the same song
+            # doesn't keep offering the take under the old instrument.
+            from .vault import load_inspiration_index, save_inspiration_index, vault_root
+            root = vault_root(config)
+            index = load_inspiration_index(root)
+            shared_entry = index.get(str(entry.inspiration_track_id))
+            if shared_entry is not None and old_instrument in shared_entry.preferred_takes:
+                del shared_entry.preferred_takes[old_instrument]
+                shared_entry.set_preferred_take(new_inst.name, new_take)
+                save_inspiration_index(root, index)
 
     # --- inspiration ---
 
