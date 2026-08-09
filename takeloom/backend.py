@@ -194,12 +194,14 @@ class Backend(ABC):
     def get_session_detail(self, session_dir: str) -> dict:
         """Full session_log.json contents for `session_dir` (a `session_dir`
         value from list_sessions()), plus, for each track name it touched,
-        whatever take (if any) `preferred_takes` currently holds for it
-        under the session's own logged instrument — so the UI can show
-        "here's what's currently filed" before offering to reassign it.
-        Each track's entry also reports whether it was an inspiration
-        filter-slot draw (session_log.json's filter_slot_draws) — those
-        aren't offered for reassign_take (see its docstring)."""
+        every instrument `preferred_takes` currently holds a take for —
+        not filtered to session_dir's own logged instrument, since that
+        field is exactly what correct_session_instrument rewrites; keying
+        this lookup off it would stop finding the track's take to
+        reassign the moment someone corrects the log first. Each track's
+        entry also reports whether it was an inspiration filter-slot draw
+        (session_log.json's filter_slot_draws) — those aren't offered for
+        reassign_take (see its docstring)."""
         ...
 
     @abstractmethod
@@ -1026,7 +1028,6 @@ class LocalBackend(Backend):
 
     def get_session_detail(self, session_dir: str) -> dict:
         _, data = self._read_session_log(session_dir)
-        instrument = data.get("instrument", "")
         project_name = data.get("project", "")
         filter_slot_indices = {int(k) for k in data.get("filter_slot_draws", {})}
 
@@ -1046,14 +1047,21 @@ class LocalBackend(Backend):
         tracks = []
         for name in track_names:
             is_filter_draw = track_index_by_name.get(name) in filter_slot_indices
-            current_take = None
+            # Every instrument this track currently has a take filed
+            # under, not just whichever one session_log.json's own
+            # "instrument" field says right now — that field is exactly
+            # what correct_session_instrument rewrites, so keying this
+            # lookup off it would silently stop finding the track's take
+            # to reassign the moment someone corrects the log first.
+            takes = []
             if project is not None and not is_filter_draw:
                 entry = next((t for t in project.setlist.tracks if t.name == name), None)
                 if entry is not None:
-                    take = entry.get_take_for_instrument(instrument)
-                    if take is not None:
-                        current_take = asdict(take)
-            tracks.append({"track_name": name, "is_filter_draw": is_filter_draw, "current_take": current_take})
+                    takes = [
+                        {"instrument": take_instrument, **asdict(take)}
+                        for take_instrument, take in entry.preferred_takes.items()
+                    ]
+            tracks.append({"track_name": name, "is_filter_draw": is_filter_draw, "takes": takes})
 
         return {**data, "session_dir": session_dir, "tracks": tracks}
 

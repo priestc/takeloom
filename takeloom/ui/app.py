@@ -17,6 +17,7 @@ from .platform_style import normalize as normalize_platform_style
 from .record import RecordFrame
 from .recording_devices import RecordingDevicesFrame
 from .remote import RemoteFrame
+from .sessions import SessionsFrame
 from .streaming import StreamingFrame
 from .studio_setup import StudioSetupFrame
 
@@ -30,6 +31,7 @@ TABS = [
     ("Studio Setup", StudioSetupFrame, False),
     ("Recording Devices", RecordingDevicesFrame, False),
     ("Streaming", StreamingFrame, False),
+    ("Sessions", SessionsFrame, False),
     ("Latency", LatencyFrame, True),
     ("Remote", RemoteFrame, True),
 ]
