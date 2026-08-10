@@ -294,24 +294,28 @@ class Backend(ABC):
         to reach for reassign_take). Works for an inspiration filter-slot
         draw too, same as reassign_take (looked up from the shared
         vault-wide inspiration-take index, same as get_session_detail).
-        Only compares against instruments sharing a physical channel
-        (input_label) with any instrument of `instrument_name`'s label —
-        the only ones a mix-up during recording could plausibly have
-        actually been, and comparing against unrelated hardware inputs
-        would just reintroduce the classifier's bias toward whichever
-        candidate has the widest default frequency range. Returns
-        {"guess": str | None, "confidence": float} — guess (a label) is
-        None if the take's audio had no non-silent windows to analyze
-        (e.g. it's silence). Never modifies anything. Raises BackendError
-        if `track_name` isn't one of session_dir's tracks, there's no
-        take currently filed under `instrument_name` (same as
-        reassign_take), the take's file isn't available locally right now
-        (e.g. pruned under "remote" vault mode), or `instrument_name`
-        doesn't match any currently configured instrument's label (e.g.
-        it's a take recorded before takes were filed by label at all) —
-        rather than silently comparing against every configured
-        instrument in that last case, which would reintroduce the same
-        bias this method exists to avoid."""
+        If `instrument_name` matches a currently configured instrument's
+        label, only compares against instruments sharing a physical
+        channel (input_label) with one of them — the only ones a mix-up
+        during recording could plausibly have actually been, narrower
+        than comparing against unrelated hardware inputs (which would
+        reintroduce the classifier's bias toward whichever candidate has
+        the widest default frequency range). If it *doesn't* match
+        anything currently configured (e.g. the label's since been
+        renamed or removed, or this take predates filing by label at
+        all) — precisely the take most worth analyzing, since there's no
+        other way left to tell where it belongs — falls back to comparing
+        against every currently configured instrument instead of
+        refusing; the same bias caveat applies there with less precision,
+        but a possibly-imprecise guess beats none. Returns {"guess": str |
+        None, "confidence": float} — guess (a label) is None if the
+        take's audio had no non-silent windows to analyze (e.g. it's
+        silence). Never modifies anything. Raises BackendError if
+        `track_name` isn't one of session_dir's tracks, there's no take
+        currently filed under `instrument_name` (same as reassign_take),
+        the take's file isn't available locally right now (e.g. pruned
+        under "remote" vault mode), or no instruments are configured at
+        all to compare against."""
         ...
 
     # --- inspiration ---
@@ -1626,34 +1630,38 @@ class LocalBackend(Backend):
             raise BackendError(f"'{take.filename}' isn't available locally right now.")
 
         # instrument_name (a label — takes are filed by label, not by
-        # which specific piece of gear played them) must still resolve
-        # against the *current* config — not just a string that was valid
-        # whenever this take was recorded (e.g. a label since removed
-        # from config.INSTRUMENT_LABELS, or a take recorded before takes
-        # were filed by label at all, still carrying an old instrument
-        # name/full_name as its stored identifier). Rather than silently
-        # falling back to comparing against every configured instrument —
-        # which would reintroduce the classifier's bias toward whichever
-        # one has the widest default frequency range (see audio/
-        # instrument_classifier.py's module docstring and
-        # _DEFAULT_RANGES_BY_LABEL), giving a confidently wrong answer —
-        # this just says so.
+        # which specific piece of gear played them) may not resolve
+        # against the *current* config — e.g. a label since removed from
+        # config.INSTRUMENT_LABELS/every instrument that had it, or a take
+        # recorded before takes were filed by label at all, still carrying
+        # an old instrument name/full_name as its stored identifier.
         label_instruments = [i for i in config.instruments if i.label == instrument_name]
-        if not label_instruments:
-            raise BackendError(
-                f"'{instrument_name}' isn't a currently configured instrument label, so "
-                "there's nothing to meaningfully compare this take's audio against. If it's "
-                "been renamed, use Reassign after updating Studio Setup."
-            )
-        # Compare only against instruments sharing a physical channel
-        # (input_label) with any instrument of this label — the only ones
-        # a mix-up during recording could plausibly have actually been.
-        # Comparing against unrelated hardware inputs (e.g. a guitar's DI
-        # against a piano on a different device entirely) can't be what
-        # actually got recorded here regardless of what the audio sounds
-        # like, and has the same bias problem as above.
-        input_labels = {i.input_label for i in label_instruments}
-        candidates = [i for i in config.instruments if i.input_label in input_labels]
+        if label_instruments:
+            # Compare only against instruments sharing a physical channel
+            # (input_label) with any instrument of this label — the only
+            # ones a mix-up during recording could plausibly have actually
+            # been. Comparing against unrelated hardware inputs (e.g. a
+            # guitar's DI against a piano on a different device entirely)
+            # can't be what actually got recorded here regardless of what
+            # the audio sounds like, and would reintroduce the classifier's
+            # bias toward whichever candidate has the widest default
+            # frequency range (see audio/instrument_classifier.py's module
+            # docstring and _DEFAULT_RANGES_BY_LABEL).
+            input_labels = {i.input_label for i in label_instruments}
+            candidates = [i for i in config.instruments if i.input_label in input_labels]
+        else:
+            # instrument_name doesn't match anything currently configured —
+            # exactly the take that most needs analysis, not less: this is
+            # the "was it recorded under a label that's since been renamed
+            # or removed" case, and refusing outright leaves no way to find
+            # out where it actually belongs. There's no narrower "which
+            # channel was this on" info left to scope the comparison by, so
+            # fall back to comparing against every currently configured
+            # instrument instead — the accuracy caveat above still applies,
+            # but a possibly-imprecise guess beats no guess at all here.
+            candidates = list(config.instruments)
+        if not candidates:
+            raise BackendError("No instruments are currently configured to compare this take's audio against.")
 
         from .audio.instrument_classifier import classify_audio_file
         guess, confidence = classify_audio_file(take_path, candidates)
