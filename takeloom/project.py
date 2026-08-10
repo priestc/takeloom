@@ -31,6 +31,16 @@ class TakeInfo:
     # than trusted as persisted truth — self-heals if the video mux failed,
     # was never attempted, or the .mp4 was later removed by hand.
     has_video: bool = False
+    # Which physical input (an InputLabel.label — e.g. "guitar-cable", not
+    # an instrument identity) actually recorded this take, captured at
+    # record time from the session (see backend.py's _SessionEvent/
+    # _save_session_log and processing/splicer.py's CompletedTake) rather
+    # than derived after the fact from `instrument`/config. An immutable
+    # fact about the take itself, so backend.py's analyze_take can use it
+    # to precisely scope its comparison even after the take's label has
+    # been renamed or removed from config entirely — see that method's
+    # docstring. "" for a take recorded before this field existed.
+    input_label: str = ""
 
 
 @dataclass

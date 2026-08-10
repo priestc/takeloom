@@ -85,6 +85,13 @@ class CompletedTake:
     # config.py's Instrument).
     instrument: str = ""
     instrument_label: str = ""
+    # Which physical input (an InputLabel.label) actually recorded this
+    # take — same per-take reasoning as instrument/instrument_label above.
+    # Carried onto the resulting TakeInfo (see process_session) so
+    # backend.py's analyze_take can precisely scope its comparison even
+    # after the take's label has since been renamed or removed from
+    # config — see that method's docstring.
+    input_label: str = ""
 
 
 def parse_session_log(data: dict) -> list[CompletedTake]:
@@ -99,6 +106,7 @@ def parse_session_log(data: dict) -> list[CompletedTake]:
     start_wall = ""
     instrument = ""
     instrument_label = ""
+    input_label = ""
 
     def close_segment(end_frame: int | None, natural_end: bool) -> None:
         nonlocal start_frame
@@ -111,7 +119,7 @@ def parse_session_log(data: dict) -> list[CompletedTake]:
                 track_index=track_index, track_name=track_name,
                 start_frame=start_frame, end_frame=end_frame,
                 start_wall_time=start_wall,
-                instrument=instrument, instrument_label=instrument_label,
+                instrument=instrument, instrument_label=instrument_label, input_label=input_label,
             ))
         start_frame = None
 
@@ -133,6 +141,7 @@ def parse_session_log(data: dict) -> list[CompletedTake]:
             # for one of those, so the fallback is exact, not a guess.
             instrument = event.get("instrument") or data.get("instrument", "")
             instrument_label = event.get("instrument_label") or data.get("instrument_label", "")
+            input_label = event.get("input_label") or data.get("input_label", "")
         elif etype == "song_end":
             close_segment(frame, natural_end=True)
         elif etype in ("track_skipped", "song_stopped", "track_loaded", "session_end"):
@@ -261,6 +270,7 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
 
                 take_info = TakeInfo(
                     instrument=take_label, take_number=take_num, filename=flac_name, has_video=has_video,
+                    input_label=take.input_label or input_label,
                 )
                 if slot.is_inspiration_filter:
                     # Recorded into the shared vault-wide index (vault.py),

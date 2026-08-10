@@ -294,20 +294,27 @@ class Backend(ABC):
         to reach for reassign_take). Works for an inspiration filter-slot
         draw too, same as reassign_take (looked up from the shared
         vault-wide inspiration-take index, same as get_session_detail).
-        If `instrument_name` matches a currently configured instrument's
-        label, only compares against instruments sharing a physical
-        channel (input_label) with one of them — the only ones a mix-up
-        during recording could plausibly have actually been, narrower
-        than comparing against unrelated hardware inputs (which would
-        reintroduce the classifier's bias toward whichever candidate has
-        the widest default frequency range). If it *doesn't* match
-        anything currently configured (e.g. the label's since been
-        renamed or removed, or this take predates filing by label at
-        all) — precisely the take most worth analyzing, since there's no
-        other way left to tell where it belongs — falls back to comparing
-        against every currently configured instrument instead of
-        refusing; the same bias caveat applies there with less precision,
-        but a possibly-imprecise guess beats none. Returns {"guess": str |
+        Narrows the comparison as precisely as the take's own recorded
+        history allows, in order: if the take carries its own
+        TakeInfo.input_label (the physical input it was actually recorded
+        from, captured at record time — see _SessionEvent/CompletedTake),
+        compares only against instruments currently on that exact input —
+        the most precise scope, since it's an immutable fact about the
+        take rather than derived from today's config, and survives the
+        take's label being renamed or removed entirely. Failing that
+        (an older take with no stored input_label), falls back to every
+        instrument sharing a physical channel with one of `instrument_
+        name`'s own label, if that label still resolves. Either way,
+        narrowing to unrelated hardware inputs is avoided because it
+        would reintroduce the classifier's bias toward whichever
+        candidate has the widest default frequency range. If neither
+        signal narrows anything (e.g. the label's since been renamed or
+        removed *and* there's no stored input_label either) — precisely
+        the take most worth analyzing, since there's no other way left to
+        tell where it belongs — falls back to comparing against every
+        currently configured instrument instead of refusing; the same
+        bias caveat applies there with less precision, but a
+        possibly-imprecise guess beats none. Returns {"guess": str |
         None, "confidence": float} — guess (a label) is None if the
         take's audio had no non-silent windows to analyze (e.g. it's
         silence). Never modifies anything. Raises BackendError if
@@ -859,12 +866,21 @@ class _SessionEvent:
     # config.py's Instrument.
     instrument: str = ""
     instrument_label: str = ""
+    # Which physical input (an InputLabel.label) actually recorded this —
+    # same per-event-carries-its-own-copy reasoning as instrument/
+    # instrument_label above. This is what ends up on each completed
+    # take's own TakeInfo.input_label (see processing/splicer.py's
+    # CompletedTake/process_session), letting analyze_take precisely
+    # scope its comparison even once a take's label has since been
+    # renamed or removed from config — see that method's docstring.
+    input_label: str = ""
 
     def to_dict(self) -> dict:
         d = {
             "timestamp": self.timestamp, "wall_time": self.wall_time,
             "event_type": self.event_type, "details": self.details,
             "instrument": self.instrument, "instrument_label": self.instrument_label,
+            "input_label": self.input_label,
         }
         if self.frame is not None:
             d["frame"] = self.frame
@@ -1515,7 +1531,7 @@ class LocalBackend(Backend):
 
         return TakeInfo(
             instrument=new_instrument, take_number=new_take_number, filename=new_filename,
-            volume=take.volume, has_video=has_video,
+            volume=take.volume, has_video=has_video, input_label=take.input_label,
         )
 
     def reassign_take(self, session_dir: str, track_name: str, old_instrument: str, new_instrument: str) -> None:
@@ -1629,36 +1645,41 @@ class LocalBackend(Backend):
             # ever got to look at.
             raise BackendError(f"'{take.filename}' isn't available locally right now.")
 
-        # instrument_name (a label — takes are filed by label, not by
-        # which specific piece of gear played them) may not resolve
-        # against the *current* config — e.g. a label since removed from
-        # config.INSTRUMENT_LABELS/every instrument that had it, or a take
-        # recorded before takes were filed by label at all, still carrying
-        # an old instrument name/full_name as its stored identifier.
-        label_instruments = [i for i in config.instruments if i.label == instrument_name]
-        if label_instruments:
-            # Compare only against instruments sharing a physical channel
-            # (input_label) with any instrument of this label — the only
-            # ones a mix-up during recording could plausibly have actually
-            # been. Comparing against unrelated hardware inputs (e.g. a
-            # guitar's DI against a piano on a different device entirely)
-            # can't be what actually got recorded here regardless of what
-            # the audio sounds like, and would reintroduce the classifier's
-            # bias toward whichever candidate has the widest default
-            # frequency range (see audio/instrument_classifier.py's module
-            # docstring and _DEFAULT_RANGES_BY_LABEL).
+        # Narrow the comparison as precisely as possible, in order of how
+        # trustworthy each signal is — comparing against unrelated
+        # hardware inputs (e.g. a guitar's DI against a piano on a
+        # different device entirely) can't be what actually got recorded
+        # here regardless of what the audio sounds like, and would
+        # reintroduce the classifier's bias toward whichever candidate has
+        # the widest default frequency range (see audio/instrument_
+        # classifier.py's module docstring and _DEFAULT_RANGES_BY_LABEL).
+        if take.input_label:
+            # take.input_label is the physical input this take was
+            # *actually* recorded from, captured at record time (see
+            # backend.py's _SessionEvent/_save_session_log and processing/
+            # splicer.py's CompletedTake) — an immutable fact about the
+            # take itself, so this is the most precise possible scope and
+            # survives instrument_name's label being renamed or removed
+            # from config entirely since the take was recorded.
+            candidates = [i for i in config.instruments if i.input_label == take.input_label]
+        else:
+            # Older take, recorded before takes carried their own
+            # input_label — fall back to the label-based heuristic: every
+            # instrument currently sharing a physical channel with any
+            # instrument of instrument_name's own label (empty if
+            # instrument_name doesn't match anything currently configured
+            # either).
+            label_instruments = [i for i in config.instruments if i.label == instrument_name]
             input_labels = {i.input_label for i in label_instruments}
             candidates = [i for i in config.instruments if i.input_label in input_labels]
-        else:
-            # instrument_name doesn't match anything currently configured —
-            # exactly the take that most needs analysis, not less: this is
-            # the "was it recorded under a label that's since been renamed
-            # or removed" case, and refusing outright leaves no way to find
-            # out where it actually belongs. There's no narrower "which
-            # channel was this on" info left to scope the comparison by, so
-            # fall back to comparing against every currently configured
-            # instrument instead — the accuracy caveat above still applies,
-            # but a possibly-imprecise guess beats no guess at all here.
+        if not candidates:
+            # Nothing currently configured shares the take's actual
+            # (or label-inferred) input — exactly the take that most needs
+            # analysis, not less: refusing outright leaves no way to find
+            # out where it actually belongs. Fall back to comparing
+            # against every currently configured instrument instead — the
+            # bias caveat above still applies with less precision, but a
+            # possibly-imprecise guess beats no guess at all here.
             candidates = list(config.instruments)
         if not candidates:
             raise BackendError("No instruments are currently configured to compare this take's audio against.")
@@ -3062,6 +3083,7 @@ class LocalBackend(Backend):
             track_name=track_name,
             instrument=session.inst.full_name,
             instrument_label=session.inst.label,
+            input_label=session.inst.input_label,
         ))
 
     def begin_session(self, project_name: str, instrument_name: str) -> None:
@@ -3429,6 +3451,7 @@ class LocalBackend(Backend):
         data = {
             "instrument": session.inst.full_name,
             "instrument_label": session.inst.label,
+            "input_label": session.inst.input_label,
             "musician": session.musician,
             "project": session.project.name,
             "studio_name": session.studio_name,
