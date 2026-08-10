@@ -30,6 +30,7 @@ from .app_state import AppState
 from .filter_slot_dialogs import EditFilterDialog, ShowTracksDialog
 from .level_meter import LevelMeter
 from .new_project_dialog import NewProjectDialog
+from .setlist_row import SetlistRow
 from .streamdeck_emulator import StreamDeckEmulator
 from .video_check_dialog import VideoCheckDialog
 
@@ -44,12 +45,33 @@ class RecordFrame(ttk.Frame):
         self._project_names: list[str] = []
         self._project_name: str | None = None
         self._setlist: Setlist | None = None
+        # One SetlistRow widget per current track, rebuilt from scratch by
+        # _refresh_setlist on every change — see that method's docstring
+        # comment. Parallel array, same order as self._setlist.tracks
+        # (kept in sync by every mutator: _on_row_motion/_on_delete_track).
+        self._setlist_rows: list[SetlistRow] = []
+        # Per-track-index preview of what each inspiration filter slot
+        # would draw right now for each installed instrument label (None
+        # for an ordinary, non-filter track) — see backend.py's
+        # get_filter_slot_previews. Fetched once when a project is opened
+        # (_on_setlist_loaded) and deliberately left stale afterward so
+        # the "next up" picks shown stay put for the rest of that visit
+        # rather than re-randomizing every setlist redisplay; only
+        # refetched when the track count changes (_apply_refreshed_setlist)
+        # or a filter slot's own criteria is edited (_on_edit_filter).
+        self._filter_previews: list[dict | None] = []
+        # Whether the setlist can currently be clicked/reordered/right-
+        # clicked at all — mirrors the old tk.Listbox's own "disabled"
+        # state (see _set_controls_enabled), which used to block native
+        # selection changes for free; SetlistRow has no such built-in
+        # concept, so this is checked by hand in _on_row_press.
+        self._setlist_interactive = True
 
         self._selected_track: TrackEntry | None = None
         self._selected_track_index: int | None = None
         # Index the current click-and-drag started at, and whether it's
         # actually moved a track (vs. just being a plain click) — see
-        # _on_setlist_drag_start/_motion/_end.
+        # _on_row_press/_on_row_motion/_on_row_release.
         self._drag_index: int | None = None
         self._drag_moved = False
 
@@ -451,26 +473,65 @@ class RecordFrame(ttk.Frame):
 
         setlist_wrap = ttk.Frame(setlist_tab)
         setlist_wrap.grid(row=2, column=0, sticky="nsew", pady=(4, 0))
-        setlist_scroll = ttk.Scrollbar(setlist_wrap, orient="vertical")
-        self.setlist_listbox = tk.Listbox(
-            setlist_wrap, height=10, exportselection=False,
-            yscrollcommand=setlist_scroll.set,
-        )
-        setlist_scroll.configure(command=self.setlist_listbox.yview)
-        self.setlist_listbox.pack(side="left", fill="both", expand=True)
-        setlist_scroll.pack(side="right", fill="y")
-        self.setlist_listbox.bind("<<ListboxSelect>>", self._on_setlist_select)
-        # Button-3 covers Windows/Linux/modern macOS right-click; the other
-        # two are fallbacks for older Tk-on-macOS builds and trackpads
-        # without a distinct right-click gesture.
-        self.setlist_listbox.bind("<Button-3>", self._on_setlist_right_click)
-        self.setlist_listbox.bind("<Button-2>", self._on_setlist_right_click)
-        self.setlist_listbox.bind("<Control-Button-1>", self._on_setlist_right_click)
-        self.setlist_listbox.bind("<ButtonPress-1>", self._on_setlist_drag_start)
-        self.setlist_listbox.bind("<B1-Motion>", self._on_setlist_drag_motion)
-        self.setlist_listbox.bind("<ButtonRelease-1>", self._on_setlist_drag_end)
+        setlist_wrap.columnconfigure(0, weight=1)
+        setlist_wrap.rowconfigure(0, weight=1)
 
-    def _track_display(self, track: TrackEntry, inst_name: str) -> str:
+        canvas = tk.Canvas(setlist_wrap, highlightthickness=0, background="white")
+        scrollbar = ttk.Scrollbar(setlist_wrap, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        self.setlist_rows_frame = tk.Frame(canvas, background="white")
+        content_window = canvas.create_window((0, 0), window=self.setlist_rows_frame, anchor="nw")
+
+        def _on_content_configure(_event: object) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event: object) -> None:
+            # Stretches setlist_rows_frame to the canvas's own width so
+            # each row's labels fill it (and wrap at that width — see
+            # SetlistRow._on_resize) — only the vertical extent scrolls.
+            canvas.itemconfigure(content_window, width=event.width)
+
+        self.setlist_rows_frame.bind("<Configure>", _on_content_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        self._setlist_canvas = canvas
+        self._bind_setlist_mousewheel(canvas)
+
+    def _on_setlist_mousewheel(self, event: object) -> None:
+        # See studio_setup.StudioSetupFrame._on_mousewheel — same
+        # macOS-vs-Windows delta-scaling story applies here.
+        self._setlist_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")  # type: ignore[attr-defined]
+
+    def _bind_setlist_mousewheel(self, widget: tk.Misc) -> None:
+        """See studio_setup.StudioSetupFrame._bind_mousewheel's docstring
+        for why this binds directly and recursively rather than once via
+        bind_all. Re-run over self.setlist_rows_frame at the end of every
+        _refresh_setlist, since that tears down and rebuilds every row."""
+        widget.bind("<MouseWheel>", self._on_setlist_mousewheel)
+        for child in widget.winfo_children():
+            self._bind_setlist_mousewheel(child)
+
+    def _installed_labels(self) -> list[str]:
+        """Every distinct instrument label configured on the Studio Setup
+        tab, in the order instruments were added — the set of labels a
+        song can have a take "installed" for, and what a filter slot's
+        next-up preview is computed per (see get_filter_slot_previews)."""
+        if not self.config_obj:
+            return []
+        labels: list[str] = []
+        for inst in self.config_obj.instruments:
+            if inst.label and inst.label not in labels:
+                labels.append(inst.label)
+        return labels
+
+    @staticmethod
+    def _label_display_name(label: str) -> str:
+        return label.replace("-", " ").title()
+
+    def _track_title(self, track: TrackEntry, inst_name: str) -> str:
         dur = format_duration(track.duration_seconds)
         if track.is_inspiration_filter:
             # Never has a take of its own (see TrackEntry's docstring), and
@@ -495,14 +556,61 @@ class RecordFrame(ttk.Frame):
             mark = " ✓ (audio only)"
         return f"{track.name}  ({dur}){mark}"
 
+    def _track_stats(self, track: TrackEntry, preview: dict | None) -> str:
+        """The smaller-text line(s) shown below a setlist row's title —
+        see _refresh_setlist. For an ordinary track: which installed
+        instrument labels already have a completed take. For an
+        inspiration filter slot: how many inspiration-server tracks
+        currently match its criteria, plus, per installed label, what
+        song it would draw next right now (`preview`, from
+        self._filter_previews — see that field's docstring for why it's
+        not recomputed on every call)."""
+        labels = self._installed_labels()
+        if not labels:
+            return ""
+        if track.is_inspiration_filter:
+            if preview is None:
+                return "Checking matches..."
+            count = preview.get("match_count", 0)
+            lines = [f"{count} matching track{'s' if count != 1 else ''}"]
+            next_up = preview.get("next_up") or {}
+            for label in labels:
+                song = next_up.get(label)
+                name = self._label_display_name(label)
+                lines.append(f"{name} next up: {song}" if song else f"{name}: no match")
+            return "\n".join(lines)
+        parts = []
+        for label in labels:
+            take = track.get_take_for_instrument(label)
+            name = self._label_display_name(label)
+            if take is None:
+                parts.append(f"{name} —")
+            elif take.has_video:
+                parts.append(f"{name} ✓")
+            else:
+                parts.append(f"{name} ✓ (audio)")
+        return "    ".join(parts)
+
     def _refresh_setlist(self) -> None:
-        self.setlist_listbox.delete(0, tk.END)
+        for row in self._setlist_rows:
+            row.destroy()
+        self._setlist_rows = []
         if not self._setlist:
             self.setlist_total_var.set("")
             return
         inst_name = self._detected_instrument
-        for track in self._setlist.tracks:
-            self.setlist_listbox.insert(tk.END, self._track_display(track, inst_name))
+        for i, track in enumerate(self._setlist.tracks):
+            preview = self._filter_previews[i] if i < len(self._filter_previews) else None
+            row = SetlistRow(
+                self.setlist_rows_frame, i,
+                on_press=self._on_row_press, on_motion=self._on_row_motion,
+                on_release=self._on_row_release, on_right_click=self._on_row_right_click,
+            )
+            row.set_content(self._track_title(track, inst_name), self._track_stats(track, preview))
+            row.set_selected(i == self._selected_track_index)
+            row.pack(fill="x")
+            self._setlist_rows.append(row)
+        self._bind_setlist_mousewheel(self.setlist_rows_frame)
         self._update_setlist_total()
 
     def _update_setlist_total(self) -> None:
@@ -519,12 +627,17 @@ class RecordFrame(ttk.Frame):
         self._selected_track_index = None
         if hasattr(self, "selection_var"):
             self.selection_var.set("No track selected")
+        for row in self._setlist_rows:
+            row.set_selected(False)
         self._update_start_button_state()
 
     def _on_project_change(self, _event: object = None) -> None:
         self._clear_selection()
-        if hasattr(self, "setlist_listbox"):
-            self.setlist_listbox.delete(0, tk.END)
+        if hasattr(self, "setlist_rows_frame"):
+            for row in self._setlist_rows:
+                row.destroy()
+            self._setlist_rows = []
+        self._filter_previews = []
         self._setlist = None
         project_name = self.project_var.get() if hasattr(self, "project_var") else ""
         self._project_name = project_name or None
@@ -569,8 +682,10 @@ class RecordFrame(ttk.Frame):
             self.selection_var.set(f"Could not load project: {error}")
             return
         self._setlist = Setlist.from_dict(data)
+        self._filter_previews = []
         self._refresh_setlist()
         self._auto_select_default_track()
+        self._fetch_filter_previews()
 
     def _auto_select_default_track(self) -> None:
         """Pick a sensible starting track so Record is one click away right
@@ -578,8 +693,29 @@ class RecordFrame(ttk.Frame):
         if self._selected_track_index is not None:
             return  # already selected (e.g. this ran once for this project already)
         if self._setlist and self._setlist.tracks:
-            self.setlist_listbox.selection_set(0)
-            self._on_setlist_select()
+            self._select_row(0)
+
+    def _fetch_filter_previews(self) -> None:
+        """Kick off get_filter_slot_previews for the current project — see
+        self._filter_previews's docstring for when this is (and isn't)
+        called."""
+        if not self._project_name:
+            return
+        backend = self.app_state.backend
+        project_name = self._project_name
+        self._run_backend(
+            lambda: backend.get_filter_slot_previews(project_name),
+            lambda previews, error: self._apply_filter_previews(project_name, previews, error),
+        )
+
+    def _apply_filter_previews(self, project_name: str, previews: list | None, error: str | None) -> None:
+        if error or previews is None or project_name != self._project_name:
+            # A transient inspiration-server hiccup, or the project changed
+            # again before this fetch returned — either way, leave whatever
+            # self._filter_previews already had rather than blank it out.
+            return
+        self._filter_previews = previews
+        self._refresh_setlist()
 
     def _refresh_setlist_from_server(self) -> None:
         """Re-fetch just the current project's setlist (e.g. after a take
@@ -595,6 +731,15 @@ class RecordFrame(ttk.Frame):
 
     def _apply_refreshed_setlist(self, data: dict) -> None:
         self._setlist = Setlist.from_dict(data)
+        if len(self._setlist.tracks) != len(self._filter_previews):
+            # The track count changed underneath us (a track was added or
+            # removed elsewhere) — self._filter_previews is a parallel
+            # array to self._setlist.tracks, so it's now misaligned and
+            # needs a fresh fetch rather than being reused as-is. A take
+            # simply completing doesn't change the count, so the normal
+            # case (this firing after every take) skips the round trip.
+            self._filter_previews = []
+            self._fetch_filter_previews()
         self._refresh_setlist()
 
     def _persist_last_selection(self) -> None:
@@ -671,52 +816,71 @@ class RecordFrame(ttk.Frame):
         elif phase == "stopped":
             self.auto_detect_status_var.set("")
 
-    def _on_setlist_select(self, _event: object = None) -> None:
-        sel = self.setlist_listbox.curselection()
-        if not sel or not self._setlist:
+    def _select_row(self, index: int) -> None:
+        if not self._setlist or index >= len(self._setlist.tracks):
             return
-        self._selected_track = self._setlist.tracks[sel[0]]
-        self._selected_track_index = sel[0]
+        self._selected_track = self._setlist.tracks[index]
+        self._selected_track_index = index
         self.selection_var.set(f"Selected: {self._selected_track.name}")
+        for row in self._setlist_rows:
+            row.set_selected(row.index == index)
         self._update_start_button_state()
 
-    def _on_setlist_drag_start(self, event: object) -> None:
+    def _row_index_at_y(self, y_root: int) -> int | None:
+        """Which setlist row (by index) currently covers root-window y
+        coordinate y_root, clamped to the first/last row — the SetlistRow
+        equivalent of tk.Listbox.nearest(), needed since a drag started on
+        one row keeps receiving <B1-Motion> events (with coordinates
+        relative to that original row) even once the pointer has moved
+        over another; x_root/y_root stay accurate regardless."""
+        if not self._setlist_rows:
+            return None
+        y_local = y_root - self.setlist_rows_frame.winfo_rooty()
+        if y_local <= 0:
+            return self._setlist_rows[0].index
+        for row in self._setlist_rows:
+            top = row.winfo_y()
+            if top <= y_local < top + row.winfo_height():
+                return row.index
+        return self._setlist_rows[-1].index
+
+    def _on_row_press(self, index: int) -> None:
+        if self._setlist_interactive and self._setlist:
+            self._select_row(index)
         if self._phase != "idle" or not self._setlist:
+            self._drag_index = None
             return  # don't let the setlist reorder out from under an active take
-        self._drag_index = self.setlist_listbox.nearest(event.y)  # type: ignore[attr-defined]
+        self._drag_index = index
         self._drag_moved = False
 
-    def _on_setlist_drag_motion(self, event: object) -> None:
+    def _on_row_motion(self, event: object) -> None:
         if self._drag_index is None or not self._setlist or not self._setlist.tracks:
             return
-        target = self.setlist_listbox.nearest(event.y)  # type: ignore[attr-defined]
-        target = max(0, min(target, len(self._setlist.tracks) - 1))
-        if target == self._drag_index:
+        target = self._row_index_at_y(event.y_root)  # type: ignore[attr-defined]
+        if target is None or target == self._drag_index:
             return
         self._setlist.move_track(self._drag_index, target)
+        if len(self._filter_previews) == len(self._setlist.tracks):
+            preview = self._filter_previews.pop(self._drag_index)
+            self._filter_previews.insert(target, preview)
         self._drag_index = target
         self._drag_moved = True
         if self._selected_track_index is not None:
             self._selected_track_index = target
         self._refresh_setlist()
-        self.setlist_listbox.selection_clear(0, tk.END)
-        self.setlist_listbox.selection_set(target)
 
-    def _on_setlist_drag_end(self, _event: object = None) -> None:
+    def _on_row_release(self) -> None:
         if self._drag_moved:
             self._save_setlist_and_refresh()
         self._drag_index = None
         self._drag_moved = False
 
-    def _on_setlist_right_click(self, event: object) -> None:
+    def _on_row_right_click(self, index: int, event: object) -> None:
         if self._phase != "idle" or not self._setlist:
             return  # don't let the setlist change out from under an active take
-        index = self.setlist_listbox.nearest(event.y)  # type: ignore[attr-defined]
         if index < 0 or index >= len(self._setlist.tracks):
             return
-        self.setlist_listbox.selection_clear(0, tk.END)
-        self.setlist_listbox.selection_set(index)
-        self._on_setlist_select()
+        self._select_row(index)
 
         track = self._setlist.tracks[index]
         menu = tk.Menu(self, tearoff=0)
@@ -753,7 +917,13 @@ class RecordFrame(ttk.Frame):
         if not self._setlist or index >= len(self._setlist.tracks):
             return
         self._setlist.tracks[index].duration_seconds = avg_duration
-        self._save_setlist_and_refresh()
+        # The filter's criteria just changed (this only ever runs from
+        # _on_edit_filter's on_save) — self._filter_previews[index] was
+        # computed against the *old* criteria, so it needs a fresh fetch
+        # once the new criteria are actually saved to disk (get_filter_
+        # slot_previews reads the setlist back from disk, so it can't be
+        # fetched before the save below completes).
+        self._save_setlist_and_refresh(refresh_filter_previews=True)
 
     def _on_show_filter_tracks(self, index: int) -> None:
         if not self._setlist or index >= len(self._setlist.tracks):
@@ -783,11 +953,13 @@ class RecordFrame(ttk.Frame):
         if not messagebox.askyesno("Delete Track", f'Remove "{track.name}" from the setlist?', parent=self):
             return
         self._setlist.remove_track(index)
+        if len(self._filter_previews) > index:
+            self._filter_previews.pop(index)
         if self._selected_track_index == index:
             self._clear_selection()
         self._save_setlist_and_refresh()
 
-    def _save_setlist_and_refresh(self) -> None:
+    def _save_setlist_and_refresh(self, refresh_filter_previews: bool = False) -> None:
         if not self._project_name or not self._setlist:
             return
         backend = self.app_state.backend
@@ -795,13 +967,15 @@ class RecordFrame(ttk.Frame):
         setlist_data = self._setlist.to_dict()
         self._run_backend(
             lambda: backend.save_setlist(project_name, setlist_data),
-            lambda _result, error: self._on_setlist_saved(error),
+            lambda _result, error: self._on_setlist_saved(error, refresh_filter_previews),
         )
 
-    def _on_setlist_saved(self, error: str | None) -> None:
+    def _on_setlist_saved(self, error: str | None, refresh_filter_previews: bool = False) -> None:
         if error:
             messagebox.showerror("Save failed", error)
             return
+        if refresh_filter_previews:
+            self._fetch_filter_previews()
         self._refresh_setlist()
 
     def _update_start_button_state(self) -> None:
@@ -821,8 +995,7 @@ class RecordFrame(ttk.Frame):
     def _set_controls_enabled(self, enabled: bool) -> None:
         combo_state = "readonly" if enabled else "disabled"
         self.project_combo.configure(state=combo_state)
-        list_state = "normal" if enabled else "disabled"
-        self.setlist_listbox.configure(state=list_state)
+        self._setlist_interactive = enabled
         self.refresh_devices_button.state(["!disabled"] if enabled else ["disabled"])
         self.redetect_button.state(["!disabled" if (enabled and self._detected_instrument) else "disabled"])
 

@@ -73,6 +73,8 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
         return backend.add_youtube_backing_track(args["project_name"], args["url"])
     if op == "add_inspiration_filter_slot":
         return backend.add_inspiration_filter_slot(args["project_name"], args["label"], args["filter_criteria"])
+    if op == "get_filter_slot_previews":
+        return {"previews": backend.get_filter_slot_previews(args["project_name"])}
     if op == "list_sessions":
         return {"sessions": backend.list_sessions()}
     if op == "get_session_detail":

@@ -183,6 +183,23 @@ class Backend(ABC):
         since the slot has no single fixed song of its own."""
         ...
 
+    @abstractmethod
+    def get_filter_slot_previews(self, project_name: str) -> list[dict | None]:
+        """Read-only preview of what each inspiration-filter slot in
+        project_name's setlist would currently draw, one entry per
+        setlist track in order (None for an ordinary, non-filter track).
+        Each filter slot's entry is {"match_count": N, "next_up": {label:
+        name_or_None}} — match_count is how many inspiration-server
+        tracks currently match its criteria, and next_up is, for every
+        configured instrument label, the song _resolve_filter_slot would
+        currently pick for it (same reuse-preferring logic — see
+        _pick_filter_match), without committing to anything. Meant to be
+        called once when a project is opened in the UI (see record.py's
+        Setlist panel) so the picks shown stay stable for the rest of
+        that visit rather than re-randomizing on every setlist
+        redisplay."""
+        ...
+
     # --- sessions (browse/correct past recordings) ---
 
     @abstractmethod
@@ -1225,6 +1242,40 @@ class LocalBackend(Backend):
         entry = project.add_inspiration_filter_slot(label, filter_criteria, duration_seconds=duration)
         return entry.to_dict()
 
+    def get_filter_slot_previews(self, project_name: str) -> list[dict | None]:
+        config = self.get_config()
+        project = self._open_project(project_name)
+        labels: list[str] = []
+        for inst in config.instruments:
+            if inst.label and inst.label not in labels:
+                labels.append(inst.label)
+
+        from .inspiration import InspirationError, build_inspiration_track_entry, search_tracks_by_filter
+        from .vault import load_inspiration_index, vault_root
+
+        index = None  # lazily loaded — only needed once any filter slot is actually hit
+        previews: list[dict | None] = []
+        for track in project.setlist.tracks:
+            if not track.is_inspiration_filter:
+                previews.append(None)
+                continue
+            try:
+                matches = search_tracks_by_filter(config, track.inspiration_filter)
+            except InspirationError:
+                previews.append({"match_count": 0, "next_up": {label: None for label in labels}})
+                continue
+            if not matches:
+                previews.append({"match_count": 0, "next_up": {label: None for label in labels}})
+                continue
+            if index is None:
+                index = load_inspiration_index(vault_root(config))
+            next_up = {}
+            for label in labels:
+                chosen = self._pick_filter_match(matches, label, index)
+                next_up[label] = build_inspiration_track_entry(chosen).name
+            previews.append({"match_count": len(matches), "next_up": next_up})
+        return previews
+
     # --- sessions (browse/correct past recordings) ---
 
     def _local_session_dir_path(self, session_dir: str) -> Path | None:
@@ -1959,18 +2010,32 @@ class LocalBackend(Backend):
             raise BackendError(str(e)) from e
         if not matches:
             raise BackendError(f"No inspiration tracks match the filter for '{track.name}'.")
-        candidates = [m for m in matches if m.get("id") != exclude_id] or matches
 
         from .vault import load_inspiration_index, vault_root
         index = load_inspiration_index(vault_root(config))
         label = config.label_for_instrument(instrument_name)
+        chosen = self._pick_filter_match(matches, label, index, exclude_id=exclude_id)
+        return build_inspiration_track_entry(chosen)
+
+    @staticmethod
+    def _pick_filter_match(
+        matches: list[dict], label: str, index: dict, exclude_id: int | None = None,
+    ) -> dict:
+        """The actual "which song" choice within `matches` for `label`,
+        split out of _resolve_filter_slot so get_filter_slot_previews can
+        reuse the exact same reuse-preferring logic per label without
+        re-querying the inspiration server or reloading the vault index
+        for each one. Prefers a match some other instrument has already
+        recorded a take for (but not yet under `label`), falling back to
+        a genuinely random pick among every match when none qualify —
+        see _resolve_filter_slot's own docstring for why."""
+        candidates = [m for m in matches if m.get("id") != exclude_id] or matches
         reusable = []
         for m in candidates:
             shared = index.get(str(m.get("id")))
             if shared is not None and shared.preferred_takes and shared.get_take_for_instrument(label) is None:
                 reusable.append(m)
-        chosen = random.choice(reusable) if reusable else random.choice(candidates)
-        return build_inspiration_track_entry(chosen)
+        return random.choice(reusable) if reusable else random.choice(candidates)
 
     def _resolve_filter_slot_for_session(
         self, session: "_ActiveSession", config: StudioConfig, track: TrackEntry, index: int,

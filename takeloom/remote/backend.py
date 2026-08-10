@@ -106,6 +106,11 @@ class RemoteBackend(Backend):
             {"project_name": project_name, "label": label, "filter_criteria": filter_criteria},
         )
 
+    def get_filter_slot_previews(self, project_name: str) -> list[dict | None]:
+        return self._client.call(
+            "get_filter_slot_previews", {"project_name": project_name}, timeout=LONG_TIMEOUT,
+        )["previews"]
+
     # --- sessions (browse/correct past recordings) ---
 
     def list_sessions(self) -> list[dict]:
