@@ -218,7 +218,7 @@ class Backend(ABC):
     @abstractmethod
     def correct_session_instrument(self, session_dir: str, new_instrument: str) -> None:
         """Fix the historical record alone: rewrite session_log.json's
-        instrument/instrument_full_name fields (pulled from `new_instrument`
+        instrument/instrument_label fields (pulled from `new_instrument`
         in the current StudioConfig). Does not touch any take file,
         setlist.json, the shared inspiration-take index, or the session
         directory's own name (its instrument suffix is cosmetic — nothing
@@ -274,9 +274,13 @@ class Backend(ABC):
         non-silent windows to analyze (e.g. it's silence). Never modifies
         anything. Raises BackendError if `track_name` isn't one of
         session_dir's tracks, there's no take currently filed under
-        `instrument_name` (same as reassign_take), or the take's file
-        isn't available locally right now (e.g. pruned under "remote"
-        vault mode)."""
+        `instrument_name` (same as reassign_take), the take's file isn't
+        available locally right now (e.g. pruned under "remote" vault
+        mode), or `instrument_name` doesn't resolve against the *current*
+        config (e.g. it's been renamed/removed since the take was
+        recorded) — rather than silently comparing against every
+        configured instrument in that last case, which would reintroduce
+        the same bias this method exists to avoid."""
         ...
 
     # --- inspiration ---
@@ -809,23 +813,23 @@ class _SessionEvent:
     track_name: str = ""
     # Whichever instrument was active when this event was logged — every
     # event carries its own copy rather than relying on session_log.json's
-    # single top-level instrument/instrument_full_name/instrument_label
-    # fields, so that processing/splicer.py's parse_session_log can tell
-    # which instrument recorded which take without assuming one instrument
-    # for the whole session. Constant across a session's events for now
-    # (no mid-session instrument switching yet — see backend.py's Record-
-    # tab auto-detect), but logged per-event so that when switching does
-    # land, no further session-log schema change is needed.
+    # single top-level instrument/instrument_label fields, so that
+    # processing/splicer.py's parse_session_log can tell which instrument
+    # recorded which take without assuming one instrument for the whole
+    # session. Constant across a session's events for now (no mid-session
+    # instrument switching yet — see backend.py's Record-tab auto-detect),
+    # but logged per-event so that when switching does land, no further
+    # session-log schema change is needed. `instrument` is the Instrument's
+    # full_name (manufacturer/model) — its only identifying field, see
+    # config.py's Instrument.
     instrument: str = ""
-    instrument_full_name: str = ""
     instrument_label: str = ""
 
     def to_dict(self) -> dict:
         d = {
             "timestamp": self.timestamp, "wall_time": self.wall_time,
             "event_type": self.event_type, "details": self.details,
-            "instrument": self.instrument, "instrument_full_name": self.instrument_full_name,
-            "instrument_label": self.instrument_label,
+            "instrument": self.instrument, "instrument_label": self.instrument_label,
         }
         if self.frame is not None:
             d["frame"] = self.frame
@@ -850,7 +854,6 @@ class _ActiveSession:
     session_dir: Path
     session_start: float  # timestamp_now() at begin_session()
     musician: str
-    instrument_full_name: str
     studio_name: str
     studio_location: str
     session_flac: Path
@@ -1386,8 +1389,7 @@ class LocalBackend(Backend):
         # "instrument" field, corrected below), and string-surgery on a
         # real directory path for a cosmetic fix isn't worth the risk of
         # getting it wrong.
-        data["instrument"] = inst.name
-        data["instrument_full_name"] = inst.full_name
+        data["instrument"] = inst.full_name
         data["instrument_label"] = inst.label
         if log_path is not None:
             log_path.write_text(json.dumps(data, indent=2))
@@ -1435,9 +1437,9 @@ class LocalBackend(Backend):
         old_video_path = project.completed_takes_dir / f"{old_stem}.mp4"
         ext = Path(take.filename).suffix.lstrip(".") or "flac"
 
-        new_take_number = next_take_number(project.completed_takes_dir, track_name, new_inst.name)
+        new_take_number = next_take_number(project.completed_takes_dir, track_name, new_inst.full_name)
         new_filename = take_filename(
-            track_name, new_inst.name, new_take_number, entry.source_label(), entry.backing_track, ext,
+            track_name, new_inst.full_name, new_take_number, entry.source_label(), entry.backing_track, ext,
         )
         new_stem = Path(new_filename).stem
         new_audio_path = project.completed_takes_dir / new_filename
@@ -1450,11 +1452,11 @@ class LocalBackend(Backend):
             shutil.move(str(old_video_path), str(new_video_path))
 
         new_take = TakeInfo(
-            instrument=new_inst.name, take_number=new_take_number, filename=new_filename,
+            instrument=new_inst.full_name, take_number=new_take_number, filename=new_filename,
             volume=take.volume, has_video=has_video,
         )
         del entry.preferred_takes[old_instrument]
-        entry.set_preferred_take(new_inst.name, new_take)
+        entry.set_preferred_take(new_inst.full_name, new_take)
         project.save_setlist()
 
         if entry.inspiration_track_id:
@@ -1469,7 +1471,7 @@ class LocalBackend(Backend):
             shared_entry = index.get(str(entry.inspiration_track_id))
             if shared_entry is not None and old_instrument in shared_entry.preferred_takes:
                 del shared_entry.preferred_takes[old_instrument]
-                shared_entry.set_preferred_take(new_inst.name, new_take)
+                shared_entry.set_preferred_take(new_inst.full_name, new_take)
                 save_inspiration_index(root, index)
 
     def analyze_take(self, session_dir: str, track_name: str, instrument_name: str) -> dict:
@@ -1510,23 +1512,34 @@ class LocalBackend(Backend):
             # ever got to look at.
             raise BackendError(f"'{take.filename}' isn't available locally right now.")
 
+        # instrument_name must still resolve against the *current* config
+        # — not just a string that was valid whenever this take was
+        # recorded (e.g. an instrument since renamed/removed, or, for a
+        # take recorded before instruments had a single full_name-only
+        # identity, its old short "name"). Rather than silently falling
+        # back to comparing against every configured instrument — which
+        # would reintroduce the classifier's bias toward whichever one
+        # has the widest default frequency range (see audio/instrument_
+        # classifier.py's module docstring and _DEFAULT_RANGES_BY_LABEL),
+        # giving a confidently wrong answer — this just says so.
+        inst = config.get_instrument(instrument_name)
+        if inst is None:
+            raise BackendError(
+                f"'{instrument_name}' isn't a currently configured instrument, so there's "
+                "nothing to meaningfully compare this take's audio against. If it's been "
+                "renamed, use Reassign after updating Studio Setup."
+            )
         # Compare only against instruments that share this one's own
         # input_label (the same physical channel) — the only ones a
         # mix-up during recording could plausibly have actually been.
-        # Comparing against the full instrument list would also weigh in
-        # instruments on completely unrelated hardware inputs (e.g. a
-        # guitar's DI against a piano on a different device entirely),
-        # which can't be what actually got recorded here regardless of
-        # what the audio sounds like, and re-introduces the classifier's
-        # known bias toward whichever instrument has the widest default
-        # frequency range (see audio/instrument_classifier.py's module
-        # docstring and _DEFAULT_RANGES_BY_LABEL) since a wider range
-        # almost always scores higher on _energy_in_band, right or wrong.
-        inst = config.get_instrument(instrument_name)
-        candidates = [i for i in config.instruments if inst and i.input_label == inst.input_label]
+        # Comparing against unrelated hardware inputs (e.g. a guitar's DI
+        # against a piano on a different device entirely) can't be what
+        # actually got recorded here regardless of what the audio sounds
+        # like, and has the same bias problem as above.
+        candidates = [i for i in config.instruments if i.input_label == inst.input_label]
 
         from .audio.instrument_classifier import classify_audio_file
-        guess, confidence = classify_audio_file(take_path, candidates or config.instruments)
+        guess, confidence = classify_audio_file(take_path, candidates)
         return {"guess": guess, "confidence": confidence}
 
     # --- inspiration ---
@@ -1775,7 +1788,7 @@ class LocalBackend(Backend):
         with self._record_lock:
             config = self.get_config()
             if self._active_monitor is not None:
-                if self._active_monitor.inst.name.lower() == (config.last_selected_instrument or "").lower():
+                if self._active_monitor.inst.full_name.lower() == (config.last_selected_instrument or "").lower():
                     return True  # already monitoring the right thing
                 self._close_active_monitor()
             return self._start_monitoring_locked()
@@ -1796,10 +1809,10 @@ class LocalBackend(Backend):
 
             session = self._active_session
             if session is not None and (
-                session.project.name != req.project_name or session.inst.name.lower() != inst.name.lower()
+                session.project.name != req.project_name or session.inst.full_name.lower() != inst.full_name.lower()
             ):
                 raise BackendError(
-                    f"A session is active for '{session.inst.name}' in '{session.project.name}' — "
+                    f"A session is active for '{session.inst.full_name}' in '{session.project.name}' — "
                     "end it before recording a different project/instrument."
                 )
 
@@ -1884,7 +1897,7 @@ class LocalBackend(Backend):
 
         trim = int(config.latency_compensation_ms / 1000.0 * config.sample_rate)
         for other_inst, take_info in other_takes.items():
-            if other_inst.lower() == session.inst.name.lower():
+            if other_inst.lower() == session.inst.full_name.lower():
                 continue
             take_path = project.completed_takes_dir / take_info.filename
             if take_path.exists():
@@ -1969,7 +1982,7 @@ class LocalBackend(Backend):
         cached = session.resolved_filter_picks.get(index)
         if cached is not None:
             return cached
-        resolved = self._resolve_filter_slot(config, track, session.inst.name)
+        resolved = self._resolve_filter_slot(config, track, session.inst.full_name)
         session.resolved_filter_picks[index] = resolved
         session.completed_track_indices.add(index)
         return resolved
@@ -2009,7 +2022,7 @@ class LocalBackend(Backend):
         tracks = session.project.setlist.tracks
         start = (session.current_track_index + 1) if session.current_track_index is not None else 0
         config = self.get_config()
-        sharing = config.instrument_names_sharing_label(session.inst.name)
+        sharing = config.instrument_names_sharing_label(session.inst.full_name)
         index = None
         for i in range(start, len(tracks)):
             if i in session.completed_track_indices:
@@ -2146,7 +2159,7 @@ class LocalBackend(Backend):
             # Excludes whatever's currently loaded, so "redraw" doesn't
             # just hand the same song back (see _resolve_filter_slot).
             exclude_id = session.current_track.inspiration_track_id
-            resolved = self._resolve_filter_slot(config, slot, session.inst.name, exclude_id=exclude_id)
+            resolved = self._resolve_filter_slot(config, slot, session.inst.full_name, exclude_id=exclude_id)
             session.resolved_filter_picks[index] = resolved
             self._load_track_locked(session, resolved, index, config)
             self._start_playback_locked(session)
@@ -2160,7 +2173,7 @@ class LocalBackend(Backend):
             session = self._active_session
             if session is None or session.current_track_index is None:
                 return None
-            return session.project.name, session.inst.name, session.current_track_index
+            return session.project.name, session.inst.full_name, session.current_track_index
 
     def _on_song_naturally_ended(self) -> None:
         """Called (off the audio thread) when the backing track plays to its
@@ -2266,7 +2279,7 @@ class LocalBackend(Backend):
             out_info = sd.query_devices(out_dev, "output")
             if input_info.channel > in_info["max_input_channels"]:
                 raise BackendError(
-                    f"Instrument '{inst.name}' needs input channel {input_info.channel} "
+                    f"Instrument '{inst.full_name}' needs input channel {input_info.channel} "
                     f"but device only has {in_info['max_input_channels']} channels."
                 )
             output_channels = min(config.output_channels, out_info["max_output_channels"])
@@ -2410,7 +2423,7 @@ class LocalBackend(Backend):
         in_info = sd.query_devices(in_dev, "input")
         if input_info.channel > in_info["max_input_channels"]:
             raise BackendError(
-                f"Instrument '{inst.name}' needs input channel {input_info.channel} "
+                f"Instrument '{inst.full_name}' needs input channel {input_info.channel} "
                 f"but device only has {in_info['max_input_channels']} channels."
             )
         out_info = sd.query_devices(out_dev, "output")
@@ -2441,7 +2454,7 @@ class LocalBackend(Backend):
         inst, engine = self._open_instrument_test_engine(instrument_name)
         stop_event = threading.Event()
         self._active_instrument_test = _ActiveInstrumentTest(
-            engine=engine, instrument_name=inst.name, stop_event=stop_event,
+            engine=engine, instrument_name=inst.full_name, stop_event=stop_event,
         )
         return inst, engine, stop_event
 
@@ -2472,8 +2485,8 @@ class LocalBackend(Backend):
         with self._record_lock:
             inst, engine, stop_event = self._begin_instrument_test_locked(instrument_name)
             self._emit("instrument_test_status", {
-                "phase": "train_high", "instrument": inst.name,
-                "status": f"Play the HIGHEST note '{inst.name}' can play, and hold it...",
+                "phase": "train_high", "instrument": inst.full_name,
+                "status": f"Play the HIGHEST note '{inst.full_name}' can play, and hold it...",
             })
 
             def on_low_captured(high_hz: float | None, low_hz: float | None) -> None:
@@ -2483,13 +2496,13 @@ class LocalBackend(Backend):
                     return  # stopped in the meantime
                 if high_hz is None or low_hz is None:
                     self._emit("instrument_test_status", {
-                        "phase": "idle", "instrument": inst.name,
+                        "phase": "idle", "instrument": inst.full_name,
                         "status": "Couldn't hear a clear note — try again, closer to the mic/pickup.",
                     })
                     return
                 freq_min, freq_max = min(high_hz, low_hz), max(high_hz, low_hz)
                 self._emit("instrument_test_status", {
-                    "phase": "trained", "instrument": inst.name,
+                    "phase": "trained", "instrument": inst.full_name,
                     "status": f"Trained: {freq_min:.0f}\N{EN DASH}{freq_max:.0f} Hz.",
                     "freq_min_hz": freq_min, "freq_max_hz": freq_max,
                 })
@@ -2500,8 +2513,8 @@ class LocalBackend(Backend):
                 if not still_active:
                     return  # stopped in the meantime
                 self._emit("instrument_test_status", {
-                    "phase": "train_low", "instrument": inst.name,
-                    "status": f"Got it. Now play the LOWEST note '{inst.name}' can play, and hold it...",
+                    "phase": "train_low", "instrument": inst.full_name,
+                    "status": f"Got it. Now play the LOWEST note '{inst.full_name}' can play, and hold it...",
                 })
                 low_capture = NoteCapture(
                     engine.sample_rate, _INSTRUMENT_TRAIN_CAPTURE_SECONDS,
@@ -2559,11 +2572,11 @@ class LocalBackend(Backend):
             input_info = config.resolve_input(inst.input_label)
             in_dev = resolve_device(sd, input_info.device, "input") if input_info else None
             if input_info is None or in_dev is None:
-                skipped.append(inst.name)
+                skipped.append(inst.full_name)
                 continue
             in_info = sd.query_devices(in_dev, "input")
             if input_info.channel > in_info["max_input_channels"]:
-                skipped.append(inst.name)
+                skipped.append(inst.full_name)
                 continue
             by_device.setdefault(in_dev, []).append((inst, input_info.channel - 1))
 
@@ -2678,7 +2691,7 @@ class LocalBackend(Backend):
                         s.close()
                     inst = config.get_instrument(name)
                     if inst is not None:
-                        config.last_selected_instrument = inst.name
+                        config.last_selected_instrument = inst.full_name
                         config.save(self._config_path)
                     self._start_monitoring_locked()
                 self._emit("auto_detect_status", {
@@ -2733,7 +2746,7 @@ class LocalBackend(Backend):
             if not (0 <= req.track_index < len(project.setlist.tracks)):
                 raise BackendError("Invalid track selection.")
             track = project.setlist.tracks[req.track_index]
-            track = self._resolve_filter_slot(config, track, inst.name)
+            track = self._resolve_filter_slot(config, track, inst.full_name)
 
             input_info = config.resolve_input(inst.input_label)
             if input_info is None:
@@ -2766,7 +2779,7 @@ class LocalBackend(Backend):
             max_in = in_info["max_input_channels"]
             if input_info.channel > max_in:
                 raise BackendError(
-                    f"Instrument '{inst.name}' needs input channel {input_info.channel} "
+                    f"Instrument '{inst.full_name}' needs input channel {input_info.channel} "
                     f"but device only has {max_in} channels."
                 )
             output_channels = min(config.output_channels, out_info["max_output_channels"])
@@ -2795,7 +2808,7 @@ class LocalBackend(Backend):
 
             trim = int(config.latency_compensation_ms / 1000.0 * config.sample_rate)
             for other_inst, take_info in track.preferred_takes.items():
-                if other_inst.lower() == inst.name.lower():
+                if other_inst.lower() == inst.full_name.lower():
                     continue
                 take_path = project.completed_takes_dir / take_info.filename
                 if take_path.exists():
@@ -2908,8 +2921,7 @@ class LocalBackend(Backend):
             frame=frame,
             track_index=track_index,
             track_name=track_name,
-            instrument=session.inst.name,
-            instrument_full_name=session.instrument_full_name,
+            instrument=session.inst.full_name,
             instrument_label=session.inst.label,
         ))
 
@@ -2919,7 +2931,7 @@ class LocalBackend(Backend):
             session = self._active_session
             self._emit("recording_status", {
                 "phase": "waiting",
-                "status": f"Session started for '{session.inst.name}' in '{session.project.name}'.",
+                "status": f"Session started for '{session.inst.full_name}' in '{session.project.name}'.",
             })
 
     def _create_youtube_broadcast(self, config: StudioConfig, project: Project, inst) -> str | None:
@@ -2941,7 +2953,7 @@ class LocalBackend(Backend):
             stream_id = find_stream_id(access_token, config.youtube_stream_key)
             template_values = dict(
                 studio=config.studio_name, studio_location=config.studio_location,
-                musician=inst.musician or config.studio_musician, project=project.name, instrument=inst.name,
+                musician=inst.musician or config.studio_musician, project=project.name, instrument=inst.full_name,
             )
             title = render_stream_template(config.youtube_title_template, **template_values)
             description = render_stream_template(config.youtube_description_template, **template_values)
@@ -3025,7 +3037,7 @@ class LocalBackend(Backend):
         max_in = in_info["max_input_channels"]
         if input_info.channel > max_in:
             raise BackendError(
-                f"Instrument '{inst.name}' needs input channel {input_info.channel} "
+                f"Instrument '{inst.full_name}' needs input channel {input_info.channel} "
                 f"but device only has {max_in} channels."
             )
         output_channels = min(config.output_channels, out_info["max_output_channels"])
@@ -3062,7 +3074,7 @@ class LocalBackend(Backend):
 
         session_name = wall_timestamp().replace(":", "-").replace(" ", "_")
         from .vault import vault_session_dir
-        session_dir = ensure_dir(vault_session_dir(config, project.name, f"{session_name}_{inst.name}"))
+        session_dir = ensure_dir(vault_session_dir(config, project.name, f"{session_name}_{inst.full_name}"))
         session_flac = session_dir / "session.flac"
         engine.start_session_recording(session_flac)
 
@@ -3155,7 +3167,6 @@ class LocalBackend(Backend):
             engine=engine, project=project, inst=inst, session_dir=session_dir,
             session_start=timestamp_now(),
             musician=inst.musician or config.studio_musician,
-            instrument_full_name=inst.full_name,
             studio_name=config.studio_name, studio_location=config.studio_location,
             session_flac=session_flac, session_video=session_dir / "session_video.mp4",
             video_recorder=video_recorder, session_video_raw=session_video_raw,
@@ -3163,7 +3174,7 @@ class LocalBackend(Backend):
             mix_start_frame=mix_start_frame, stream_feeder=stream_feeder,
             youtube_broadcast_id=youtube_broadcast_id,
         )
-        self._log_session_event("session_start", f"instrument={inst.name}")
+        self._log_session_event("session_start", f"instrument={inst.full_name}")
 
     def end_session(self) -> None:
         self._end_session(missing_ok=False)
@@ -3277,8 +3288,7 @@ class LocalBackend(Backend):
     def _save_session_log(self, session: "_ActiveSession") -> Path | None:
         log_path = session.session_dir / "session_log.json"
         data = {
-            "instrument": session.inst.name,
-            "instrument_full_name": session.instrument_full_name,
+            "instrument": session.inst.full_name,
             "instrument_label": session.inst.label,
             "musician": session.musician,
             "project": session.project.name,

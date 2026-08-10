@@ -77,12 +77,13 @@ class CompletedTake:
     # Whichever instrument was active when the segment started (its
     # record_start/back_to_start event's own instrument fields — see
     # backend.py's _SessionEvent) — per-take rather than read once from
-    # the session log's top-level instrument/instrument_full_name/
-    # instrument_label fields, so a future session spanning more than one
-    # instrument (mid-session auto-detect switching) files each take
-    # under the instrument actually active when it was recorded.
+    # the session log's top-level instrument/instrument_label fields, so
+    # a future session spanning more than one instrument (mid-session
+    # auto-detect switching) files each take under the instrument
+    # actually active when it was recorded. `instrument` is the
+    # Instrument's full_name (its only identifying field — see
+    # config.py's Instrument).
     instrument: str = ""
-    instrument_full_name: str = ""
     instrument_label: str = ""
 
 
@@ -97,7 +98,6 @@ def parse_session_log(data: dict) -> list[CompletedTake]:
     track_name = ""
     start_wall = ""
     instrument = ""
-    instrument_full_name = ""
     instrument_label = ""
 
     def close_segment(end_frame: int | None, natural_end: bool) -> None:
@@ -111,8 +111,7 @@ def parse_session_log(data: dict) -> list[CompletedTake]:
                 track_index=track_index, track_name=track_name,
                 start_frame=start_frame, end_frame=end_frame,
                 start_wall_time=start_wall,
-                instrument=instrument, instrument_full_name=instrument_full_name,
-                instrument_label=instrument_label,
+                instrument=instrument, instrument_label=instrument_label,
             ))
         start_frame = None
 
@@ -133,7 +132,6 @@ def parse_session_log(data: dict) -> list[CompletedTake]:
             # events would all have "" here) — same instrument either way
             # for one of those, so the fallback is exact, not a guess.
             instrument = event.get("instrument") or data.get("instrument", "")
-            instrument_full_name = event.get("instrument_full_name") or data.get("instrument_full_name", "")
             instrument_label = event.get("instrument_label") or data.get("instrument_label", "")
         elif etype == "song_end":
             close_segment(frame, natural_end=True)

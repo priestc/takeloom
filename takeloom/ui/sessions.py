@@ -154,7 +154,7 @@ class SessionsFrame(ttk.Frame):
         self._build_detail(session_dir, detail)
 
     def _build_detail(self, session_dir: str, detail: dict) -> None:
-        instrument_names = [inst.name for inst in self.config_obj.instruments]
+        instrument_names = [inst.full_name for inst in self.config_obj.instruments]
         current_instrument = detail.get("instrument", "")
 
         header = ttk.Frame(self.detail_frame)

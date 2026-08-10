@@ -457,28 +457,27 @@ def setup_instruments() -> None:
     if existing.instruments:
         click.echo("Existing instruments:")
         for inst in existing.instruments:
-            click.echo(f"  - {inst.name} ({inst.input_label})")
+            click.echo(f"  - {inst.full_name} ({inst.input_label})")
         click.echo()
 
     instruments: list[Instrument] = []
     while True:
         if not click.confirm("Add an instrument?", default=bool(not instruments)):
             break
-        name = click.prompt("  Instrument name")
         choice = click.prompt("  Input number", type=int, default=1)
         if 1 <= choice <= len(existing.input_labels):
             input_label_name = existing.input_labels[choice - 1].label
         else:
             click.echo(f"  Invalid choice, using first input.")
             input_label_name = existing.input_labels[0].label
-        full_name = click.prompt("  Full name (manufacturer & model)", default="", show_default=False)
+        full_name = click.prompt("  Full name (manufacturer & model)")
         label = _prompt_instrument_label()
         musician = click.prompt("  Musician name", default="", show_default=False)
         instruments.append(Instrument(
-            name=name, input_label=input_label_name,
+            input_label=input_label_name,
             full_name=full_name, label=label, musician=musician,
         ))
-        click.echo(f"  Added '{name}'.\n")
+        click.echo(f"  Added '{full_name}'.\n")
 
     if instruments:
         existing.instruments = instruments
@@ -490,7 +489,7 @@ def setup_instruments() -> None:
     if existing.instruments:
         click.echo("Instruments:")
         for inst in existing.instruments:
-            click.echo(f"  - {inst.name} ({inst.input_label})")
+            click.echo(f"  - {inst.full_name} ({inst.input_label})")
 
 
 @main.command()
@@ -713,9 +712,10 @@ def listen(project_name: str | None) -> None:
 @click.argument("instrument")
 @click.argument("project_name", required=False, default=None)
 def start_session(instrument: str, project_name: str | None) -> None:
-    """Start a recording session for INSTRUMENT, in PROJECT_NAME (falls
-    back to the last-used project). Run 'takeloom sync-pull' first if
-    another machine may have newer project files.
+    """Start a recording session for INSTRUMENT (its full name — see
+    config.py's Instrument, e.g. "Fender Stratocaster"), in PROJECT_NAME
+    (falls back to the last-used project). Run 'takeloom sync-pull' first
+    if another machine may have newer project files.
 
     Runs on LocalBackend — the same recording engine and Stream Deck driver
     (RecordingDeckDriver) as the Tk UI and `takeloom server`, so behavior is
@@ -743,12 +743,11 @@ def start_session(instrument: str, project_name: str | None) -> None:
         else:
             click.echo(f"  Invalid choice, using first input.")
             input_label_name = config.input_labels[0].label
-        full_name = click.prompt("  Full name (manufacturer & model)", default="", show_default=False)
         label = _prompt_instrument_label()
         musician = click.prompt("  Musician name", default=config.studio_musician, show_default=bool(config.studio_musician))
         inst = Instrument(
-            name=instrument, input_label=input_label_name,
-            full_name=full_name, label=label, musician=musician,
+            input_label=input_label_name,
+            full_name=instrument, label=label, musician=musician,
         )
         config.instruments.append(inst)
         config.save()
@@ -765,25 +764,25 @@ def start_session(instrument: str, project_name: str | None) -> None:
     # matching comment in server_command; a CLI recording session is no
     # different from a headless server in that regard.
 
-    click.echo(f"=== Recording Session: {project.name} / {inst.name} ===")
+    click.echo(f"=== Recording Session: {project.name} / {inst.full_name} ===")
     click.echo(f"Tracks: {len(project.setlist.tracks)}")
     click.echo("Controls: [r] record/unpause/stop  [c] video check  [n]ext track  [b] restart take")
     click.echo("          [l]ower volume  [u]p volume  [[]lower takes  []]raise takes")
     click.echo("          [q]uit\n")
 
     try:
-        backend.begin_session(project.name, inst.name)
+        backend.begin_session(project.name, inst.full_name)
     except BackendError as e:
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1)
 
     def _resolve_cli_request() -> StartRecordingRequest | None:
-        index = backend.next_untaken_track_index(project.name, inst.name)
+        index = backend.next_untaken_track_index(project.name, inst.full_name)
         if index is None:
-            click.echo(f"All tracks already have a take for '{inst.name}'.")
+            click.echo(f"All tracks already have a take for '{inst.full_name}'.")
             return None
         return StartRecordingRequest(
-            project_name=project.name, instrument_name=inst.name, track_index=index,
+            project_name=project.name, instrument_name=inst.full_name, track_index=index,
         )
 
     def _open_video_check_result(path: Path, has_video: bool) -> None:
@@ -842,7 +841,9 @@ def start_session(instrument: str, project_name: str | None) -> None:
 @main.command()
 @click.argument("instrument")
 def measure_latency(instrument: str) -> None:
-    """Measure and calibrate latency compensation by ear for INSTRUMENT."""
+    """Measure and calibrate latency compensation by ear for INSTRUMENT
+    (its full name — see config.py's Instrument, e.g. "Fender
+    Stratocaster")."""
     config = StudioConfig.load()
     inst = config.get_instrument(instrument)
     if inst is None:
@@ -859,12 +860,11 @@ def measure_latency(instrument: str) -> None:
         else:
             click.echo("  Invalid choice, using first input.")
             input_label_name = config.input_labels[0].label
-        full_name = click.prompt("  Full name (manufacturer & model)", default="", show_default=False)
         label = _prompt_instrument_label()
         musician = click.prompt("  Musician name", default=config.studio_musician, show_default=bool(config.studio_musician))
         inst = Instrument(
-            name=instrument, input_label=input_label_name,
-            full_name=full_name, label=label, musician=musician,
+            input_label=input_label_name,
+            full_name=instrument, label=label, musician=musician,
         )
         config.instruments.append(inst)
         config.save()
@@ -891,7 +891,7 @@ def measure_latency(instrument: str) -> None:
 
     if input_channels > in_info["max_input_channels"]:
         click.echo(
-            f"Error: Instrument '{inst.name}' needs input channel {input_channels} "
+            f"Error: Instrument '{inst.full_name}' needs input channel {input_channels} "
             f"but device only has {in_info['max_input_channels']} channels.",
             err=True,
         )
@@ -918,7 +918,7 @@ def measure_latency(instrument: str) -> None:
 
     try:
         click.echo("=== Latency Measurement ===\n")
-        click.echo(f"  Instrument:  {inst.name}")
+        click.echo(f"  Instrument:  {inst.full_name}")
         click.echo(f"  Input:       {input_info.label} ({input_info.device} ch{input_info.channel})")
         click.echo(f"  Output:      {config.output_device}")
         click.echo()

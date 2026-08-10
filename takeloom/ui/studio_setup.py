@@ -111,7 +111,8 @@ class _InstrumentRow:
     There's no per-row Detect button — see StudioSetupFrame's single
     top-of-section "Detect" button and its "detect_all_status" handling,
     which calls this row's set_status("Detected!") directly by matching
-    on instrument name."""
+    on instrument full name (there's no separate "name" field — full_name
+    is the instrument's only identifier, see config.py's Instrument)."""
 
     def __init__(
         self,
@@ -121,7 +122,6 @@ class _InstrumentRow:
         on_remove,
         on_train,
         on_stop,
-        name: str = "",
         input_label: str = "",
         full_name: str = "",
         label: str = "",
@@ -131,7 +131,6 @@ class _InstrumentRow:
     ) -> None:
         self._on_remove = on_remove
 
-        self.name_var = tk.StringVar(value=name)
         self.input_label_var = tk.StringVar(value=input_label or (input_label_names[0] if input_label_names else ""))
         self.full_name_var = tk.StringVar(value=full_name)
         self.label_var = tk.StringVar(value=label or INSTRUMENT_LABELS[0])
@@ -145,10 +144,9 @@ class _InstrumentRow:
         self.stop_button.state(["disabled"])
 
         self.widgets = [
-            ttk.Entry(table, textvariable=self.name_var, width=10),
+            ttk.Entry(table, textvariable=self.full_name_var, width=20),
             ttk.Combobox(table, textvariable=self.label_var, values=INSTRUMENT_LABELS, state="readonly", width=16),
             ttk.Combobox(table, textvariable=self.input_label_var, values=input_label_names, state="readonly", width=12),
-            ttk.Entry(table, textvariable=self.full_name_var, width=16),
             ttk.Entry(table, textvariable=self.musician_var, width=10),
             ttk.Entry(table, textvariable=self.freq_min_var, width=6),
             ttk.Entry(table, textvariable=self.freq_max_var, width=6),
@@ -172,13 +170,13 @@ class _InstrumentRow:
         self.status_label.destroy()
 
     def to_instrument(self) -> Instrument | None:
-        name = self.name_var.get().strip()
+        full_name = self.full_name_var.get().strip()
         input_label = self.input_label_var.get().strip()
-        if not name or not input_label:
+        if not full_name or not input_label:
             return None
         return Instrument(
-            name=name, input_label=input_label,
-            full_name=self.full_name_var.get().strip(),
+            input_label=input_label,
+            full_name=full_name,
             label=self.label_var.get().strip(),
             musician=self.musician_var.get().strip(),
             freq_min_hz=self._parse_hz(self.freq_min_var),
@@ -297,7 +295,7 @@ class StudioSetupFrame(ttk.Frame):
         elif phase == "detected":
             name = (data.get("instrument") or "").strip().lower()
             for row in self._instrument_rows:
-                if row.name_var.get().strip().lower() == name:
+                if row.full_name_var.get().strip().lower() == name:
                     row.set_status("Detected!")
                     break
         elif phase == "stopped":
@@ -517,8 +515,8 @@ class StudioSetupFrame(ttk.Frame):
                         "sharing a label (a Stratocaster and a Telecaster, say) count as satisfying the same "
                         "song's need for a take, so recording one with either won't have the setlist offer "
                         "it again for the other. Min/Max Hz is the frequency range the Record tab's live "
-                        "instrument detector compares against — leave blank to fall back to a guess from "
-                        "the instrument's name. \"Train\" sets it automatically from two notes you play. "
+                        "instrument detector compares against — leave blank to fall back to a default for "
+                        "the instrument's label. \"Train\" sets it automatically from two notes you play. "
                         "\"Detect\" above listens on every instrument's own input at once and marks each "
                         "row \"Detected!\" as you play it — handy for confirming cabling before a session.",
             foreground="#666666", wraplength=760, justify="left",
@@ -536,13 +534,13 @@ class StudioSetupFrame(ttk.Frame):
         row += 1
 
         for col, text in enumerate(
-            ["Name", "Label", "Input", "Full name", "Musician", "Min Hz", "Max Hz", "", "", "", "Status"]
+            ["Full name", "Label", "Input", "Musician", "Min Hz", "Max Hz", "", "", "", "Status"]
         ):
             ttk.Label(self.table, text=text).grid(row=0, column=col, sticky="w", padx=(0, 6))
 
         for inst in self.config_obj.instruments:
             self._add_instrument_row(
-                input_label_names, name=inst.name, input_label=inst.input_label,
+                input_label_names, input_label=inst.input_label,
                 full_name=inst.full_name, label=inst.label, musician=inst.musician,
                 freq_min_hz=inst.freq_min_hz, freq_max_hz=inst.freq_max_hz,
             )
@@ -560,7 +558,7 @@ class StudioSetupFrame(ttk.Frame):
         return [name for row in self._input_rows if (name := row.label_var.get().strip())]
 
     def _add_instrument_row(
-        self, input_label_names: list[str], name: str = "", input_label: str = "",
+        self, input_label_names: list[str], input_label: str = "",
         full_name: str = "", label: str = "", musician: str = "",
         freq_min_hz: float = 0.0, freq_max_hz: float = 0.0,
     ) -> None:
@@ -570,7 +568,7 @@ class StudioSetupFrame(ttk.Frame):
         row = _InstrumentRow(
             self.table, row_index, input_label_names, self._remove_instrument_row,
             on_train=self._on_train_instrument, on_stop=self._on_stop_instrument_test,
-            name=name, input_label=input_label, full_name=full_name, label=label, musician=musician,
+            input_label=input_label, full_name=full_name, label=label, musician=musician,
             freq_min_hz=freq_min_hz, freq_max_hz=freq_max_hz,
         )
         self._instrument_rows.append(row)
@@ -645,9 +643,9 @@ class StudioSetupFrame(ttk.Frame):
             return  # a test is already running (buttons are disabled, but guard anyway)
         inst = row.to_instrument()
         if inst is None:
-            messagebox.showerror("Cannot test", "Enter a name and input for this instrument first.")
+            messagebox.showerror("Cannot test", "Enter a full name and input for this instrument first.")
             return
-        self._on_save(on_success=lambda: self._begin_instrument_test(row, inst.name))
+        self._on_save(on_success=lambda: self._begin_instrument_test(row, inst.full_name))
 
     def _begin_instrument_test(self, row: _InstrumentRow, instrument_name: str) -> None:
         self._testing_row = row

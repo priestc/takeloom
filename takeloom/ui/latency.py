@@ -110,7 +110,7 @@ class LatencyFrame(ttk.Frame):
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 12))
         row += 1
 
-        instrument_names = [inst.name for inst in self.config_obj.instruments]
+        instrument_names = [inst.full_name for inst in self.config_obj.instruments]
         default_instrument = self.config_obj.last_selected_instrument
         if default_instrument not in instrument_names:
             default_instrument = instrument_names[0] if instrument_names else ""

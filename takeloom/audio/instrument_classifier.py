@@ -149,7 +149,7 @@ def classify_audio_file(path: Path, instruments: list) -> tuple[str | None, floa
     file can't be read."""
     if not instruments:
         return None, 0.0
-    candidates = [(inst.name, effective_frequency_range(inst)) for inst in instruments]
+    candidates = [(inst.full_name, effective_frequency_range(inst)) for inst in instruments]
 
     import soundfile as sf
     try:
@@ -237,7 +237,7 @@ class InstrumentClassifier:
         on_detected: Callable[[str, float], None],
     ) -> None:
         self._sample_rate = sample_rate
-        self._ranges = [(inst.name, effective_frequency_range(inst)) for inst in instruments]
+        self._ranges = [(inst.full_name, effective_frequency_range(inst)) for inst in instruments]
         self._on_detected = on_detected
         self._window_samples = int(sample_rate * _ANALYSIS_WINDOW_SECONDS)
         self._buffer: list[np.ndarray] = []
