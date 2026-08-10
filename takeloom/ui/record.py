@@ -56,9 +56,15 @@ class RecordFrame(ttk.Frame):
         # "idle" (no session) | "waiting" (session open, track cued or
         # between songs) | "recording" (backing playing). Non-idle means a
         # session — the one continuous recording — is running, which locks
-        # the instrument/project/track controls for its whole duration.
+        # the project/track controls for its whole duration.
         self._phase = "idle"
         self._video_check_phase = "idle"  # "idle" | "recording"
+        # Name of whichever instrument backend.py's start_auto_detect_
+        # instrument locked onto — "" until it has (see _start_auto_
+        # detect/_handle_auto_detect_status). This is what a session
+        # actually starts with; there's no manual instrument picker
+        # anymore.
+        self._detected_instrument = ""
         self._monitoring_mode = "production"  # "production" | "recording" — refreshed in _on_loaded
         self._preview_sub = None
         self._preview_imgtk = None
@@ -128,7 +134,16 @@ class RecordFrame(ttk.Frame):
     def _attach_backend(self) -> None:
         if self._current_backend is not None:
             self._current_backend.off_event(self._on_backend_event)
+            if not self._detected_instrument:
+                try:
+                    self._current_backend.stop_auto_detect_instrument()
+                except BackendError:
+                    pass
         self._stop_preview()
+        self._detected_instrument = ""
+        if hasattr(self, "detected_instrument_var"):
+            self.detected_instrument_var.set("")
+            self.auto_detect_status_var.set("")
         self._current_backend = self.app_state.backend
         self._current_backend.on_event(self._on_backend_event)
         self._streamdeck_driver.rebind_backend(self._current_backend)
@@ -177,6 +192,7 @@ class RecordFrame(ttk.Frame):
 
         self._start_preview()
         self._on_project_change()
+        self._start_auto_detect()
 
     # --- left column: instrument/project/preview/controls ---
 
@@ -187,30 +203,34 @@ class RecordFrame(ttk.Frame):
         )
         row += 1
 
-        # Live best-guess from the realtime instrument classifier (see
-        # backend.py's "instrument_detected" event / audio/
-        # instrument_classifier.py) — a testing/calibration aid to compare
-        # against the actual instrument being played, not (yet) something
-        # that changes what gets recorded. Blank outside an open session —
-        # cleared in _handle_backend_event's phase=="idle" handling.
+        # No more manual Instrument dropdown — this frame kicks off
+        # backend.py's start_auto_detect_instrument() on load (and again
+        # each time a session ends), which listens across every
+        # configured instrument's own channel at once and locks onto
+        # whichever one the classifier commits to; that becomes "the
+        # instrument" the next recording uses, same role the dropdown
+        # used to play. This label doubles as that flow's live status
+        # ("Listening...") and, once a session is open, the same "here's
+        # what we think you're playing" realtime display it always was
+        # (see "instrument_detected" handling below) — the two don't
+        # conflict since auto-detect only ever runs before a session
+        # starts. See _handle_auto_detect_status/_start_auto_detect.
+        detect_row = ttk.Frame(left)
+        detect_row.grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 2))
         self.detected_instrument_var = tk.StringVar(value="")
         ttk.Label(
-            left, textvariable=self.detected_instrument_var,
+            detect_row, textvariable=self.detected_instrument_var,
             font=("TkDefaultFont", 28, "bold"), foreground="#2a6db0",
-        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 12))
+        ).pack(side="left")
+        self.redetect_button = ttk.Button(detect_row, text="Redetect", command=self._on_redetect_instrument)
+        self.redetect_button.pack(side="left", padx=(12, 0))
+        self.redetect_button.state(["disabled"])  # enabled once something's actually been detected
         row += 1
 
-        instrument_names = [inst.name for inst in self.config_obj.instruments]
-        default_instrument = self.config_obj.last_selected_instrument
-        if default_instrument not in instrument_names:
-            default_instrument = instrument_names[0] if instrument_names else ""
-        ttk.Label(left, text="Instrument").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.instrument_var = tk.StringVar(value=default_instrument)
-        self.instrument_combo = ttk.Combobox(
-            left, textvariable=self.instrument_var, values=instrument_names, state="readonly", width=28,
+        self.auto_detect_status_var = tk.StringVar(value="")
+        ttk.Label(left, textvariable=self.auto_detect_status_var, foreground="#666666", wraplength=360).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(0, 12)
         )
-        self.instrument_combo.grid(row=row, column=1, sticky="w")
-        self.instrument_combo.bind("<<ComboboxSelected>>", self._on_instrument_change)
         row += 1
 
         default_project = self.config_obj.last_selected_project
@@ -228,7 +248,7 @@ class RecordFrame(ttk.Frame):
         ttk.Button(project_row, text="+ New Project", command=self._on_new_project).pack(side="left", padx=(6, 0))
         row += 1
 
-        if not instrument_names:
+        if not self.config_obj.instruments:
             ttk.Label(
                 left, text="No instruments configured. Set them up on the Studio Setup tab first.",
                 foreground="#b00020",
@@ -294,7 +314,7 @@ class RecordFrame(ttk.Frame):
         if self.app_state.backend.is_remote():
             self.video_check_button.state(["disabled"])
             self.video_check_button.grid_remove()
-        elif not instrument_names or not self._project_names:
+        elif not self.config_obj.instruments or not self._project_names:
             self.video_check_button.state(["disabled"])
 
     # --- audio filters (compressor now, more later) ---
@@ -479,7 +499,7 @@ class RecordFrame(ttk.Frame):
         if not self._setlist:
             self.setlist_total_var.set("")
             return
-        inst_name = self.instrument_var.get()
+        inst_name = self._detected_instrument
         for track in self._setlist.tracks:
             self.setlist_listbox.insert(tk.END, self._track_display(track, inst_name))
         self._update_setlist_total()
@@ -576,32 +596,79 @@ class RecordFrame(ttk.Frame):
         self._setlist = Setlist.from_dict(data)
         self._refresh_setlist()
 
-    def _on_instrument_change(self, _event: object = None) -> None:
-        self._refresh_setlist()
-        self._update_start_button_state()
-        if _event is not None:
-            self._persist_last_selection(restart_monitor=True)
-
-    def _persist_last_selection(self, restart_monitor: bool = False) -> None:
-        """Remembered so the Record tab reopens on the same pair next
-        launch. restart_monitor=True (instrument dropdown only — the
-        project dropdown doesn't affect what's being monitored) also points
-        the ambient monitor stream at the newly selected instrument right
-        away, chained after the save so it reads the updated config rather
-        than racing it — see Backend.restart_monitoring()."""
+    def _persist_last_selection(self) -> None:
+        """Remembered so the Record tab reopens on the same project next
+        launch. last_selected_instrument isn't touched here — there's no
+        manual instrument picker anymore, start_auto_detect_instrument
+        persists it itself the moment it locks onto one (see backend.py)."""
         if self.config_obj is None:
             return
-        self.config_obj.last_selected_instrument = self.instrument_var.get()
         self.config_obj.last_selected_project = self.project_var.get()
         backend = self.app_state.backend
         config = self.config_obj
+        self._run_backend(lambda: backend.save_config(config))
 
-        def _save() -> None:
-            backend.save_config(config)
-            if restart_monitor:
-                backend.restart_monitoring()
+    # --- instrument auto-detect (replaces the old manual dropdown) ---
 
-        self._run_backend(_save)
+    def _start_auto_detect(self) -> None:
+        """Kick off backend.py's start_auto_detect_instrument() — called
+        once when this frame first loads and again every time a session
+        ends (see _handle_backend_event's phase=="idle" handling), so the
+        next recording always starts from a fresh listen rather than
+        silently reusing whatever was detected last time. A no-op error
+        (e.g. a session happens to already be active, or nothing's
+        available right now) just leaves the status line reporting it —
+        Redetect lets the user retry by hand."""
+        if self._detected_instrument:
+            return  # already locked onto something; Redetect is how to reset that
+        self.detected_instrument_var.set("")
+        self.auto_detect_status_var.set("Listening...")
+        backend = self.app_state.backend
+        self._run_backend(
+            lambda: backend.start_auto_detect_instrument(),
+            lambda _result, error: self._on_auto_detect_start_result(error),
+        )
+
+    def _on_auto_detect_start_result(self, error: str | None) -> None:
+        if not self.winfo_exists():
+            return
+        if error:
+            self.auto_detect_status_var.set(error)
+
+    def _on_redetect_instrument(self) -> None:
+        self._detected_instrument = ""
+        self.detected_instrument_var.set("")
+        self._update_start_button_state()
+        self._refresh_setlist()
+        self.redetect_button.state(["disabled"])
+        backend = self.app_state.backend
+        # Fire-and-forget the stop (a no-op if nothing's actually still
+        # running, e.g. detection already finished) then start a fresh
+        # scan — chained so the second call doesn't race the first's
+        # mutual-exclusion teardown.
+        self._run_backend(
+            lambda: (backend.stop_auto_detect_instrument(), backend.start_auto_detect_instrument()),
+            lambda _result, error: self._on_auto_detect_start_result(error),
+        )
+        self.auto_detect_status_var.set("Listening...")
+
+    def _handle_auto_detect_status(self, data: dict) -> None:
+        phase = data.get("phase")
+        if phase == "listening":
+            self.auto_detect_status_var.set(data.get("status", "Listening..."))
+        elif phase == "detected":
+            name = data.get("instrument", "")
+            self._detected_instrument = name
+            self.detected_instrument_var.set(name.upper())
+            label = data.get("label", "")
+            full_name = data.get("full_name", "")
+            detail = " — ".join(part for part in (label, full_name) if part)
+            self.auto_detect_status_var.set(f"Detected ({detail})" if detail else "Detected.")
+            self.redetect_button.state(["!disabled" if self._phase == "idle" else "disabled"])
+            self._refresh_setlist()
+            self._update_start_button_state()
+        elif phase == "stopped":
+            self.auto_detect_status_var.set("")
 
     def _on_setlist_select(self, _event: object = None) -> None:
         sel = self.setlist_listbox.curselection()
@@ -740,7 +807,7 @@ class RecordFrame(ttk.Frame):
         if not hasattr(self, "video_check_button"):
             return
         ready = (
-            bool(self.instrument_var.get())
+            bool(self._detected_instrument)
             and self._project_name is not None
             and self._selected_track_index is not None
         )
@@ -752,11 +819,11 @@ class RecordFrame(ttk.Frame):
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         combo_state = "readonly" if enabled else "disabled"
-        self.instrument_combo.configure(state=combo_state)
         self.project_combo.configure(state=combo_state)
         list_state = "normal" if enabled else "disabled"
         self.setlist_listbox.configure(state=list_state)
         self.refresh_devices_button.state(["!disabled"] if enabled else ["disabled"])
+        self.redetect_button.state(["!disabled" if (enabled and self._detected_instrument) else "disabled"])
 
     # --- refresh devices (camera/audio plugged in after the UI was launched) ---
 
@@ -846,6 +913,15 @@ class RecordFrame(ttk.Frame):
         self._stop_preview()
         if self._current_backend is not None:
             self._current_backend.off_event(self._on_backend_event)
+            if not self._detected_instrument:
+                # Fire-and-forget: this frame is persistent (see app.py's
+                # TABS), so _on_destroy only actually runs at app
+                # shutdown — best-effort cleanup, not something anything
+                # else waits on.
+                try:
+                    self._current_backend.stop_auto_detect_instrument()
+                except BackendError:
+                    pass
         self.app_state.remove_listener(self._on_app_state_changed)
         self._streamdeck_driver.disconnect()
 
@@ -875,12 +951,16 @@ class RecordFrame(ttk.Frame):
             self._stop_recording()
 
     def _build_selected_request(self) -> StartRecordingRequest | None:
-        """Build a StartRecordingRequest from the current instrument/project/
-        track selection — shared by _start_recording and _start_video_check.
-        Shows an error dialog and returns None if incomplete."""
-        instrument_name = self.instrument_var.get()
-        if not instrument_name or not self._project_name:
-            messagebox.showerror("Cannot start", "Select an instrument and a project first.")
+        """Build a StartRecordingRequest from the auto-detected instrument
+        and current project/track selection — shared by _start_recording
+        and _start_video_check. Shows an error dialog and returns None if
+        incomplete."""
+        instrument_name = self._detected_instrument
+        if not instrument_name:
+            messagebox.showerror("Cannot start", "Still listening for an instrument — play something first.")
+            return None
+        if not self._project_name:
+            messagebox.showerror("Cannot start", "Select a project first.")
             return None
 
         if self._selected_track_index is not None:
@@ -1021,11 +1101,21 @@ class RecordFrame(ttk.Frame):
                 self._set_controls_enabled(self._phase == "idle")
                 if self._phase == "idle":
                     self._refresh_setlist_from_server()
-                    self.detected_instrument_var.set("")
+                    # Reset and re-listen for the *next* recording — a
+                    # session just ended, and the performer may well pick
+                    # up something else for the next one. See _start_
+                    # auto_detect's own no-op guard for why this is safe
+                    # to call unconditionally rather than only after an
+                    # actual take (it also fires after a session that
+                    # never got a take at all).
+                    self._detected_instrument = ""
+                    self._start_auto_detect()
                 self._update_start_button_state()
         elif event == "instrument_detected":
             if "instrument" in data:
                 self.detected_instrument_var.set(data["instrument"].upper())
+        elif event == "auto_detect_status":
+            self._handle_auto_detect_status(data)
         elif event == "video_check_status":
             if "status" in data:
                 self.status_var.set(data["status"])

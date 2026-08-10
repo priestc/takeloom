@@ -74,6 +74,16 @@ class CompletedTake:
     start_frame: int
     end_frame: int
     start_wall_time: str  # wall_time of the segment's record_start/back_to_start
+    # Whichever instrument was active when the segment started (its
+    # record_start/back_to_start event's own instrument fields — see
+    # backend.py's _SessionEvent) — per-take rather than read once from
+    # the session log's top-level instrument/instrument_full_name/
+    # instrument_label fields, so a future session spanning more than one
+    # instrument (mid-session auto-detect switching) files each take
+    # under the instrument actually active when it was recorded.
+    instrument: str = ""
+    instrument_full_name: str = ""
+    instrument_label: str = ""
 
 
 def parse_session_log(data: dict) -> list[CompletedTake]:
@@ -86,6 +96,9 @@ def parse_session_log(data: dict) -> list[CompletedTake]:
     track_index = 0
     track_name = ""
     start_wall = ""
+    instrument = ""
+    instrument_full_name = ""
+    instrument_label = ""
 
     def close_segment(end_frame: int | None, natural_end: bool) -> None:
         nonlocal start_frame
@@ -98,6 +111,8 @@ def parse_session_log(data: dict) -> list[CompletedTake]:
                 track_index=track_index, track_name=track_name,
                 start_frame=start_frame, end_frame=end_frame,
                 start_wall_time=start_wall,
+                instrument=instrument, instrument_full_name=instrument_full_name,
+                instrument_label=instrument_label,
             ))
         start_frame = None
 
@@ -113,6 +128,13 @@ def parse_session_log(data: dict) -> list[CompletedTake]:
             track_index = event.get("track_index", 0)
             track_name = event.get("track_name", "")
             start_wall = event.get("wall_time", "")
+            # Fall back to the session-wide fields for a log recorded
+            # before events carried their own instrument (this file's
+            # events would all have "" here) — same instrument either way
+            # for one of those, so the fallback is exact, not a guess.
+            instrument = event.get("instrument") or data.get("instrument", "")
+            instrument_full_name = event.get("instrument_full_name") or data.get("instrument_full_name", "")
+            instrument_label = event.get("instrument_label") or data.get("instrument_label", "")
         elif etype == "song_end":
             close_segment(frame, natural_end=True)
         elif etype in ("track_skipped", "song_stopped", "track_loaded", "session_end"):
@@ -188,6 +210,17 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                 # slot's own label ("Random ..."). Always used for the
                 # archived take's filename/watermark.
                 track_name = take.track_name or slot.name
+                # take.instrument (this take's own record_start/back_to_
+                # start event) rather than the session-wide `instrument`
+                # — the same value for now (one instrument per session),
+                # but this is what makes take filing correct once a
+                # session can span more than one instrument. Falls back
+                # to the session-wide field only for a log recorded
+                # before events carried their own (parse_session_log
+                # already does this same fallback, so take.instrument is
+                # only ever "" here for a session with literally no
+                # instrument recorded at all).
+                take_instrument = take.instrument or instrument
 
                 # For a filter slot, the take belongs to whatever song got
                 # drawn this session (draw_info), not the slot's own
@@ -202,26 +235,30 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                     take_backing_track = slot.backing_track
                     take_source = slot.source_label()
 
-                take_num = next_take_number(completed_dir, track_name, instrument)
-                flac_name = take_filename(track_name, instrument, take_num, take_source, take_backing_track, "flac")
+                take_num = next_take_number(completed_dir, track_name, take_instrument)
+                flac_name = take_filename(track_name, take_instrument, take_num, take_source, take_backing_track, "flac")
                 _copy_flac_segment(src, start, end, completed_dir / flac_name)
 
                 has_video = False
                 if have_video:
                     from ..video.capture import clip_session_video, format_watermark_text
                     watermark = format_watermark_text(
-                        musician, instrument, take.start_wall_time, track_name,
+                        musician, take_instrument, take.start_wall_time, track_name,
                     )
                     has_video = clip_session_video(
                         session_video_raw, session_mix_flac, completed_dir / flac_name,
-                        completed_dir / take_filename(track_name, instrument, take_num, take_source, take_backing_track, "mp4"),
+                        completed_dir / take_filename(
+                            track_name, take_instrument, take_num, take_source, take_backing_track, "mp4",
+                        ),
                         mix_start_s=(start - mix_start_frame) / sample_rate,
                         duration_s=(end - start) / sample_rate,
                         watermark_text=watermark, video_offset_ms=video_offset_ms,
                     )
                     videos += has_video
 
-                take_info = TakeInfo(instrument=instrument, take_number=take_num, filename=flac_name, has_video=has_video)
+                take_info = TakeInfo(
+                    instrument=take_instrument, take_number=take_num, filename=flac_name, has_video=has_video,
+                )
                 if slot.is_inspiration_filter:
                     # Recorded into the shared vault-wide index (vault.py),
                     # not the slot's own top-level preferred_takes — the
@@ -235,10 +272,10 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                         record_inspiration_take(
                             root, draw_info["inspiration_track_id"], draw_info["name"],
                             draw_info["backing_track"], draw_info.get("duration_seconds", 0.0),
-                            instrument, take_info,
+                            take_instrument, take_info,
                         )
                 else:
-                    slot.set_preferred_take(instrument, take_info)
+                    slot.set_preferred_take(take_instrument, take_info)
                     if slot.inspiration_track_id:
                         # A regular (non-filter) inspiration-sourced track:
                         # mirror the take into the shared index too, so any
@@ -248,7 +285,7 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                         # setlist entry rather than instead of it.
                         record_inspiration_take(
                             root, slot.inspiration_track_id, slot.name, slot.backing_track,
-                            slot.duration_seconds, instrument, take_info,
+                            slot.duration_seconds, take_instrument, take_info,
                         )
                 saved += 1
 

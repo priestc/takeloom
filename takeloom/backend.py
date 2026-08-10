@@ -533,6 +533,63 @@ class Backend(ABC):
         only when it actually stopped something."""
         ...
 
+    # --- auto-detect instrument (remote-capable, unlike everything else
+    # in this section) ---
+    #
+    # The Record tab no longer has a manual Instrument dropdown — this is
+    # what replaces it. Structurally the same scan as start_detect_all
+    # (every configured instrument's own channel, listened to at once,
+    # shared channels told apart by a scoped InstrumentClassifier) but
+    # with different intent: rather than running indefinitely for a
+    # human to walk around and confirm each instrument in turn, this
+    # locks onto and reports exactly the first instrument any channel's
+    # classifier commits to, tears every stream down, and finishes — a
+    # one-shot "which instrument is this session going to be" resolution
+    # that then feeds start_recording/begin_session's existing
+    # instrument_name parameter unchanged. For now a session still has
+    # exactly one instrument, decided once before Record is pressed —
+    # there's no mid-session re-detection yet.
+    #
+    # Unlike start_detect_all/start_instrument_train (Studio Setup tools
+    # for someone standing at the machine with the hardware), this has to
+    # work from a laptop in Remote mode too, since that's the normal way
+    # a session actually gets recorded (see CLAUDE.md) — so both methods
+    # are real RPC-backed Backend operations, not "RemoteBackend refuses"
+    # stubs. Progress reaches a remote caller the same way start_
+    # recording's already does: the call itself only kicks the scan
+    # off/stops it, everything else (including the final "detected")
+    # arrives via "auto_detect_status" events broadcast to every
+    # connected client, local or remote, same as any other backend event.
+
+    @abstractmethod
+    def start_auto_detect_instrument(self) -> None:
+        """Opens every configured instrument's own input channel at once
+        (same scan as start_detect_all) and starts listening. Emits
+        "auto_detect_status" events: phase "listening" right away (its
+        `status` notes any instrument skipped because its input isn't
+        available right now), then phase "detected" — with `instrument`,
+        `full_name`, and `label` set — the moment any channel's
+        classifier commits to a match, at which point every stream is
+        torn down, config.last_selected_instrument is updated to match
+        (same as manually picking it used to do), and ambient monitoring
+        resumes on that instrument's channel. Unlike start_detect_all,
+        this stops itself after the first detection rather than running
+        indefinitely. Raises BackendError immediately if a session, video
+        check, latency test, instrument train, or a detect-all run is
+        already active — same mutual exclusion as those — or if no
+        instrument's input can currently be opened at all."""
+        ...
+
+    @abstractmethod
+    def stop_auto_detect_instrument(self) -> None:
+        """Cancel a running start_auto_detect_instrument before it's
+        found anything — a no-op, not an error, if none is running (in
+        particular, calling this after a "detected" event has already
+        fired is always a no-op, since the run already finished and tore
+        itself down at that point). Emits "auto_detect_status" with phase
+        "stopped" only when it actually stopped something."""
+        ...
+
     # --- video check (local-only; RemoteBackend refuses) ---
 
     @abstractmethod
@@ -750,11 +807,25 @@ class _SessionEvent:
     frame: int | None = None
     track_index: int | None = None
     track_name: str = ""
+    # Whichever instrument was active when this event was logged — every
+    # event carries its own copy rather than relying on session_log.json's
+    # single top-level instrument/instrument_full_name/instrument_label
+    # fields, so that processing/splicer.py's parse_session_log can tell
+    # which instrument recorded which take without assuming one instrument
+    # for the whole session. Constant across a session's events for now
+    # (no mid-session instrument switching yet — see backend.py's Record-
+    # tab auto-detect), but logged per-event so that when switching does
+    # land, no further session-log schema change is needed.
+    instrument: str = ""
+    instrument_full_name: str = ""
+    instrument_label: str = ""
 
     def to_dict(self) -> dict:
         d = {
             "timestamp": self.timestamp, "wall_time": self.wall_time,
             "event_type": self.event_type, "details": self.details,
+            "instrument": self.instrument, "instrument_full_name": self.instrument_full_name,
+            "instrument_label": self.instrument_label,
         }
         if self.frame is not None:
             d["frame"] = self.frame
@@ -883,6 +954,23 @@ class _ActiveDetectAll:
     stop_event: threading.Event
 
 
+@dataclass
+class _ActiveAutoDetect:
+    """The Record tab's "no instrument dropdown anymore" auto-detect run
+    — see Backend.start_auto_detect_instrument. Structurally the same as
+    _ActiveDetectAll (raw per-device sd.InputStreams, no engine) but with
+    different intent: this one locks onto and reports exactly one
+    instrument the moment any channel's classifier commits to a match,
+    then tears itself down — it's a one-shot "which instrument is this
+    session going to be" resolution, not Studio Setup's leave-it-running
+    walk-around-and-confirm-everything tool. Kept as a separate dataclass
+    (and separate mutual-exclusion slot) rather than reusing
+    _ActiveDetectAll so the two features can't be confused for each other
+    or accidentally torn down by the wrong stop_*/guard path."""
+    streams: list
+    stop_event: threading.Event
+
+
 class LocalBackend(Backend):
     """Direct local implementation — talks to this machine's config, disk,
     and audio/video hardware. Historical RecordFrame behavior, unchanged."""
@@ -895,6 +983,7 @@ class LocalBackend(Backend):
         self._active_video_check: _ActiveVideoCheck | None = None
         self._active_instrument_test: _ActiveInstrumentTest | None = None
         self._active_detect_all: _ActiveDetectAll | None = None
+        self._active_auto_detect: _ActiveAutoDetect | None = None
         self._active_session: _ActiveSession | None = None
         self._active_monitor: _ActiveMonitor | None = None
         self._processing_thread: threading.Thread | None = None
@@ -1630,6 +1719,7 @@ class LocalBackend(Backend):
             or self._active_session is not None
             or self._active_instrument_test is not None
             or self._active_detect_all is not None
+            or self._active_auto_detect is not None
             or self._active_monitor is not None
         ):
             return False
@@ -1695,6 +1785,7 @@ class LocalBackend(Backend):
             if (
                 self._active_latency_test is not None or self._active_video_check is not None
                 or self._active_instrument_test is not None or self._active_detect_all is not None
+                or self._active_auto_detect is not None
             ):
                 raise BackendError("Another recording is already in progress.")
 
@@ -2132,6 +2223,7 @@ class LocalBackend(Backend):
                 or self._active_session is not None
                 or self._active_instrument_test is not None
                 or self._active_detect_all is not None
+                or self._active_auto_detect is not None
             ):
                 raise BackendError("Another recording is already in progress.")
             if not camera_device:
@@ -2342,6 +2434,7 @@ class LocalBackend(Backend):
             self._active_session is not None or self._active_video_check is not None
             or self._active_latency_test is not None or self._active_instrument_test is not None
             or self._active_detect_all is not None
+            or self._active_auto_detect is not None
         ):
             raise BackendError("Another recording is already in progress.")
         self._close_active_monitor()  # always opens its own engine, never reuses the ambient one
@@ -2421,99 +2514,115 @@ class LocalBackend(Backend):
 
     # --- Detect-all (local-only; RemoteBackend refuses) ---
 
-    def start_detect_all(self) -> None:
+    def _open_channel_classifier_streams(
+        self, config: StudioConfig, on_channel_detected,
+    ) -> tuple[list, list[str]]:
+        """Shared scanning core behind start_detect_all and start_auto_
+        detect_instrument: opens one raw sd.InputStream per distinct
+        resolved input device — no AudioEngine/recorder/mixer, just
+        listening — grouped by physical channel within each device, so
+        instruments sharing a channel (e.g. bass and electric guitar off
+        the same DI, swapped between takes) are told apart by an
+        InstrumentClassifier scoped to just those instruments, narrower
+        and much less bias-prone than comparing against every configured
+        instrument regardless of which channel is actually shared (see
+        instrument_classifier.py's module docstring). A channel with only
+        one instrument on it still gets a classifier, but with one
+        candidate it trivially always picks that instrument.
+
+        `on_channel_detected(name, confidence)` fires from a background
+        thread whenever any channel's classifier picks a match; the two
+        callers differ only in what that means (start_detect_all reports
+        it and keeps every stream running; start_auto_detect_instrument
+        locks onto the first one and tears every stream down).
+
+        Caller must hold self._record_lock and have already called
+        self._close_active_monitor(). Returns (streams, skipped_
+        instrument_names) — skipped is every instrument whose input
+        couldn't be resolved right now (e.g. its interface is powered
+        off), left out rather than failing the whole scan. Raises
+        BackendError if config has no instruments, or none of their
+        inputs can currently be resolved."""
         from .audio.instrument_classifier import InstrumentClassifier
+        if not config.instruments:
+            raise BackendError("No instruments configured.")
+
+        try:
+            import sounddevice as sd
+        except Exception as e:
+            raise BackendError(f"sounddevice unavailable: {e}") from e
+        from .audio.devices import resolve_device
+
+        by_device: dict[int, list[tuple[Instrument, int]]] = {}
+        skipped: list[str] = []
+        for inst in config.instruments:
+            input_info = config.resolve_input(inst.input_label)
+            in_dev = resolve_device(sd, input_info.device, "input") if input_info else None
+            if input_info is None or in_dev is None:
+                skipped.append(inst.name)
+                continue
+            in_info = sd.query_devices(in_dev, "input")
+            if input_info.channel > in_info["max_input_channels"]:
+                skipped.append(inst.name)
+                continue
+            by_device.setdefault(in_dev, []).append((inst, input_info.channel - 1))
+
+        if not by_device:
+            raise BackendError("None of the configured instruments' inputs are available right now.")
+
+        def make_callback(entries: list[tuple[Instrument, int]]):
+            by_channel: dict[int, list] = {}
+            for inst, ch in entries:
+                by_channel.setdefault(ch, []).append(inst)
+            classifiers = {
+                ch: InstrumentClassifier(config.sample_rate, insts, on_channel_detected)
+                for ch, insts in by_channel.items()
+            }
+
+            def _callback(indata, frames, time_info, status) -> None:
+                for ch, classifier in classifiers.items():
+                    if ch < indata.shape[1]:
+                        classifier.process_block(indata[:, ch])
+            return _callback
+
+        streams = []
+        try:
+            for in_dev, entries in by_device.items():
+                channel_count = max(ch for _, ch in entries) + 1
+                stream = sd.InputStream(
+                    device=in_dev, channels=channel_count,
+                    samplerate=config.sample_rate, blocksize=config.buffer_size,
+                    dtype="float32", callback=make_callback(entries),
+                )
+                stream.start()
+                streams.append(stream)
+        except Exception as e:
+            for s in streams:
+                s.stop()
+                s.close()
+            raise BackendError(f"Could not open an input device: {e}") from e
+
+        return streams, skipped
+
+    def start_detect_all(self) -> None:
         with self._record_lock:
             if (
                 self._active_session is not None or self._active_video_check is not None
                 or self._active_latency_test is not None or self._active_instrument_test is not None
                 or self._active_detect_all is not None
+                or self._active_auto_detect is not None
             ):
                 raise BackendError("Another recording is already in progress.")
 
             config = self.get_config()
-            if not config.instruments:
-                raise BackendError("No instruments configured.")
-
-            try:
-                import sounddevice as sd
-            except Exception as e:
-                raise BackendError(f"sounddevice unavailable: {e}") from e
-            from .audio.devices import resolve_device
-
-            # Group instruments by resolved input device — one stream per
-            # device, each instrument reading its own channel out of it.
-            # An instrument whose input can't be resolved right now (e.g.
-            # its interface is powered off) is skipped rather than
-            # failing the whole run.
-            by_device: dict[int, list[tuple[Instrument, int]]] = {}
-            skipped: list[str] = []
-            for inst in config.instruments:
-                input_info = config.resolve_input(inst.input_label)
-                in_dev = resolve_device(sd, input_info.device, "input") if input_info else None
-                if input_info is None or in_dev is None:
-                    skipped.append(inst.name)
-                    continue
-                in_info = sd.query_devices(in_dev, "input")
-                if input_info.channel > in_info["max_input_channels"]:
-                    skipped.append(inst.name)
-                    continue
-                by_device.setdefault(in_dev, []).append((inst, input_info.channel - 1))
-
-            if not by_device:
-                raise BackendError("None of the configured instruments' inputs are available right now.")
-
             self._close_active_monitor()  # always opens its own streams, never reuses the ambient one
             stop_event = threading.Event()
 
-            def make_callback(entries: list[tuple[Instrument, int]]):
-                # Group by channel — more than one instrument can share a
-                # physical channel (e.g. bass and electric guitar both
-                # wired through the same DI, swapped between takes). A
-                # channel with just one instrument on it is unambiguous
-                # (whatever's heard there must be it); a channel with
-                # several is told apart by an InstrumentClassifier scoped
-                # to just those instruments — narrower and much less
-                # bias-prone than comparing against every configured
-                # instrument the way the old per-row "Detect" did (see
-                # start_detect_all's replacement of start_instrument_
-                # detect), since it's never dragged toward some unrelated
-                # instrument elsewhere that happens to have the widest
-                # default frequency range.
-                by_channel: dict[int, list] = {}
-                for inst, ch in entries:
-                    by_channel.setdefault(ch, []).append(inst)
+            def on_channel_detected(name: str, _confidence: float) -> None:
+                if not stop_event.is_set():
+                    self._emit("detect_all_status", {"phase": "detected", "instrument": name})
 
-                classifiers = {}
-                for ch, insts in by_channel.items():
-                    def on_channel_detected(name: str, _confidence: float) -> None:
-                        if not stop_event.is_set():
-                            self._emit("detect_all_status", {"phase": "detected", "instrument": name})
-                    classifiers[ch] = InstrumentClassifier(config.sample_rate, insts, on_channel_detected)
-
-                def _callback(indata, frames, time_info, status) -> None:
-                    for ch, classifier in classifiers.items():
-                        if ch < indata.shape[1]:
-                            classifier.process_block(indata[:, ch])
-                return _callback
-
-            streams = []
-            try:
-                for in_dev, entries in by_device.items():
-                    channel_count = max(ch for _, ch in entries) + 1
-                    stream = sd.InputStream(
-                        device=in_dev, channels=channel_count,
-                        samplerate=config.sample_rate, blocksize=config.buffer_size,
-                        dtype="float32", callback=make_callback(entries),
-                    )
-                    stream.start()
-                    streams.append(stream)
-            except Exception as e:
-                for s in streams:
-                    s.stop()
-                    s.close()
-                raise BackendError(f"Could not open an input device: {e}") from e
-
+            streams, skipped = self._open_channel_classifier_streams(config, on_channel_detected)
             self._active_detect_all = _ActiveDetectAll(streams=streams, stop_event=stop_event)
 
         status = "Listening on every instrument's own input — play each one to confirm it."
@@ -2534,6 +2643,71 @@ class LocalBackend(Backend):
             self._start_monitoring_locked()
         self._emit("detect_all_status", {"phase": "stopped"})
 
+    # --- Auto-detect instrument (remote-capable — see Backend's docstring) ---
+
+    def start_auto_detect_instrument(self) -> None:
+        with self._record_lock:
+            if (
+                self._active_session is not None or self._active_video_check is not None
+                or self._active_latency_test is not None or self._active_instrument_test is not None
+                or self._active_detect_all is not None
+                or self._active_auto_detect is not None
+            ):
+                raise BackendError("Another recording is already in progress.")
+
+            config = self.get_config()
+            self._close_active_monitor()
+            stop_event = threading.Event()
+
+            def on_channel_detected(name: str, _confidence: float) -> None:
+                with self._record_lock:
+                    active = self._active_auto_detect
+                    # The self._active_auto_detect is not None check is the
+                    # actual "first one wins" guard: whichever channel's
+                    # background classification thread gets here first
+                    # clears it immediately, so any other channel that was
+                    # also mid-classification at the same moment sees None
+                    # and backs off instead of double-locking or stomping
+                    # on a session that may already be starting.
+                    if active is None or stop_event.is_set():
+                        return
+                    self._active_auto_detect = None
+                    active.stop_event.set()
+                    for s in active.streams:
+                        s.stop()
+                        s.close()
+                    inst = config.get_instrument(name)
+                    if inst is not None:
+                        config.last_selected_instrument = inst.name
+                        config.save(self._config_path)
+                    self._start_monitoring_locked()
+                self._emit("auto_detect_status", {
+                    "phase": "detected", "instrument": name,
+                    "full_name": inst.full_name if inst is not None else "",
+                    "label": inst.label if inst is not None else "",
+                })
+
+            streams, skipped = self._open_channel_classifier_streams(config, on_channel_detected)
+            self._active_auto_detect = _ActiveAutoDetect(streams=streams, stop_event=stop_event)
+
+        status = "Listening — play your instrument to begin."
+        if skipped:
+            status += f" Not available right now: {', '.join(skipped)}."
+        self._emit("auto_detect_status", {"phase": "listening", "status": status})
+
+    def stop_auto_detect_instrument(self) -> None:
+        with self._record_lock:
+            active = self._active_auto_detect
+            if active is None:
+                return
+            self._active_auto_detect = None
+            active.stop_event.set()
+            for stream in active.streams:
+                stream.stop()
+                stream.close()
+            self._start_monitoring_locked()
+        self._emit("auto_detect_status", {"phase": "stopped"})
+
     # --- Video check (local-only; RemoteBackend refuses) ---
 
     def start_video_check(self, req: StartRecordingRequest) -> None:
@@ -2544,6 +2718,7 @@ class LocalBackend(Backend):
                 or self._active_session is not None
                 or self._active_instrument_test is not None
                 or self._active_detect_all is not None
+                or self._active_auto_detect is not None
             ):
                 raise BackendError("Another recording is already in progress.")
             self._close_active_monitor()  # always opens its own engine, never reuses the ambient one
@@ -2733,6 +2908,9 @@ class LocalBackend(Backend):
             frame=frame,
             track_index=track_index,
             track_name=track_name,
+            instrument=session.inst.name,
+            instrument_full_name=session.instrument_full_name,
+            instrument_label=session.inst.label,
         ))
 
     def begin_session(self, project_name: str, instrument_name: str) -> None:
@@ -2807,6 +2985,7 @@ class LocalBackend(Backend):
             or self._active_session is not None
             or self._active_instrument_test is not None
             or self._active_detect_all is not None
+            or self._active_auto_detect is not None
         ):
             raise BackendError("Another recording is already in progress.")
         self._close_active_monitor()  # always opens its own engine, never reuses the ambient one

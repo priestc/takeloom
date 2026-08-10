@@ -250,6 +250,16 @@ class RemoteBackend(Backend):
     def stop_detect_all(self) -> None:
         raise BackendError("Instrument detect/train isn't available over Remote connections yet.")
 
+    # --- auto-detect instrument (remote-capable — see Backend's docstring;
+    # unlike everything above, the Record tab actually needs this to work
+    # over Remote, since that's the normal way a session gets recorded) ---
+
+    def start_auto_detect_instrument(self) -> None:
+        self._client.call("start_auto_detect_instrument", {}, timeout=LONG_TIMEOUT)
+
+    def stop_auto_detect_instrument(self) -> None:
+        self._client.call("stop_auto_detect_instrument", {})
+
     # --- video check (not supported over Remote; see RecordFrame) ---
 
     def start_video_check(self, req: StartRecordingRequest) -> None:
