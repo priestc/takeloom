@@ -1345,8 +1345,24 @@ class RecordFrame(ttk.Frame):
                     self._start_auto_detect()
                 self._update_start_button_state()
         elif event == "instrument_detected":
+            # Fired continuously during an active session by a separate,
+            # best-effort live classifier (see backend.py's start_recording)
+            # that keeps re-guessing which *configured* instrument the input
+            # sounds most like from its frequency content alone — a "does
+            # this still sound right" sanity check, not authoritative: it
+            # never touches the take's actual instrument/label assignment
+            # (that was already locked in by auto-detect before the session
+            # began). It used to overwrite the big "what we're recording as"
+            # header with its latest guess — which, being untrained/best-
+            # effort, could misfire (e.g. call a bass "Keystation" mid-take)
+            # and make it look like the session's instrument had silently
+            # changed, when nothing about the take actually had. Surface it
+            # on the smaller status line instead, and never touch
+            # detected_instrument_var once a session has locked one in.
             if "instrument" in data:
-                self.detected_instrument_var.set(data["instrument"].upper())
+                confidence = data.get("confidence")
+                detail = f" ({confidence:.0%} confidence)" if isinstance(confidence, (int, float)) else ""
+                self.auto_detect_status_var.set(f"Live check: sounds like {data['instrument']}{detail}")
         elif event == "auto_detect_status":
             self._handle_auto_detect_status(data)
         elif event == "video_check_status":
