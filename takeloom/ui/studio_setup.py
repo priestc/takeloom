@@ -269,38 +269,42 @@ class StudioSetupFrame(ttk.Frame):
         self.content.bind("<Configure>", _on_content_configure)
         canvas.bind("<Configure>", _on_canvas_configure)
 
-        def _on_mousewheel(event: object) -> None:
-            # Checked against the actual pointer position on every event,
-            # rather than toggling the binding on <Enter>/<Leave> of the
-            # canvas itself — self.content's own children (every Entry/
-            # Label/Combobox/etc. in the form) cover almost the entire
-            # canvas, so the bare canvas is essentially never "directly"
-            # under the pointer; <Leave> would've fired (unbinding this)
-            # the instant the pointer crossed onto any field, which is
-            # exactly why the wheel previously did nothing.
-            target = self.winfo_containing(event.x_root, event.y_root)
-            while target is not None:
-                if target is canvas:
-                    # event.delta isn't pre-scaled to multiples of 120 on
-                    # macOS the way it is on Windows — it's a small raw
-                    # value (often -1..-3/1..3 per notch, sometimes a
-                    # couple dozen for a fast trackpad swipe), so the
-                    # once-conventional "divide by 120" rounds every
-                    # ordinary scroll down to 0 units, i.e. no visible
-                    # movement at all — this was the actual reason the
-                    # wheel still did nothing after the <Enter>/<Leave>
-                    # fix. Just move a fixed one unit per event instead,
-                    # signed by delta's direction.
-                    canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
-                    return
-                target = target.master
+        self._canvas = canvas
+        self._bind_mousewheel(canvas)
 
-        # bind_all reaches every widget in the whole app (Tk's global
-        # "all" bindtag), not just this canvas — safe only because the
-        # handler above re-checks the real pointer position itself before
-        # doing anything, rather than trusting that this event firing
-        # means the pointer is actually over this tab.
-        self.bind_all("<MouseWheel>", _on_mousewheel)
+    def _on_mousewheel(self, event: object) -> None:
+        # event.delta isn't pre-scaled to multiples of 120 on macOS the
+        # way it is on Windows — it's a small raw value (often -1..-3/
+        # 1..3 per notch, sometimes a couple dozen for a fast trackpad
+        # swipe), so the once-conventional "divide by 120" rounds every
+        # ordinary scroll down to 0 units, i.e. no visible movement at
+        # all. Just move a fixed one unit per event instead, signed by
+        # delta's direction.
+        self._canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+    def _bind_mousewheel(self, widget: tk.Misc) -> None:
+        """Bind the scroll handler directly on `widget` and, recursively,
+        every one of its descendants (not a recursive bind_all/bindtag-
+        propagation trick): a `bind_all("<MouseWheel>", ...)` should in
+        principle reach every widget via the Tk-global "all" bindtag
+        regardless of which specific one the pointer is over, but that
+        didn't actually happen in practice here (Tcl/Tk 9.0 on Aqua) —
+        real OS-delivered wheel events over the page's own fields (Entry/
+        Combobox/etc, which cover almost the entire canvas) never reached
+        it. Binding directly on every widget individually sidesteps
+        whatever's different about this build's event propagation
+        instead of depending on it.
+
+        Plain widget.bind() (no add="+") deliberately overwrites rather
+        than stacks, so re-running this over an already-bound subtree
+        (see the call at the end of _on_loaded, after _build() has
+        populated self.content, and again from _add_input_row/_add_
+        instrument_row whenever a row's added later) is safe/idempotent
+        instead of accumulating duplicate handlers that would fire
+        multiple times per actual scroll."""
+        widget.bind("<MouseWheel>", self._on_mousewheel)
+        for child in widget.winfo_children():
+            self._bind_mousewheel(child)
 
     def _build_footer(self) -> None:
         """Save (and its status message) live outside the scrollable
@@ -424,6 +428,7 @@ class StudioSetupFrame(ttk.Frame):
         self.config_obj = config
         self.input_devices = [d for d in devices if d["max_input_channels"] > 0]
         self._build()
+        self._bind_mousewheel(self._canvas)
 
     # --- build ---
 
@@ -542,6 +547,11 @@ class StudioSetupFrame(ttk.Frame):
         )
         row_widget.pack(fill="x", pady=2)
         self._input_rows.append(row_widget)
+        # Full re-scan rather than binding row_widget alone — simpler and
+        # consistent with _add_instrument_row, where the equivalent isn't
+        # a widget of its own to bind (see _InstrumentRow) — and cheap
+        # enough given how small this tab's whole tree is.
+        self._bind_mousewheel(self._canvas)
 
     def _remove_input_row(self, row_widget: _InputRow) -> None:
         row_widget.destroy()
@@ -655,6 +665,7 @@ class StudioSetupFrame(ttk.Frame):
             freq_min_hz=freq_min_hz, freq_max_hz=freq_max_hz,
         )
         self._instrument_rows.append(row)
+        self._bind_mousewheel(self._canvas)
 
     def _remove_instrument_row(self, row: _InstrumentRow) -> None:
         row.destroy()
