@@ -233,8 +233,46 @@ class StudioSetupFrame(ttk.Frame):
         self.app_state.backend.on_event(self._on_backend_event)
         self.bind("<Destroy>", self._on_destroy)
 
-        ttk.Label(self, text="Loading...").pack(anchor="w")
+        self._build_scroll_container()
+        ttk.Label(self.content, text="Loading...").pack(anchor="w")
         self._load()
+
+    def _build_scroll_container(self) -> None:
+        """Studio Setup's content (studio identity fields, vault section,
+        input labels, and the instrument table) easily runs taller than
+        the window now — wraps it all in a scrollable canvas rather than
+        letting it clip. self.content (a plain ttk.Frame) is what every
+        _build_*/_on_loaded method below actually grids/packs onto, not
+        self directly; self itself just holds the canvas + scrollbar."""
+        canvas = tk.Canvas(self, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        self.content = ttk.Frame(canvas)
+        content_window = canvas.create_window((0, 0), window=self.content, anchor="nw")
+
+        def _on_content_configure(_event: object) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event: object) -> None:
+            # Stretches self.content to the canvas's own width so widgets
+            # using sticky="ew"/columnconfigure(weight=1) still fill the
+            # window horizontally — only the vertical extent scrolls.
+            canvas.itemconfigure(content_window, width=event.width)
+
+        self.content.bind("<Configure>", _on_content_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event: object) -> None:
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        # Only bound while the pointer is actually over this tab's canvas
+        # (bind_all/unbind_all on Enter/Leave), so scrolling here doesn't
+        # hijack the mouse wheel anywhere else in the app.
+        canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
 
     def _on_destroy(self, _event: object) -> None:
         self.app_state.backend.off_event(self._on_backend_event)
@@ -327,12 +365,14 @@ class StudioSetupFrame(ttk.Frame):
     def _on_loaded(self, config: StudioConfig | None, devices: list[dict], error: str | None) -> None:
         if not self.winfo_exists():
             return  # tab was switched away (and rebuilt/destroyed) before this load finished
-        for child in self.winfo_children():
+        for child in self.content.winfo_children():
             child.destroy()
         self._input_rows = []
         self._instrument_rows = []
         if error or config is None:
-            ttk.Label(self, text=error or "Could not load configuration.", foreground="#b00020").pack(anchor="w")
+            ttk.Label(
+                self.content, text=error or "Could not load configuration.", foreground="#b00020",
+            ).pack(anchor="w")
             return
         self.config_obj = config
         self.input_devices = [d for d in devices if d["max_input_channels"] > 0]
@@ -341,52 +381,52 @@ class StudioSetupFrame(ttk.Frame):
     # --- build ---
 
     def _build(self) -> None:
-        ttk.Label(self, text="Studio Setup", font=("TkDefaultFont", 14, "bold")).grid(
+        ttk.Label(self.content, text="Studio Setup", font=("TkDefaultFont", 14, "bold")).grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 12)
         )
 
         row = 1
         for attr, label in FIELDS:
-            ttk.Label(self, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+            ttk.Label(self.content, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
             var = tk.StringVar(value=getattr(self.config_obj, attr))
             show = "*" if attr == "inspiration_api_key" else ""
-            entry = ttk.Entry(self, textvariable=var, width=42, show=show)
+            entry = ttk.Entry(self.content, textvariable=var, width=42, show=show)
             entry.grid(row=row, column=1, sticky="ew", pady=4)
             self._vars[attr] = var
             row += 1
 
-        self.columnconfigure(1, weight=1)
+        self.content.columnconfigure(1, weight=1)
 
         row = self._build_vault_section(row)
         row = self._build_input_labels(row)
         row = self._build_instruments(row)
 
         self.status_var = tk.StringVar(value="")
-        ttk.Label(self, textvariable=self.status_var, foreground="#2a7d2a").grid(
+        ttk.Label(self.content, textvariable=self.status_var, foreground="#2a7d2a").grid(
             row=row, column=0, columnspan=2, sticky="w", pady=(12, 0)
         )
         row += 1
 
-        button_row = ttk.Frame(self)
+        button_row = ttk.Frame(self.content)
         button_row.grid(row=row, column=0, columnspan=2, sticky="e", pady=(12, 0))
         self.save_button = ttk.Button(button_row, text="Save", command=self._on_save)
         self.save_button.pack(side="right")
 
     def _build_vault_section(self, row: int) -> int:
-        ttk.Separator(self, orient="horizontal").grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
+        ttk.Separator(self.content, orient="horizontal").grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
         row += 1
 
-        ttk.Label(self, text="Vault", font=("TkDefaultFont", 11, "bold")).grid(
+        ttk.Label(self.content, text="Vault", font=("TkDefaultFont", 11, "bold")).grid(
             row=row, column=0, columnspan=2, sticky="w"
         )
         row += 1
 
         for attr, label in VAULT_FIELDS:
-            ttk.Label(self, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+            ttk.Label(self.content, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
             var = tk.StringVar(value=getattr(self.config_obj, attr))
             self._vars[attr] = var
             if attr == "session_vault_path":
-                path_row = ttk.Frame(self)
+                path_row = ttk.Frame(self.content)
                 path_row.grid(row=row, column=1, sticky="ew")
                 path_row.columnconfigure(0, weight=1)
                 ttk.Entry(path_row, textvariable=var).grid(row=0, column=0, sticky="ew")
@@ -394,18 +434,18 @@ class StudioSetupFrame(ttk.Frame):
                     row=0, column=1, padx=(6, 0)
                 )
             else:
-                ttk.Entry(self, textvariable=var, width=42).grid(row=row, column=1, sticky="ew")
+                ttk.Entry(self.content, textvariable=var, width=42).grid(row=row, column=1, sticky="ew")
             row += 1
 
-        ttk.Label(self, text="Vault storage").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Label(self.content, text="Vault storage").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
         self.vault_mode_var = tk.StringVar(value=self._current_vault_mode_label())
         ttk.Combobox(
-            self, textvariable=self.vault_mode_var, values=[label for _v, label in _VAULT_MODE_LABELS],
+            self.content, textvariable=self.vault_mode_var, values=[label for _v, label in _VAULT_MODE_LABELS],
             state="readonly", width=16,
         ).grid(row=row, column=1, sticky="w", pady=4)
         row += 1
         ttk.Label(
-            self,
+            self.content,
             text="Where recorded sessions (the continuous audio/video, not the setlist itself) are stored. "
                  "\"Remote only\" pushes each session to the remote vault above and removes the local copy "
                  "once that's verified; \"Both\" pushes but keeps the local copy too.",
@@ -423,10 +463,10 @@ class StudioSetupFrame(ttk.Frame):
             self._vars["session_vault_path"].set(chosen)
 
     def _build_input_labels(self, row: int) -> int:
-        ttk.Separator(self, orient="horizontal").grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
+        ttk.Separator(self.content, orient="horizontal").grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
         row += 1
 
-        header = ttk.Frame(self)
+        header = ttk.Frame(self.content)
         header.grid(row=row, column=0, columnspan=2, sticky="ew")
         ttk.Label(header, text="Input Labels", font=("TkDefaultFont", 11, "bold")).pack(side="left")
         ttk.Button(header, text="Reload Devices", command=self._on_reload_devices).pack(side="right")
@@ -434,12 +474,12 @@ class StudioSetupFrame(ttk.Frame):
 
         if not self.input_devices:
             ttk.Label(
-                self, text="Could not query audio devices (sounddevice unavailable).",
+                self.content, text="Could not query audio devices (sounddevice unavailable).",
                 foreground="#b00020",
             ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
             row += 1
 
-        self.rows_container = ttk.Frame(self)
+        self.rows_container = ttk.Frame(self.content)
         self.rows_container.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         row += 1
 
@@ -448,7 +488,7 @@ class StudioSetupFrame(ttk.Frame):
         if not self.config_obj.input_labels:
             self._add_input_row()
 
-        ttk.Button(self, text="+ Add Input", command=self._add_input_row).grid(
+        ttk.Button(self.content, text="+ Add Input", command=self._add_input_row).grid(
             row=row, column=0, sticky="w", pady=(4, 10)
         )
         row += 1
@@ -491,10 +531,10 @@ class StudioSetupFrame(ttk.Frame):
         self.status_var.set(f"Devices reloaded ({len(self.input_devices)} inputs found).")
 
     def _build_instruments(self, row: int) -> int:
-        ttk.Separator(self, orient="horizontal").grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
+        ttk.Separator(self.content, orient="horizontal").grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
         row += 1
 
-        header = ttk.Frame(self)
+        header = ttk.Frame(self.content)
         header.grid(row=row, column=0, columnspan=2, sticky="ew")
         ttk.Label(header, text="Instruments", font=("TkDefaultFont", 11, "bold")).pack(side="left")
         self.detect_all_button = ttk.Button(header, text="Detect", command=self._on_toggle_detect_all)
@@ -504,32 +544,34 @@ class StudioSetupFrame(ttk.Frame):
         input_label_names = self._current_input_label_names()
         if not input_label_names:
             ttk.Label(
-                self, text="Add an input label above before assigning instruments.",
+                self.content, text="Add an input label above before assigning instruments.",
                 foreground="#666666",
             ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
             row += 1
             return row
 
         ttk.Label(
-            self, text="Label is the instrument's type (e.g. \"electric-guitar\") — different instruments "
-                        "sharing a label (a Stratocaster and a Telecaster, say) count as satisfying the same "
-                        "song's need for a take, so recording one with either won't have the setlist offer "
-                        "it again for the other. Min/Max Hz is the frequency range the Record tab's live "
-                        "instrument detector compares against — leave blank to fall back to a default for "
-                        "the instrument's label. \"Train\" sets it automatically from two notes you play. "
-                        "\"Detect\" above listens on every instrument's own input at once and marks each "
-                        "row \"Detected!\" as you play it — handy for confirming cabling before a session.",
+            self.content,
+            text="Label is the instrument's type (e.g. \"electric-guitar\") — different instruments "
+                 "sharing a label (a Stratocaster and a Telecaster, say) count as satisfying the same "
+                 "song's need for a take, so recording one with either won't have the setlist offer "
+                 "it again for the other. Min/Max Hz is the frequency range the Record tab's live "
+                 "instrument detector compares against — leave blank to fall back to a default for "
+                 "the instrument's label. \"Train\" sets it automatically from two notes you play. "
+                 "\"Detect\" above listens on every instrument's own input at once and marks each "
+                 "row \"Detected!\" as you play it — handy for confirming cabling before a session.",
             foreground="#666666", wraplength=760, justify="left",
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(2, 6))
         row += 1
 
         self.detect_all_status_var = tk.StringVar(value="")
         ttk.Label(
-            self, textvariable=self.detect_all_status_var, foreground="#2a6db0", wraplength=760, justify="left",
+            self.content, textvariable=self.detect_all_status_var,
+            foreground="#2a6db0", wraplength=760, justify="left",
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 6))
         row += 1
 
-        self.table = ttk.Frame(self)
+        self.table = ttk.Frame(self.content)
         self.table.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         row += 1
 
@@ -548,7 +590,7 @@ class StudioSetupFrame(ttk.Frame):
             self._add_instrument_row(input_label_names)
 
         ttk.Button(
-            self, text="+ Add Instrument",
+            self.content, text="+ Add Instrument",
             command=lambda: self._add_instrument_row(self._current_input_label_names()),
         ).grid(row=row, column=0, sticky="w", pady=(8, 10))
         row += 1
