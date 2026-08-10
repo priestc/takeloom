@@ -211,10 +211,48 @@ class RecordFrame(ttk.Frame):
 
         self._build_left(left)
         self._build_right(right)
+        self._build_loading_overlay()
 
         self._start_preview()
         self._on_project_change()
         self._start_auto_detect()
+
+    # --- loading overlay (shown while a project's setlist + inspiration-
+    # filter previews are being fetched — see _on_project_change/_on_setlist_
+    # loaded/_apply_filter_previews) ---
+
+    def _build_loading_overlay(self) -> None:
+        """Built once, on top of both columns via place() (independent of
+        their own grid layout) — shown/hidden by (re)calling place()/
+        place_forget() rather than being torn down and rebuilt, since it
+        needs to appear the instant a project switch starts, before
+        there's anything new to show yet."""
+        overlay = tk.Frame(self, background="#f5f5f5")
+        center = tk.Frame(overlay, background="#f5f5f5")
+        center.place(relx=0.5, rely=0.5, anchor="center")
+        tk.Label(
+            center, text="Loading project...", font=("TkDefaultFont", 16, "bold"), background="#f5f5f5",
+        ).pack()
+        self.loading_status_var = tk.StringVar(value="")
+        tk.Label(
+            center, textvariable=self.loading_status_var, foreground="#666666", background="#f5f5f5",
+        ).pack(pady=(6, 0))
+        self._loading_overlay = overlay
+
+    def _show_loading_overlay(self, status: str = "") -> None:
+        if not hasattr(self, "_loading_overlay"):
+            return  # frame hasn't finished its own initial build yet
+        self.loading_status_var.set(status)
+        self._loading_overlay.place(x=0, y=0, relwidth=1, relheight=1)
+        self._loading_overlay.lift()
+
+    def _set_loading_status(self, status: str) -> None:
+        if hasattr(self, "loading_status_var"):
+            self.loading_status_var.set(status)
+
+    def _hide_loading_overlay(self) -> None:
+        if hasattr(self, "_loading_overlay"):
+            self._loading_overlay.place_forget()
 
     # --- left column: instrument/project/preview/controls ---
 
@@ -644,8 +682,10 @@ class RecordFrame(ttk.Frame):
         if _event is not None:
             self._persist_last_selection()
         if not self._project_name:
+            self._hide_loading_overlay()
             return
 
+        self._show_loading_overlay("Loading setlist...")
         backend = self.app_state.backend
         project_name = self._project_name
         self._run_backend(lambda: backend.get_setlist(project_name), self._on_setlist_loaded)
@@ -680,12 +720,24 @@ class RecordFrame(ttk.Frame):
     def _on_setlist_loaded(self, data: dict | None, error: str | None) -> None:
         if error or data is None:
             self.selection_var.set(f"Could not load project: {error}")
+            self._hide_loading_overlay()
             return
         self._setlist = Setlist.from_dict(data)
         self._filter_previews = []
         self._refresh_setlist()
         self._auto_select_default_track()
-        self._fetch_filter_previews()
+        if any(t.is_inspiration_filter for t in self._setlist.tracks):
+            # Keep the overlay up through the (possibly several-second,
+            # multi-query) filter-preview fetch — _handle_filter_preview_
+            # status updates its text live, _apply_filter_previews takes
+            # it down once this resolves either way.
+            self._show_loading_overlay("Checking inspiration filters...")
+            self._fetch_filter_previews(loading=True)
+        else:
+            # Nothing to query — no inspiration-server calls are about to
+            # happen, so there's nothing worth blocking on.
+            self._filter_previews = [None] * len(self._setlist.tracks)
+            self._hide_loading_overlay()
 
     def _auto_select_default_track(self) -> None:
         """Pick a sensible starting track so Record is one click away right
@@ -695,20 +747,27 @@ class RecordFrame(ttk.Frame):
         if self._setlist and self._setlist.tracks:
             self._select_row(0)
 
-    def _fetch_filter_previews(self) -> None:
+    def _fetch_filter_previews(self, loading: bool = False) -> None:
         """Kick off get_filter_slot_previews for the current project — see
         self._filter_previews's docstring for when this is (and isn't)
-        called."""
+        called. `loading` means this is the project-open fetch driving the
+        loading overlay (see _on_setlist_loaded) rather than a quiet
+        background refresh (post-take, or after editing a filter's
+        criteria) that shouldn't block the whole tab."""
         if not self._project_name:
             return
         backend = self.app_state.backend
         project_name = self._project_name
         self._run_backend(
             lambda: backend.get_filter_slot_previews(project_name),
-            lambda previews, error: self._apply_filter_previews(project_name, previews, error),
+            lambda previews, error: self._apply_filter_previews(project_name, previews, error, loading),
         )
 
-    def _apply_filter_previews(self, project_name: str, previews: list | None, error: str | None) -> None:
+    def _apply_filter_previews(
+        self, project_name: str, previews: list | None, error: str | None, loading: bool = False,
+    ) -> None:
+        if loading and project_name == self._project_name:
+            self._hide_loading_overlay()
         if error or previews is None or project_name != self._project_name:
             # A transient inspiration-server hiccup, or the project changed
             # again before this fetch returned — either way, leave whatever
@@ -1323,3 +1382,14 @@ class RecordFrame(ttk.Frame):
         elif event == "streaming_status":
             if "status" in data:
                 self.status_var.set(data["status"])
+        elif event == "filter_preview_status":
+            # Broadcast by get_filter_slot_previews (backend.py) as it works
+            # through a project's filter slots — see that method's
+            # docstring. Ignore one meant for a project we're not (or no
+            # longer) looking at: e.g. a stale event from a project switch
+            # that's since moved on, or in Remote mode, another connected
+            # client loading a different project.
+            if data.get("project_name") == self._project_name:
+                index, total, label = data.get("index", 0), data.get("total", 0), data.get("label", "")
+                status = f"Checking filter {index} of {total}: {label}" if label else f"Checking filter {index} of {total}..."
+                self._set_loading_status(status)

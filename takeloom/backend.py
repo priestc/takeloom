@@ -197,7 +197,12 @@ class Backend(ABC):
         called once when a project is opened in the UI (see record.py's
         Setlist panel) so the picks shown stay stable for the rest of
         that visit rather than re-randomizing on every setlist
-        redisplay."""
+        redisplay.
+
+        Emits a "filter_preview_status" event ({"project_name", "index",
+        "total", "label"}) just before each filter slot's own query, so a
+        caller can show live progress across what can be a several-second
+        call over a setlist with many filter slots."""
         ...
 
     # --- sessions (browse/correct past recordings) ---
@@ -1253,12 +1258,26 @@ class LocalBackend(Backend):
         from .inspiration import InspirationError, build_inspiration_track_entry, search_tracks_by_filter
         from .vault import load_inspiration_index, vault_root
 
+        total = sum(1 for t in project.setlist.tracks if t.is_inspiration_filter)
         index = None  # lazily loaded — only needed once any filter slot is actually hit
         previews: list[dict | None] = []
+        checked = 0
         for track in project.setlist.tracks:
             if not track.is_inspiration_filter:
                 previews.append(None)
                 continue
+            checked += 1
+            # This call runs on its own request thread (see remote/server.py)
+            # and can involve several seconds of inspiration-server round
+            # trips across a whole setlist's worth of filter slots — this
+            # event is what lets the UI show a live "checking N of M" status
+            # (and know when to put up/take down its loading overlay — see
+            # record.py's _show_loading_overlay) instead of just staring at
+            # a stalled-looking Setlist panel for however long it takes.
+            self._emit(
+                "filter_preview_status",
+                {"project_name": project_name, "index": checked, "total": total, "label": track.name},
+            )
             try:
                 matches = search_tracks_by_filter(config, track.inspiration_filter)
             except InspirationError:
