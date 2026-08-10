@@ -23,7 +23,7 @@ from .utils import atomic_write_text, ensure_dir, sanitize_filename
 @dataclass
 class TakeInfo:
     """Reference to a completed take file."""
-    instrument: str
+    instrument: str  # instrument *label* (e.g. "electric-guitar"), not full_name — see TrackEntry.preferred_takes
     take_number: int
     filename: str
     volume: float = 1.0
@@ -61,7 +61,10 @@ class TrackEntry:
     is_inspiration_filter: bool = False
     inspiration_filter: dict = field(default_factory=dict)
     preferred_takes: dict[str, TakeInfo] = field(default_factory=dict)
-    # key = instrument name, value = preferred take for that instrument
+    # key = instrument label (not full_name — a Stratocaster and a
+    # Telecaster take of the same song share one "electric-guitar" key
+    # and one take-number sequence, see processing/splicer.py), value =
+    # the preferred take for that label
     source: str = "upload"  # "upload" or "youtube" — only meaningful when
     # inspiration_track_id is 0; see source_label(). Existing entries
     # from before this field existed default to "upload".
@@ -71,23 +74,6 @@ class TrackEntry:
 
     def get_take_for_instrument(self, instrument: str) -> TakeInfo | None:
         return self.preferred_takes.get(instrument)
-
-    def take_for_any(self, instrument_names: set[str]) -> TakeInfo | None:
-        """The preferred take under any of the given instrument names, or
-        None if none of them has one — used to check "does this song
-        already have a take for this instrument's label" by passing every
-        instrument name sharing that label (see StudioConfig.instrument_
-        names_sharing_label), since preferred_takes itself stays keyed by
-        the specific instrument's own name, not its label. Prefers
-        instrument_names' iteration order, which is fine since callers
-        only care whether a take exists, not which one, except display
-        code that also wants a representative TakeInfo (e.g. its
-        has_video)."""
-        for name in instrument_names:
-            take = self.preferred_takes.get(name)
-            if take is not None:
-                return take
-        return None
 
     def source_label(self) -> str:
         """Human-readable source: "inspiration" (radioserver-sourced,

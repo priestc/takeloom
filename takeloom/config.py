@@ -16,18 +16,19 @@ VALID_BUFFER_SIZES = [128, 256, 512, 1024, 2048]
 # The fixed, closed vocabulary for Instrument.label — a controlled
 # instrument-type category, distinct from Instrument.full_name (this
 # specific piece of gear's manufacturer/model, e.g. "Fender American
-# Stratocaster" — also what identifies it everywhere an "instrument
-# name" is needed, e.g. Instrument lookups/take filing/session logs;
-# there's no separate free-text "name" field). Not user-editable/
-# renamable — picked from a Studio Setup dropdown built from this exact
-# list (see ui/studio_setup.py's _InstrumentRow). What it's for: more
-# than one Instrument can share a label (e.g. a Stratocaster and a
-# Telecaster both "electric-guitar"), and take-tracking (see
-# StudioConfig.instrument_names_sharing_label, used by backend.py's
-# next_untaken_track_index/_resolve_filter_slot/_advance_locked) treats
-# a song as satisfied for a label the moment *any* instrument sharing it
-# has a completed take — so recording a song with the Telecaster after
-# the Stratocaster already covered it won't have it drawn/offered again.
+# Stratocaster" — used for display and session_log.json's record of
+# which physical instrument actually played a session, but not for take
+# filing). Not user-editable/renamable — picked from a Studio Setup
+# dropdown built from this exact list (see ui/studio_setup.py's
+# _InstrumentRow). What it's for: more than one Instrument can share a
+# label (e.g. a Stratocaster and a Telecaster both "electric-guitar"),
+# and take filing/tracking (see TrackEntry.preferred_takes, keyed by
+# label, not by which specific instrument played it) treats a song as
+# satisfied for a label the moment *any* instrument sharing it has a
+# completed take, and numbers takes ("take1"/"take2"/...) per label —
+# so a song already covered by the Stratocaster continues the same
+# take-number sequence, and won't be redrawn/offered again, if the
+# Telecaster records it too.
 INSTRUMENT_LABELS = [
     "acoustic-guitar",
     "electric-guitar",
@@ -208,22 +209,20 @@ class StudioConfig:
                 )
         return errors
 
-    def instrument_names_sharing_label(self, instrument_name: str) -> set[str]:
-        """Every configured instrument's full_name that shares
-        instrument_name's own label — including instrument_name itself.
-        Used wherever "does this song still need a take" is decided
-        (backend.py's next_untaken_track_index/_resolve_filter_slot/
-        _advance_locked, ui/record.py's setlist checkmark) so that, say,
-        a Telecaster take counts as satisfying a slot for a Stratocaster
-        too, since both are "electric-guitar" — see TrackEntry.
-        take_for_any(), which these names get passed into. instrument_name
-        not found, or with no label set, resolves to just
-        {instrument_name} — no broader match, but still enough to look up
-        its own exact take."""
+    def label_for_instrument(self, instrument_name: str) -> str:
+        """instrument_name's (a full_name) own label — what actually
+        keys TrackEntry.preferred_takes/take filenames (see
+        processing/splicer.py), used wherever "does this song still need
+        a take" is decided (backend.py's next_untaken_track_index/
+        _resolve_filter_slot/_advance_locked, ui/record.py's setlist
+        checkmark) so that, say, a Telecaster take counts as satisfying a
+        slot for a Stratocaster too, since both are "electric-guitar".
+        Falls back to instrument_name itself if it doesn't resolve to a
+        configured instrument, or that instrument has no label set —
+        not a broader match, but still enough to look up its own exact
+        take under whatever string it was actually filed under."""
         inst = self.get_instrument(instrument_name)
-        if inst is None or not inst.label:
-            return {instrument_name}
-        return {i.full_name for i in self.instruments if i.label == inst.label}
+        return inst.label if inst is not None and inst.label else instrument_name
 
     def get_instrument(self, name: str) -> Instrument | None:
         for inst in self.instruments:

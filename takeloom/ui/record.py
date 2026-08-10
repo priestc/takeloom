@@ -481,11 +481,12 @@ class RecordFrame(ttk.Frame):
             # the average across every currently-matching track (see
             # inspiration.average_duration) rather than one fixed song's.
             return f"🎲 {track.name}  (~{dur})"
-        # Any instrument sharing inst_name's label counts — a Telecaster
-        # take should still check off a song for the Stratocaster too
-        # (see StudioConfig.instrument_names_sharing_label).
-        sharing = self.config_obj.instrument_names_sharing_label(inst_name) if self.config_obj else {inst_name}
-        take = track.take_for_any(sharing)
+        # Takes are filed by label, not by which specific instrument
+        # played them — a Telecaster take should still check off a song
+        # for the Stratocaster too, since both are "electric-guitar"
+        # (see StudioConfig.label_for_instrument).
+        label = self.config_obj.label_for_instrument(inst_name) if self.config_obj else inst_name
+        take = track.get_take_for_instrument(label)
         if take is None:
             mark = ""
         elif take.has_video:

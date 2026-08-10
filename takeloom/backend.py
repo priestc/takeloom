@@ -30,7 +30,7 @@ from typing import Callable
 
 from .audio.filters import CompressorSettings
 from .audio.scarlett2_direct_monitor import FOCUSRITE_DEVICE_NAME, set_channel_gain
-from .config import DEFAULT_CONFIG_PATH, Instrument, StudioConfig
+from .config import DEFAULT_CONFIG_PATH, INSTRUMENT_LABELS, Instrument, StudioConfig
 from .project import Project, Setlist, TakeInfo, TrackEntry
 from .utils import ensure_dir, timestamp_now, wall_timestamp
 
@@ -121,20 +121,21 @@ class Backend(ABC):
         self, project_name: str, instrument_name: str, start_index: int = 0,
     ) -> int | None:
         """Index of the first setlist track from start_index onward that
-        doesn't already have a take for instrument_name's label (any
-        instrument sharing it counts — see StudioConfig.instrument_names_
-        sharing_label), or None if every remaining track already has one.
-        Pure setlist query on top of get_setlist() — concrete here (not
-        per-subclass) since it needs no hardware access and works
-        identically for Local and Remote.
+        doesn't already have a take for instrument_name's label (takes
+        are filed by label — see TrackEntry.preferred_takes — so any
+        instrument sharing it counts, not just instrument_name itself),
+        or None if every remaining track already has one. Pure setlist
+        query on top of get_setlist() — concrete here (not per-subclass)
+        since it needs no hardware access and works identically for
+        Local and Remote.
 
         The single shared "what's next" primitive every recording-driving
         context (Tk UI's StreamDeck Next key, headless takeloom server,
         the CLI) uses instead of each reimplementing this search."""
         setlist = Setlist.from_dict(self.get_setlist(project_name))
-        sharing = self.get_config().instrument_names_sharing_label(instrument_name)
+        label = self.get_config().label_for_instrument(instrument_name)
         for i in range(start_index, len(setlist.tracks)):
-            if setlist.tracks[i].take_for_any(sharing) is None:
+            if setlist.tracks[i].get_take_for_instrument(label) is None:
                 return i
         return None
 
@@ -236,51 +237,58 @@ class Backend(ABC):
         `new_instrument` instead: renames the take file(s) on disk, and
         re-keys it in the project's setlist.json (and, for an inspiration-
         sourced track, the shared vault-wide inspiration_takes.json index
-        too). `old_instrument` is passed explicitly (typically whatever
-        get_session_detail's `current_take` reported) rather than re-read
-        from session_dir's session_log.json, so this gives the right
-        answer regardless of whether correct_session_instrument has
-        already been called on the same session. Raises BackendError if
-        `track_name` isn't one of session_dir's tracks, if it was an
-        inspiration filter-slot draw (no reliable stored link from an old
-        session back to exactly which shared-index entry it produced —
-        see the Sessions tab's docs), or if there's no take currently
-        filed under `old_instrument` to reassign."""
+        too). Both `old_instrument` and `new_instrument` are instrument
+        *labels* (one of config.INSTRUMENT_LABELS) — takes are filed by
+        label, not by which specific piece of gear played them (see
+        TrackEntry.preferred_takes) — not a particular Instrument's
+        full_name. `old_instrument` is passed explicitly (typically
+        whatever get_session_detail's `current_take` reported) rather
+        than re-read from session_dir's session_log.json, so this gives
+        the right answer regardless of whether correct_session_instrument
+        has already been called on the same session. Raises BackendError
+        if `new_instrument` isn't a recognized label, `track_name` isn't
+        one of session_dir's tracks, if it was an inspiration filter-slot
+        draw (no reliable stored link from an old session back to exactly
+        which shared-index entry it produced — see the Sessions tab's
+        docs), or if there's no take currently filed under
+        `old_instrument` to reassign."""
         ...
 
     @abstractmethod
     def analyze_take(self, session_dir: str, track_name: str, instrument_name: str) -> dict:
-        """Run the take currently filed under `instrument_name` for
-        `track_name` through the frequency-based instrument classifier
-        (audio/instrument_classifier.py's classify_audio_file) and report
-        which configured instrument its actual recorded audio most
-        resembles — a read-only diagnostic behind the Sessions tab's
-        "Analyze" button, to flag a take that may have been filed under
-        the wrong instrument in the first place (the reason to reach for
-        reassign_take). Unlike reassign_take, works for an inspiration
-        filter-slot draw too (looked up from the shared vault-wide
-        inspiration-take index, same as get_session_detail) — there being
-        no reliable stored link back to exactly which shared-index entry
-        an old session produced only matters for a *write* like
-        reassign_take; a read here just needs whatever's on file for the
-        song this session's log says got drawn right now. Only compares
-        against other instruments sharing `instrument_name`'s own
-        input_label (the same physical channel) — the only ones a
-        mix-up during recording could plausibly have actually been, and
-        comparing against unrelated hardware inputs would just
-        reintroduce the classifier's bias toward whichever candidate has
-        the widest default frequency range. Returns {"guess": str | None,
-        "confidence": float} — guess is None if the take's audio had no
-        non-silent windows to analyze (e.g. it's silence). Never modifies
-        anything. Raises BackendError if `track_name` isn't one of
-        session_dir's tracks, there's no take currently filed under
-        `instrument_name` (same as reassign_take), the take's file isn't
-        available locally right now (e.g. pruned under "remote" vault
-        mode), or `instrument_name` doesn't resolve against the *current*
-        config (e.g. it's been renamed/removed since the take was
-        recorded) — rather than silently comparing against every
-        configured instrument in that last case, which would reintroduce
-        the same bias this method exists to avoid."""
+        """Run the take currently filed under `instrument_name` (a
+        label — takes are filed by label, see TrackEntry.preferred_takes)
+        for `track_name` through the frequency-based instrument
+        classifier (audio/instrument_classifier.py's classify_audio_file)
+        and report which configured instrument *label* its actual
+        recorded audio most resembles — a read-only diagnostic behind the
+        Sessions tab's "Analyze" button, to flag a take that may have
+        been filed under the wrong label in the first place (the reason
+        to reach for reassign_take). Unlike reassign_take, works for an
+        inspiration filter-slot draw too (looked up from the shared
+        vault-wide inspiration-take index, same as get_session_detail) —
+        there being no reliable stored link back to exactly which
+        shared-index entry an old session produced only matters for a
+        *write* like reassign_take; a read here just needs whatever's on
+        file for the song this session's log says got drawn right now.
+        Only compares against instruments sharing a physical channel
+        (input_label) with any instrument of `instrument_name`'s label —
+        the only ones a mix-up during recording could plausibly have
+        actually been, and comparing against unrelated hardware inputs
+        would just reintroduce the classifier's bias toward whichever
+        candidate has the widest default frequency range. Returns
+        {"guess": str | None, "confidence": float} — guess (a label) is
+        None if the take's audio had no non-silent windows to analyze
+        (e.g. it's silence). Never modifies anything. Raises BackendError
+        if `track_name` isn't one of session_dir's tracks, there's no
+        take currently filed under `instrument_name` (same as
+        reassign_take), the take's file isn't available locally right now
+        (e.g. pruned under "remote" vault mode), or `instrument_name`
+        doesn't match any currently configured instrument's label (e.g.
+        it's a take recorded before takes were filed by label at all) —
+        rather than silently comparing against every configured
+        instrument in that last case, which would reintroduce the same
+        bias this method exists to avoid."""
         ...
 
     # --- inspiration ---
@@ -1404,9 +1412,8 @@ class LocalBackend(Backend):
 
     def reassign_take(self, session_dir: str, track_name: str, old_instrument: str, new_instrument: str) -> None:
         config = self.get_config()
-        new_inst = config.get_instrument(new_instrument)
-        if new_inst is None:
-            raise BackendError(f"Instrument '{new_instrument}' not found.")
+        if new_instrument not in INSTRUMENT_LABELS:
+            raise BackendError(f"'{new_instrument}' isn't a recognized instrument label.")
         _, data = self._read_session_log(session_dir)
         filter_slot_indices = {int(k) for k in data.get("filter_slot_draws", {})}
 
@@ -1437,9 +1444,9 @@ class LocalBackend(Backend):
         old_video_path = project.completed_takes_dir / f"{old_stem}.mp4"
         ext = Path(take.filename).suffix.lstrip(".") or "flac"
 
-        new_take_number = next_take_number(project.completed_takes_dir, track_name, new_inst.full_name)
+        new_take_number = next_take_number(project.completed_takes_dir, track_name, new_instrument)
         new_filename = take_filename(
-            track_name, new_inst.full_name, new_take_number, entry.source_label(), entry.backing_track, ext,
+            track_name, new_instrument, new_take_number, entry.source_label(), entry.backing_track, ext,
         )
         new_stem = Path(new_filename).stem
         new_audio_path = project.completed_takes_dir / new_filename
@@ -1452,11 +1459,11 @@ class LocalBackend(Backend):
             shutil.move(str(old_video_path), str(new_video_path))
 
         new_take = TakeInfo(
-            instrument=new_inst.full_name, take_number=new_take_number, filename=new_filename,
+            instrument=new_instrument, take_number=new_take_number, filename=new_filename,
             volume=take.volume, has_video=has_video,
         )
         del entry.preferred_takes[old_instrument]
-        entry.set_preferred_take(new_inst.full_name, new_take)
+        entry.set_preferred_take(new_instrument, new_take)
         project.save_setlist()
 
         if entry.inspiration_track_id:
@@ -1471,7 +1478,7 @@ class LocalBackend(Backend):
             shared_entry = index.get(str(entry.inspiration_track_id))
             if shared_entry is not None and old_instrument in shared_entry.preferred_takes:
                 del shared_entry.preferred_takes[old_instrument]
-                shared_entry.set_preferred_take(new_inst.full_name, new_take)
+                shared_entry.set_preferred_take(new_instrument, new_take)
                 save_inspiration_index(root, index)
 
     def analyze_take(self, session_dir: str, track_name: str, instrument_name: str) -> dict:
@@ -1512,31 +1519,35 @@ class LocalBackend(Backend):
             # ever got to look at.
             raise BackendError(f"'{take.filename}' isn't available locally right now.")
 
-        # instrument_name must still resolve against the *current* config
-        # — not just a string that was valid whenever this take was
-        # recorded (e.g. an instrument since renamed/removed, or, for a
-        # take recorded before instruments had a single full_name-only
-        # identity, its old short "name"). Rather than silently falling
-        # back to comparing against every configured instrument — which
-        # would reintroduce the classifier's bias toward whichever one
-        # has the widest default frequency range (see audio/instrument_
-        # classifier.py's module docstring and _DEFAULT_RANGES_BY_LABEL),
-        # giving a confidently wrong answer — this just says so.
-        inst = config.get_instrument(instrument_name)
-        if inst is None:
+        # instrument_name (a label — takes are filed by label, not by
+        # which specific piece of gear played them) must still resolve
+        # against the *current* config — not just a string that was valid
+        # whenever this take was recorded (e.g. a label since removed
+        # from config.INSTRUMENT_LABELS, or a take recorded before takes
+        # were filed by label at all, still carrying an old instrument
+        # name/full_name as its stored identifier). Rather than silently
+        # falling back to comparing against every configured instrument —
+        # which would reintroduce the classifier's bias toward whichever
+        # one has the widest default frequency range (see audio/
+        # instrument_classifier.py's module docstring and
+        # _DEFAULT_RANGES_BY_LABEL), giving a confidently wrong answer —
+        # this just says so.
+        label_instruments = [i for i in config.instruments if i.label == instrument_name]
+        if not label_instruments:
             raise BackendError(
-                f"'{instrument_name}' isn't a currently configured instrument, so there's "
-                "nothing to meaningfully compare this take's audio against. If it's been "
-                "renamed, use Reassign after updating Studio Setup."
+                f"'{instrument_name}' isn't a currently configured instrument label, so "
+                "there's nothing to meaningfully compare this take's audio against. If it's "
+                "been renamed, use Reassign after updating Studio Setup."
             )
-        # Compare only against instruments that share this one's own
-        # input_label (the same physical channel) — the only ones a
-        # mix-up during recording could plausibly have actually been.
+        # Compare only against instruments sharing a physical channel
+        # (input_label) with any instrument of this label — the only ones
+        # a mix-up during recording could plausibly have actually been.
         # Comparing against unrelated hardware inputs (e.g. a guitar's DI
         # against a piano on a different device entirely) can't be what
         # actually got recorded here regardless of what the audio sounds
         # like, and has the same bias problem as above.
-        candidates = [i for i in config.instruments if i.input_label == inst.input_label]
+        input_labels = {i.input_label for i in label_instruments}
+        candidates = [i for i in config.instruments if i.input_label in input_labels]
 
         from .audio.instrument_classifier import classify_audio_file
         guess, confidence = classify_audio_file(take_path, candidates)
@@ -1897,7 +1908,7 @@ class LocalBackend(Backend):
 
         trim = int(config.latency_compensation_ms / 1000.0 * config.sample_rate)
         for other_inst, take_info in other_takes.items():
-            if other_inst.lower() == session.inst.full_name.lower():
+            if other_inst.lower() == session.inst.label.lower():
                 continue
             take_path = project.completed_takes_dir / take_info.filename
             if take_path.exists():
@@ -1920,8 +1931,8 @@ class LocalBackend(Backend):
         Queries the inspiration server for every song matching the
         filter, then prefers one that some *other* project or session has
         already recorded a take on (but not yet for this instrument's
-        label — any instrument sharing it counts, see StudioConfig.
-        instrument_names_sharing_label) — via the shared vault-wide
+        label — takes are filed by label, see TrackEntry.preferred_takes,
+        so any instrument sharing it counts) — via the shared vault-wide
         inspiration-take index (vault.py), not just this project's own
         history — so a later instrument can layer onto the same song
         instead of the setlist only ever accumulating unrelated one-off
@@ -1952,11 +1963,11 @@ class LocalBackend(Backend):
 
         from .vault import load_inspiration_index, vault_root
         index = load_inspiration_index(vault_root(config))
-        sharing = config.instrument_names_sharing_label(instrument_name)
+        label = config.label_for_instrument(instrument_name)
         reusable = []
         for m in candidates:
             shared = index.get(str(m.get("id")))
-            if shared is not None and shared.preferred_takes and shared.take_for_any(sharing) is None:
+            if shared is not None and shared.preferred_takes and shared.get_take_for_instrument(label) is None:
                 reusable.append(m)
         chosen = random.choice(reusable) if reusable else random.choice(candidates)
         return build_inspiration_track_entry(chosen)
@@ -2010,24 +2021,24 @@ class LocalBackend(Backend):
 
     def _advance_locked(self, session: "_ActiveSession", status_prefix: str = "") -> TrackEntry | None:
         """Find and load the next setlist track after the current one that
-        still needs a take for the session's instrument's label (any
-        instrument sharing it counts — see StudioConfig.instrument_names_
-        sharing_label) — skipping both tracks with takes already on disk
-        and ones completed earlier in this same session (the setlist
-        doesn't learn about those until post-processing). Returns the
-        loaded track (resolved, if the setlist position found is a filter
-        slot — see _resolve_filter_slot_for_session), or None (emitting a
-        "waiting" status) when nothing's left. Called with self._record_
-        lock held; playback must already be stopped."""
+        still needs a take for the session's instrument's label (takes
+        are filed by label — see TrackEntry.preferred_takes — so any
+        instrument sharing it counts) — skipping both tracks with takes
+        already on disk and ones completed earlier in this same session
+        (the setlist doesn't learn about those until post-processing).
+        Returns the loaded track (resolved, if the setlist position found
+        is a filter slot — see _resolve_filter_slot_for_session), or None
+        (emitting a "waiting" status) when nothing's left. Called with
+        self._record_lock held; playback must already be stopped."""
         tracks = session.project.setlist.tracks
         start = (session.current_track_index + 1) if session.current_track_index is not None else 0
         config = self.get_config()
-        sharing = config.instrument_names_sharing_label(session.inst.full_name)
+        label = session.inst.label
         index = None
         for i in range(start, len(tracks)):
             if i in session.completed_track_indices:
                 continue
-            if tracks[i].take_for_any(sharing) is None:
+            if tracks[i].get_take_for_instrument(label) is None:
                 index = i
                 break
         if index is None:
@@ -2808,7 +2819,7 @@ class LocalBackend(Backend):
 
             trim = int(config.latency_compensation_ms / 1000.0 * config.sample_rate)
             for other_inst, take_info in track.preferred_takes.items():
-                if other_inst.lower() == inst.full_name.lower():
+                if other_inst.lower() == inst.label.lower():
                     continue
                 take_path = project.completed_takes_dir / take_info.filename
                 if take_path.exists():

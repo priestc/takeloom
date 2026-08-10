@@ -32,7 +32,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from ..backend import BackendError
-from ..config import StudioConfig
+from ..config import INSTRUMENT_LABELS, StudioConfig
 from .app_state import AppState
 
 
@@ -154,7 +154,14 @@ class SessionsFrame(ttk.Frame):
         self._build_detail(session_dir, detail)
 
     def _build_detail(self, session_dir: str, detail: dict) -> None:
+        # Two different vocabularies for two different corrections:
+        # "Correct instrument" fixes session_log.json's own record of
+        # which *specific* instrument (full_name) played the session, for
+        # record-keeping — "Reassign" re-files a take, which is filed by
+        # *label* (see backend.py's reassign_take/TrackEntry.
+        # preferred_takes), not by which specific piece of gear played it.
         instrument_names = [inst.full_name for inst in self.config_obj.instruments]
+        instrument_labels = list(INSTRUMENT_LABELS)
         current_instrument = detail.get("instrument", "")
 
         header = ttk.Frame(self.detail_frame)
@@ -180,9 +187,9 @@ class SessionsFrame(ttk.Frame):
         ).pack(anchor="w", pady=(0, 10))
 
         for track in detail.get("tracks", []):
-            self._build_track_row(session_dir, track, instrument_names)
+            self._build_track_row(session_dir, track, instrument_labels)
 
-    def _build_track_row(self, session_dir: str, track: dict, instrument_names: list[str]) -> None:
+    def _build_track_row(self, session_dir: str, track: dict, instrument_labels: list[str]) -> None:
         header_row = ttk.Frame(self.detail_frame)
         header_row.pack(fill="x", pady=(6, 0))
         ttk.Label(header_row, text=track["track_name"], width=28, anchor="w", font=("TkDefaultFont", 10, "bold")).pack(
@@ -212,32 +219,32 @@ class SessionsFrame(ttk.Frame):
         # takes under more than one instrument doesn't hide any of them.
         for take in takes:
             self._build_take_row(
-                session_dir, track["track_name"], take, instrument_names, reassignable=not is_filter_draw,
+                session_dir, track["track_name"], take, instrument_labels, reassignable=not is_filter_draw,
             )
 
     def _build_take_row(
-        self, session_dir: str, track_name: str, take: dict, instrument_names: list[str], reassignable: bool = True,
+        self, session_dir: str, track_name: str, take: dict, instrument_labels: list[str], reassignable: bool = True,
     ) -> None:
-        old_instrument = take["instrument"]
+        old_instrument = take["instrument"]  # a label — takes are filed by label, see reassign_take's docstring
         row = ttk.Frame(self.detail_frame)
         row.pack(fill="x", pady=1)
         ttk.Label(row, text="", width=28).pack(side="left")  # aligns under the track name above
-        # Instrument called out as its own bold label, not just bracketed
-        # into the filename text below it — the filename usually repeats
-        # the instrument name too, but this is what actually answers "what
-        # was this recorded as" at a glance, including for a take pulled
-        # in from a filter-slot draw's shared inspiration-take index.
+        # Label called out as its own bold label, not just bracketed into
+        # the filename text below it — the filename usually repeats it
+        # too, but this is what actually answers "what was this filed
+        # under" at a glance, including for a take pulled in from a
+        # filter-slot draw's shared inspiration-take index.
         ttk.Label(row, text=old_instrument, font=("TkDefaultFont", 9, "bold")).pack(side="left", padx=(0, 6))
         ttk.Label(row, text=take["filename"], foreground="#666666").pack(side="left", padx=(0, 8))
         if not reassignable:
             self._build_analyze_controls(row, session_dir, track_name, old_instrument)
             return
-        # Default the target to whatever instrument isn't this take's own —
-        # the common case (this whole tab exists for) is a 2-instrument
+        # Default the target to whatever label isn't this take's own —
+        # the common case (this whole tab exists for) is a 2-label
         # mix-up, so this is usually already the right answer.
-        other_names = [name for name in instrument_names if name != old_instrument]
-        reassign_var = tk.StringVar(value=(other_names[0] if other_names else old_instrument))
-        ttk.Combobox(row, textvariable=reassign_var, values=instrument_names, state="readonly", width=14).pack(
+        other_labels = [label for label in instrument_labels if label != old_instrument]
+        reassign_var = tk.StringVar(value=(other_labels[0] if other_labels else old_instrument))
+        ttk.Combobox(row, textvariable=reassign_var, values=instrument_labels, state="readonly", width=16).pack(
             side="left"
         )
         ttk.Button(

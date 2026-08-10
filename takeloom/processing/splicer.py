@@ -175,6 +175,7 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
 
     project = Project.open(projects_dir / f"{data['project']}.json", root)
     instrument = data["instrument"]
+    instrument_label = data.get("instrument_label", "")
     musician = data.get("musician", "")
     sample_rate = data.get("sample_rate") or 48000
     mix_start_frame = data.get("mix_start_frame", 0)
@@ -208,17 +209,21 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                 # slot's own label ("Random ..."). Always used for the
                 # archived take's filename/watermark.
                 track_name = take.track_name or slot.name
-                # take.instrument (this take's own record_start/back_to_
-                # start event) rather than the session-wide `instrument`
-                # — the same value for now (one instrument per session),
-                # but this is what makes take filing correct once a
-                # session can span more than one instrument. Falls back
-                # to the session-wide field only for a log recorded
-                # before events carried their own (parse_session_log
-                # already does this same fallback, so take.instrument is
-                # only ever "" here for a session with literally no
-                # instrument recorded at all).
-                take_instrument = take.instrument or instrument
+                # Take filing/numbering/filenames use the instrument's
+                # LABEL, not which specific piece of gear played it — so
+                # a Stratocaster take and a later Telecaster take of the
+                # same song continue one "electric-guitar" take-number
+                # sequence instead of splitting into separate per-gear
+                # counters (they're both still "electric-guitar - take2",
+                # not a fresh "Telecaster - take1"). take.instrument (the
+                # full_name) stays around only for the human-readable
+                # video watermark below — that's the "record which piece
+                # of gear actually played this" info, and it already
+                # lives in session_log.json for that purpose. Falls back
+                # to the session-wide fields only for a log recorded
+                # before events/labels carried their own.
+                take_label = take.instrument_label or instrument_label or take.instrument or instrument
+                take_full_name = take.instrument or instrument
 
                 # For a filter slot, the take belongs to whatever song got
                 # drawn this session (draw_info), not the slot's own
@@ -233,20 +238,20 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                     take_backing_track = slot.backing_track
                     take_source = slot.source_label()
 
-                take_num = next_take_number(completed_dir, track_name, take_instrument)
-                flac_name = take_filename(track_name, take_instrument, take_num, take_source, take_backing_track, "flac")
+                take_num = next_take_number(completed_dir, track_name, take_label)
+                flac_name = take_filename(track_name, take_label, take_num, take_source, take_backing_track, "flac")
                 _copy_flac_segment(src, start, end, completed_dir / flac_name)
 
                 has_video = False
                 if have_video:
                     from ..video.capture import clip_session_video, format_watermark_text
                     watermark = format_watermark_text(
-                        musician, take_instrument, take.start_wall_time, track_name,
+                        musician, take_full_name, take.start_wall_time, track_name,
                     )
                     has_video = clip_session_video(
                         session_video_raw, session_mix_flac, completed_dir / flac_name,
                         completed_dir / take_filename(
-                            track_name, take_instrument, take_num, take_source, take_backing_track, "mp4",
+                            track_name, take_label, take_num, take_source, take_backing_track, "mp4",
                         ),
                         mix_start_s=(start - mix_start_frame) / sample_rate,
                         duration_s=(end - start) / sample_rate,
@@ -255,7 +260,7 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                     videos += has_video
 
                 take_info = TakeInfo(
-                    instrument=take_instrument, take_number=take_num, filename=flac_name, has_video=has_video,
+                    instrument=take_label, take_number=take_num, filename=flac_name, has_video=has_video,
                 )
                 if slot.is_inspiration_filter:
                     # Recorded into the shared vault-wide index (vault.py),
@@ -270,10 +275,10 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                         record_inspiration_take(
                             root, draw_info["inspiration_track_id"], draw_info["name"],
                             draw_info["backing_track"], draw_info.get("duration_seconds", 0.0),
-                            take_instrument, take_info,
+                            take_label, take_info,
                         )
                 else:
-                    slot.set_preferred_take(take_instrument, take_info)
+                    slot.set_preferred_take(take_label, take_info)
                     if slot.inspiration_track_id:
                         # A regular (non-filter) inspiration-sourced track:
                         # mirror the take into the shared index too, so any
@@ -283,7 +288,7 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                         # setlist entry rather than instead of it.
                         record_inspiration_take(
                             root, slot.inspiration_track_id, slot.name, slot.backing_track,
-                            slot.duration_seconds, take_instrument, take_info,
+                            slot.duration_seconds, take_label, take_info,
                         )
                 saved += 1
 

@@ -129,19 +129,25 @@ def classify_samples(
 
 
 def classify_audio_file(path: Path, instruments: list) -> tuple[str | None, float]:
-    """Best-guess instrument name for an already-recorded audio file, by
-    frequency content — used by backend.py's analyze_take (Sessions tab's
-    "Analyze" button) to flag a completed take that may have been filed
-    under the wrong instrument. `instruments` is scored the same way
-    InstrumentClassifier scores a live signal: each instrument's
-    effective_frequency_range (its own trained/hand-set freq_min_hz/
-    freq_max_hz, or its label's default).
+    """Best-guess instrument *label* for an already-recorded audio file,
+    by frequency content — used by backend.py's analyze_take (Sessions
+    tab's "Analyze" button) to flag a completed take that may have been
+    filed under the wrong label (takes are filed by label, not by which
+    specific piece of gear played them — see TrackEntry.preferred_takes,
+    so a label rather than a specific instrument's full_name is what's
+    actually comparable to a take's own stored identity). `instruments`
+    is scored the same way InstrumentClassifier scores a live signal:
+    each instrument's effective_frequency_range (its own trained/
+    hand-set freq_min_hz/freq_max_hz, or its label's default) — but
+    candidates are grouped by label here, not kept one-per-instrument, so
+    two instruments sharing a label (e.g. two different electric guitars
+    on the same channel) don't split votes against each other.
 
     Reads the whole file in ~1s windows (matching _ANALYSIS_WINDOW_
     SECONDS, the realtime classifier's own window), silence-gates each
-    one, classifies it independently, and returns whichever instrument
-    won the most windows — a plurality vote across the take rather than
-    one FFT over the entire file, so a long take with a quiet intro or a
+    one, classifies it independently, and returns whichever label won
+    the most windows — a plurality vote across the take rather than one
+    FFT over the entire file, so a long take with a quiet intro or a
     trailing pause doesn't get diluted or misjudged by a single unlucky
     global spectrum. confidence is the fraction of analyzed (non-silent)
     windows that agreed with the winner. Returns (None, 0.0) if
@@ -149,7 +155,7 @@ def classify_audio_file(path: Path, instruments: list) -> tuple[str | None, floa
     file can't be read."""
     if not instruments:
         return None, 0.0
-    candidates = [(inst.full_name, effective_frequency_range(inst)) for inst in instruments]
+    candidates = [(inst.label, effective_frequency_range(inst)) for inst in instruments]
 
     import soundfile as sf
     try:
