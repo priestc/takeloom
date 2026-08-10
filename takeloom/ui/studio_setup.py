@@ -281,7 +281,17 @@ class StudioSetupFrame(ttk.Frame):
             target = self.winfo_containing(event.x_root, event.y_root)
             while target is not None:
                 if target is canvas:
-                    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                    # event.delta isn't pre-scaled to multiples of 120 on
+                    # macOS the way it is on Windows — it's a small raw
+                    # value (often -1..-3/1..3 per notch, sometimes a
+                    # couple dozen for a fast trackpad swipe), so the
+                    # once-conventional "divide by 120" rounds every
+                    # ordinary scroll down to 0 units, i.e. no visible
+                    # movement at all — this was the actual reason the
+                    # wheel still did nothing after the <Enter>/<Leave>
+                    # fix. Just move a fixed one unit per event instead,
+                    # signed by delta's direction.
+                    canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
                     return
                 target = target.master
 
