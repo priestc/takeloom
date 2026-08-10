@@ -243,7 +243,11 @@ class StudioSetupFrame(ttk.Frame):
         the window now — wraps it all in a scrollable canvas rather than
         letting it clip. self.content (a plain ttk.Frame) is what every
         _build_*/_on_loaded method below actually grids/packs onto, not
-        self directly; self itself just holds the canvas + scrollbar."""
+        self directly; self itself just holds the footer (built first, so
+        it claims its space at the bottom before the canvas expands into
+        whatever's left) and the canvas + scrollbar."""
+        self._build_footer()
+
         canvas = tk.Canvas(self, highlightthickness=0)
         scrollbar = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
@@ -266,15 +270,48 @@ class StudioSetupFrame(ttk.Frame):
         canvas.bind("<Configure>", _on_canvas_configure)
 
         def _on_mousewheel(event: object) -> None:
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            # Checked against the actual pointer position on every event,
+            # rather than toggling the binding on <Enter>/<Leave> of the
+            # canvas itself — self.content's own children (every Entry/
+            # Label/Combobox/etc. in the form) cover almost the entire
+            # canvas, so the bare canvas is essentially never "directly"
+            # under the pointer; <Leave> would've fired (unbinding this)
+            # the instant the pointer crossed onto any field, which is
+            # exactly why the wheel previously did nothing.
+            target = self.winfo_containing(event.x_root, event.y_root)
+            while target is not None:
+                if target is canvas:
+                    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                    return
+                target = target.master
 
-        # Only bound while the pointer is actually over this tab's canvas
-        # (bind_all/unbind_all on Enter/Leave), so scrolling here doesn't
-        # hijack the mouse wheel anywhere else in the app.
-        canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
-        canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+        # bind_all reaches every widget in the whole app (Tk's global
+        # "all" bindtag), not just this canvas — safe only because the
+        # handler above re-checks the real pointer position itself before
+        # doing anything, rather than trusting that this event firing
+        # means the pointer is actually over this tab.
+        self.bind_all("<MouseWheel>", _on_mousewheel)
+
+    def _build_footer(self) -> None:
+        """Save (and its status message) live outside the scrollable
+        canvas, in their own frame pinned to the bottom of the tab —
+        always visible regardless of where the content above is
+        scrolled to. save_button starts disabled since there's nothing
+        to save until _on_loaded actually finishes (see its own
+        enabling at the end of _build())."""
+        footer = ttk.Frame(self)
+        footer.pack(side="bottom", fill="x")
+        ttk.Separator(footer, orient="horizontal").pack(fill="x", pady=(0, 8))
+        bottom_row = ttk.Frame(footer)
+        bottom_row.pack(fill="x", pady=(0, 8))
+        self.status_var = tk.StringVar(value="")
+        ttk.Label(bottom_row, textvariable=self.status_var, foreground="#2a7d2a").pack(side="left")
+        self.save_button = ttk.Button(bottom_row, text="Save", command=self._on_save)
+        self.save_button.pack(side="right")
+        self.save_button.state(["disabled"])
 
     def _on_destroy(self, _event: object) -> None:
+        self.unbind_all("<MouseWheel>")
         self.app_state.backend.off_event(self._on_backend_event)
         if self._testing_row is not None:
             try:
@@ -401,16 +438,10 @@ class StudioSetupFrame(ttk.Frame):
         row = self._build_input_labels(row)
         row = self._build_instruments(row)
 
-        self.status_var = tk.StringVar(value="")
-        ttk.Label(self.content, textvariable=self.status_var, foreground="#2a7d2a").grid(
-            row=row, column=0, columnspan=2, sticky="w", pady=(12, 0)
-        )
-        row += 1
-
-        button_row = ttk.Frame(self.content)
-        button_row.grid(row=row, column=0, columnspan=2, sticky="e", pady=(12, 0))
-        self.save_button = ttk.Button(button_row, text="Save", command=self._on_save)
-        self.save_button.pack(side="right")
+        # status_var/save_button themselves live in the fixed footer (see
+        # _build_footer) — just enabling it here, now that there's an
+        # actually-loaded config to save.
+        self.save_button.state(["!disabled"])
 
     def _build_vault_section(self, row: int) -> int:
         ttk.Separator(self.content, orient="horizontal").grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
