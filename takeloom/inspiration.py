@@ -89,9 +89,16 @@ def _post_track_query(config: StudioConfig, filters: list[dict]) -> list[dict]:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
     except urllib.error.URLError as e:
+        # Includes a plain socket timeout — urllib wraps that as a
+        # URLError(reason=socket.timeout(...)) rather than raising it bare.
+        # A stuck/unreachable inspiration server used to be able to hang
+        # this call forever (no timeout was set at all); over Remote that
+        # blocked the whole connection's request queue behind it — see
+        # remote/server.py's per-request threading, added for the same
+        # reason.
         raise InspirationError(f"Error contacting server: {e}") from e
     return data.get("tracks", [])
 

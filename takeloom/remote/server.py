@@ -287,7 +287,24 @@ class _ClientHandler(socketserver.StreamRequestHandler):
                     except ValueError:
                         continue
                     if msg.get("kind") == "request":
-                        self._handle_request(msg)
+                        # One thread per request rather than handling it
+                        # inline and only then going back to read the next
+                        # line: a slow op (e.g. an inspiration-server query
+                        # a filter slot preview kicks off — see backend.py's
+                        # get_filter_slot_previews) would otherwise block
+                        # this whole connection's request queue behind it,
+                        # silently stalling unrelated commands (start_auto_
+                        # detect_instrument, start_recording, ...) queued
+                        # right after it with no error either side would
+                        # see. LocalBackend is already built to tolerate
+                        # concurrent calls (see its own locks, e.g.
+                        # _record_lock) since local UI actions already run
+                        # this way from separate worker threads — Remote
+                        # should behave the same, not serialize everything
+                        # through one connection.
+                        threading.Thread(
+                            target=self._handle_request, args=(msg,), daemon=True,
+                        ).start()
             finally:
                 if self._preview_sub is not None:
                     self._preview_sub.close()
