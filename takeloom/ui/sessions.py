@@ -9,11 +9,12 @@ analyze_take for exactly what each one touches and why they're kept apart:
 
 1. "Correct instrument" fixes the session's own historical record
    (session_log.json) — always safe, no ambiguity.
-2. "Reassign" re-files one specific track's take file + setlist.json entry
-   under a different instrument — shown per-track, with a confirmation
-   dialog naming the exact file before anything on disk moves. Not offered
-   for an inspiration filter-slot draw (see backend.py's reassign_take
-   docstring for why that case can't be done reliably).
+2. "Reassign" re-files one specific track's take file under a different
+   instrument — shown per-track, with a confirmation dialog naming the
+   exact file before anything on disk moves. Re-keys the take in the
+   project's setlist.json for an ordinary track, or in the shared
+   vault-wide inspiration-take index for one drawn from an inspiration
+   filter slot (see backend.py's reassign_take docstring).
 3. "Analyze" is read-only: runs the take's actual recorded audio through
    the frequency-based instrument classifier (audio/instrument_
    classifier.py) and reports which configured instrument it most
@@ -197,12 +198,6 @@ class SessionsFrame(ttk.Frame):
         )
 
         is_filter_draw = track["is_filter_draw"]
-        if is_filter_draw:
-            ttk.Label(
-                header_row,
-                text="drawn from an inspiration filter — not reassignable here, but still analyzable",
-                foreground="#888888",
-            ).pack(side="left")
 
         takes = track.get("takes", [])
         if not takes:
@@ -214,16 +209,16 @@ class SessionsFrame(ttk.Frame):
 
         # A track normally has one take per instrument that's actually
         # recorded it — one row per (instrument, take) currently on file,
-        # each independently reassignable (unless drawn from a filter
-        # slot — see reassign_take's docstring for why), so a track with
-        # takes under more than one instrument doesn't hide any of them.
+        # each independently reassignable, including one drawn from a
+        # filter slot (reassign_take resolves it via the shared vault-wide
+        # inspiration-take index in that case — see its docstring), so a
+        # track with takes under more than one instrument doesn't hide any
+        # of them.
         for take in takes:
-            self._build_take_row(
-                session_dir, track["track_name"], take, instrument_labels, reassignable=not is_filter_draw,
-            )
+            self._build_take_row(session_dir, track["track_name"], take, instrument_labels)
 
     def _build_take_row(
-        self, session_dir: str, track_name: str, take: dict, instrument_labels: list[str], reassignable: bool = True,
+        self, session_dir: str, track_name: str, take: dict, instrument_labels: list[str],
     ) -> None:
         old_instrument = take["instrument"]  # a label — takes are filed by label, see reassign_take's docstring
         row = ttk.Frame(self.detail_frame)
@@ -236,9 +231,6 @@ class SessionsFrame(ttk.Frame):
         # filter-slot draw's shared inspiration-take index.
         ttk.Label(row, text=old_instrument, font=("TkDefaultFont", 9, "bold")).pack(side="left", padx=(0, 6))
         ttk.Label(row, text=take["filename"], foreground="#666666").pack(side="left", padx=(0, 8))
-        if not reassignable:
-            self._build_analyze_controls(row, session_dir, track_name, old_instrument)
-            return
         # Default the target to whatever label isn't this take's own —
         # the common case (this whole tab exists for) is a 2-label
         # mix-up, so this is usually already the right answer.
@@ -259,9 +251,7 @@ class SessionsFrame(ttk.Frame):
         # Read-only (see backend.py's analyze_take) — its result just
         # updates analyze_var in place, no _refresh_after_change/rebuild,
         # so it survives sitting next to Reassign without the two
-        # interfering with each other, and works for a filter-slot draw
-        # (no Reassign in that row at all — see _build_take_row) same as
-        # any other take.
+        # interfering with each other.
         analyze_var = tk.StringVar(value="")
         ttk.Button(
             row, text="Analyze",

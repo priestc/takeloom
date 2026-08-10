@@ -254,26 +254,31 @@ class Backend(ABC):
 
     @abstractmethod
     def reassign_take(self, session_dir: str, track_name: str, old_instrument: str, new_instrument: str) -> None:
-        """Re-file one specific take — the one currently sitting in
-        `track_name`'s preferred_takes under `old_instrument` — under
-        `new_instrument` instead: renames the take file(s) on disk, and
-        re-keys it in the project's setlist.json (and, for an inspiration-
-        sourced track, the shared vault-wide inspiration_takes.json index
-        too). Both `old_instrument` and `new_instrument` are instrument
-        *labels* (one of config.INSTRUMENT_LABELS) — takes are filed by
-        label, not by which specific piece of gear played them (see
-        TrackEntry.preferred_takes) — not a particular Instrument's
-        full_name. `old_instrument` is passed explicitly (typically
-        whatever get_session_detail's `current_take` reported) rather
-        than re-read from session_dir's session_log.json, so this gives
-        the right answer regardless of whether correct_session_instrument
-        has already been called on the same session. Raises BackendError
-        if `new_instrument` isn't a recognized label, `track_name` isn't
-        one of session_dir's tracks, if it was an inspiration filter-slot
-        draw (no reliable stored link from an old session back to exactly
-        which shared-index entry it produced — see the Sessions tab's
-        docs), or if there's no take currently filed under
-        `old_instrument` to reassign."""
+        """Re-file one specific take — the one currently sitting under
+        `old_instrument` for `track_name` — under `new_instrument`
+        instead: renames the take file(s) on disk, and re-keys it either
+        in the project's setlist.json (an ordinary track), or in the
+        shared vault-wide inspiration_takes.json index (a track drawn
+        from an inspiration filter slot — see TrackEntry's docstring for
+        why its take never lives on the setlist entry itself; session_
+        dir's own session_log.json records exactly which shared-index
+        entry a filter slot drew via filter_slot_draws, so this is just
+        as reliable either way — same lookup get_session_detail/
+        analyze_take already use). For an ordinary, non-filter track
+        that's also inspiration-sourced, both the setlist entry and the
+        shared index get updated, same as ever. Both `old_instrument` and
+        `new_instrument` are instrument *labels* (one of config.
+        INSTRUMENT_LABELS) — takes are filed by label, not by which
+        specific piece of gear played them (see TrackEntry.
+        preferred_takes) — not a particular Instrument's full_name.
+        `old_instrument` is passed explicitly (typically whatever
+        get_session_detail's `current_take` reported) rather than re-read
+        from session_dir's session_log.json, so this gives the right
+        answer regardless of whether correct_session_instrument has
+        already been called on the same session. Raises BackendError if
+        `new_instrument` isn't a recognized label, `track_name` isn't one
+        of session_dir's tracks, or if there's no take currently filed
+        under `old_instrument` to reassign."""
         ...
 
     @abstractmethod
@@ -286,13 +291,9 @@ class Backend(ABC):
         recorded audio most resembles — a read-only diagnostic behind the
         Sessions tab's "Analyze" button, to flag a take that may have
         been filed under the wrong label in the first place (the reason
-        to reach for reassign_take). Unlike reassign_take, works for an
-        inspiration filter-slot draw too (looked up from the shared
-        vault-wide inspiration-take index, same as get_session_detail) —
-        there being no reliable stored link back to exactly which
-        shared-index entry an old session produced only matters for a
-        *write* like reassign_take; a read here just needs whatever's on
-        file for the song this session's log says got drawn right now.
+        to reach for reassign_take). Works for an inspiration filter-slot
+        draw too, same as reassign_take (looked up from the shared
+        vault-wide inspiration-take index, same as get_session_detail).
         Only compares against instruments sharing a physical channel
         (input_label) with any instrument of `instrument_name`'s label —
         the only ones a mix-up during recording could plausibly have
@@ -1480,34 +1481,16 @@ class LocalBackend(Backend):
         if not write_remote_session_log(config.backup_server, session_dir, data):
             raise BackendError(f"Could not write the correction back to {config.backup_server}.")
 
-    def reassign_take(self, session_dir: str, track_name: str, old_instrument: str, new_instrument: str) -> None:
-        config = self.get_config()
-        if new_instrument not in INSTRUMENT_LABELS:
-            raise BackendError(f"'{new_instrument}' isn't a recognized instrument label.")
-        _, data = self._read_session_log(session_dir)
-        filter_slot_indices = {int(k) for k in data.get("filter_slot_draws", {})}
-
-        track_index = None
-        for e in data.get("events", []):
-            if e.get("track_name") == track_name:
-                track_index = e.get("track_index")
-                break
-        if track_index is None:
-            raise BackendError(f"Track '{track_name}' wasn't touched by session '{session_dir}'.")
-        if track_index in filter_slot_indices:
-            raise BackendError(
-                f"'{track_name}' was drawn from an inspiration filter slot — there's no reliable "
-                "record of exactly which shared take it produced, so it can't be reassigned here."
-            )
-
-        project = self._open_project(data.get("project", ""))
-        entry = next((t for t in project.setlist.tracks if t.name == track_name), None)
-        if entry is None:
-            raise BackendError(f"Track '{track_name}' no longer exists in project '{project.name}'.")
-        take = entry.get_take_for_instrument(old_instrument)
-        if take is None:
-            raise BackendError(f"No take is currently filed under '{old_instrument}' for '{track_name}'.")
-
+    def _move_take_file(
+        self, project: Project, track_name: str, new_instrument: str, take: TakeInfo, source: str,
+        backing_track: str,
+    ) -> TakeInfo:
+        """Rename a completed take's audio (and video, if present) file(s)
+        on disk to new_instrument's naming convention, returning the new
+        TakeInfo — reassign_take's two cases (an ordinary setlist track,
+        and a track drawn from an inspiration filter slot) do this
+        identical file move; only where the resulting TakeInfo then gets
+        stored differs."""
         from .utils import next_take_number, take_filename
         old_stem = Path(take.filename).stem
         old_audio_path = project.completed_takes_dir / take.filename
@@ -1515,9 +1498,7 @@ class LocalBackend(Backend):
         ext = Path(take.filename).suffix.lstrip(".") or "flac"
 
         new_take_number = next_take_number(project.completed_takes_dir, track_name, new_instrument)
-        new_filename = take_filename(
-            track_name, new_instrument, new_take_number, entry.source_label(), entry.backing_track, ext,
-        )
+        new_filename = take_filename(track_name, new_instrument, new_take_number, source, backing_track, ext)
         new_stem = Path(new_filename).stem
         new_audio_path = project.completed_takes_dir / new_filename
         new_video_path = project.completed_takes_dir / f"{new_stem}.mp4"
@@ -1528,9 +1509,66 @@ class LocalBackend(Backend):
         if has_video:
             shutil.move(str(old_video_path), str(new_video_path))
 
-        new_take = TakeInfo(
+        return TakeInfo(
             instrument=new_instrument, take_number=new_take_number, filename=new_filename,
             volume=take.volume, has_video=has_video,
+        )
+
+    def reassign_take(self, session_dir: str, track_name: str, old_instrument: str, new_instrument: str) -> None:
+        config = self.get_config()
+        if new_instrument not in INSTRUMENT_LABELS:
+            raise BackendError(f"'{new_instrument}' isn't a recognized instrument label.")
+        _, data = self._read_session_log(session_dir)
+        filter_slot_draws = data.get("filter_slot_draws", {})
+
+        track_index = None
+        for e in data.get("events", []):
+            if e.get("track_name") == track_name:
+                track_index = e.get("track_index")
+                break
+        if track_index is None:
+            raise BackendError(f"Track '{track_name}' wasn't touched by session '{session_dir}'.")
+
+        project = self._open_project(data.get("project", ""))
+        from .vault import load_inspiration_index, save_inspiration_index, vault_root
+        root = vault_root(config)
+
+        if str(track_index) in filter_slot_draws:
+            # Drawn from an inspiration filter slot — its take isn't filed
+            # on any TrackEntry in the setlist (a filter slot's own entry
+            # never holds one, see TrackEntry's docstring); it lives in the
+            # shared vault-wide inspiration-take index instead, keyed by
+            # exactly which song this session drew — filter_slot_draws
+            # records that, same lookup get_session_detail/analyze_take
+            # already use to find it reliably.
+            track_id = filter_slot_draws[str(track_index)].get("inspiration_track_id")
+            index = load_inspiration_index(root)
+            shared = index.get(str(track_id)) if track_id else None
+            if shared is None:
+                raise BackendError(f"No shared inspiration record found for '{track_name}'.")
+            take = shared.get_take_for_instrument(old_instrument)
+            if take is None:
+                raise BackendError(f"No take is currently filed under '{old_instrument}' for '{track_name}'.")
+
+            new_take = self._move_take_file(
+                project, track_name, new_instrument, take,
+                source="inspiration", backing_track=f"inspiration_{track_id}",
+            )
+            del shared.preferred_takes[old_instrument]
+            shared.set_preferred_take(new_instrument, new_take)
+            save_inspiration_index(root, index)
+            return
+
+        entry = next((t for t in project.setlist.tracks if t.name == track_name), None)
+        if entry is None:
+            raise BackendError(f"Track '{track_name}' no longer exists in project '{project.name}'.")
+        take = entry.get_take_for_instrument(old_instrument)
+        if take is None:
+            raise BackendError(f"No take is currently filed under '{old_instrument}' for '{track_name}'.")
+
+        new_take = self._move_take_file(
+            project, track_name, new_instrument, take,
+            source=entry.source_label(), backing_track=entry.backing_track,
         )
         del entry.preferred_takes[old_instrument]
         entry.set_preferred_take(new_instrument, new_take)
@@ -1542,8 +1580,6 @@ class LocalBackend(Backend):
             # own preferred_takes (see process_session) — keep both in
             # sync here too, so another project referencing the same song
             # doesn't keep offering the take under the old instrument.
-            from .vault import load_inspiration_index, save_inspiration_index, vault_root
-            root = vault_root(config)
             index = load_inspiration_index(root)
             shared_entry = index.get(str(entry.inspiration_track_id))
             if shared_entry is not None and old_instrument in shared_entry.preferred_takes:
