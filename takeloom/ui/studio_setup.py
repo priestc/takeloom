@@ -284,16 +284,21 @@ class StudioSetupFrame(ttk.Frame):
 
     def _bind_mousewheel(self, widget: tk.Misc) -> None:
         """Bind the scroll handler directly on `widget` and, recursively,
-        every one of its descendants (not a recursive bind_all/bindtag-
-        propagation trick): a `bind_all("<MouseWheel>", ...)` should in
-        principle reach every widget via the Tk-global "all" bindtag
-        regardless of which specific one the pointer is over, but that
-        didn't actually happen in practice here (Tcl/Tk 9.0 on Aqua) —
-        real OS-delivered wheel events over the page's own fields (Entry/
-        Combobox/etc, which cover almost the entire canvas) never reached
-        it. Binding directly on every widget individually sidesteps
-        whatever's different about this build's event propagation
-        instead of depending on it.
+        every one of its descendants, rather than a single bind_all
+        ("<MouseWheel>", ...) on the Tk-global "all" bindtag — belt and
+        suspenders against however a given machine's Tk build happens to
+        route wheel events, confirmed (on at least one real machine,
+        Tcl/Tk 9.0.4 on Aqua via Homebrew) to sometimes not deliver
+        <MouseWheel> to *any* Tk widget at all, bind_all included — down
+        to a completely bare `tk.Tk()` with nothing else running, and
+        even to Tcl/Tk's own `wish` shell with zero Python involved. That
+        turned out to be an environment-level gap (this exact Tcl/Tk
+        build not receiving the OS scroll-wheel event at all, on that
+        machine, for any Tk app), not a binding-strategy bug — no
+        widget-level fix here can compensate for the OS never delivering
+        the event in the first place. The scrollbar itself still works
+        by dragging regardless, since that's ordinary mouse-button
+        press/drag, not a wheel event.
 
         Plain widget.bind() (no add="+") deliberately overwrites rather
         than stacks, so re-running this over an already-bound subtree
