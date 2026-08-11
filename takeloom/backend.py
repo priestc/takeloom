@@ -569,11 +569,12 @@ class Backend(ABC):
         several instruments, the frequency classifier's current best
         guess among just those) reports a match — order and timing
         depend entirely on what the performer plays. Runs until
-        stop_detect_all() or the Studio Setup tab closing. Raises
-        BackendError immediately if a session, video check, latency
-        test, or an instrument train is already active — same mutual
-        exclusion as those — or if no instrument's input can currently
-        be opened at all."""
+        stop_detect_all() or the caller's own window closing (see
+        ui/detect_test.py's standalone `takeloom detect-test` window, the
+        only current caller). Raises BackendError immediately if a
+        session, video check, latency test, or an instrument train is
+        already active — same mutual exclusion as those — or if no
+        instrument's input can currently be opened at all."""
         ...
 
     @abstractmethod

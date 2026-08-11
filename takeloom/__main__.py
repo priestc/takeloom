@@ -275,6 +275,21 @@ def ui_command(remote_ip: str | None) -> None:
     run(remote_ip=remote_ip)
 
 
+@main.command(name="detect-test")
+def detect_test_command() -> None:
+    """Open a standalone window listing every configured instrument and
+    recording device, and light up an instrument the moment it's heard
+    playing on its own input — a hardware/cabling check independent of
+    the main app. Local hardware only, same as the detect-all mechanism
+    it's built on (see Backend.start_detect_all's docstring) — there's no
+    --remote option."""
+    from . import update_check
+    update_check.check_and_restart(log=click.echo)
+
+    from .ui.detect_test import run
+    run()
+
+
 @main.command(name="server")
 @click.option(
     "--disable-color", is_flag=True, default=False,
