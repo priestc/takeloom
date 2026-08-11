@@ -73,8 +73,12 @@ _FALLBACK_RANGE = (60.0, 2000.0)
 # Below this peak amplitude a block is treated as silence/noise floor and
 # excluded from analysis entirely — otherwise room noise between notes
 # would constantly drag the classifier toward whatever instrument's range
-# happens to overlap low-level hiss.
-_SILENCE_THRESHOLD = 0.01
+# happens to overlap low-level hiss. Public (not underscore-prefixed)
+# since backend.py's _open_channel_classifier_streams reuses it directly
+# to decide when a channel counts as "gone quiet" for detect-test's
+# per-input light — same definition of silence throughout, rather than a
+# second threshold that could drift out of sync with this one.
+SILENCE_THRESHOLD = 0.01
 
 # How much captured audio to accumulate before running one classification
 # pass — long enough to average out a single transient/pick attack, short
@@ -168,7 +172,7 @@ def classify_audio_file(path: Path, instruments: list) -> tuple[str | None, floa
                 if len(block) < 2:
                     break
                 mono = block[:, 0]
-                if float(np.max(np.abs(mono))) < _SILENCE_THRESHOLD:
+                if float(np.max(np.abs(mono))) < SILENCE_THRESHOLD:
                     continue
                 name, _score = classify_samples(mono, f.samplerate, candidates)
                 if name is not None:
@@ -198,7 +202,7 @@ def estimate_pitch(samples: np.ndarray, sample_rate: int, fmin: float = 30.0, fm
     (e.g. nothing was played, or what came through wasn't tonal)."""
     samples = samples.astype(np.float64)
     samples = samples - samples.mean()
-    if float(np.max(np.abs(samples))) < _SILENCE_THRESHOLD:
+    if float(np.max(np.abs(samples))) < SILENCE_THRESHOLD:
         return None
     corr = np.correlate(samples, samples, mode="full")
     corr = corr[len(corr) // 2:]  # keep zero and positive lags only
@@ -259,7 +263,7 @@ class InstrumentClassifier:
         if not self._ranges:
             return
         block = mono[:, 0] if mono.ndim > 1 else mono
-        if float(np.max(np.abs(block))) < _SILENCE_THRESHOLD:
+        if float(np.max(np.abs(block))) < SILENCE_THRESHOLD:
             return
         self._buffer.append(block.copy())
         self._buffered_samples += len(block)

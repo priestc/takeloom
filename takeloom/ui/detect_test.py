@@ -35,20 +35,17 @@ def _fmt_hz(value: float) -> str:
 
 class _InstrumentIndicator(tk.Frame):
     """One read-only instrument row: its metadata, plus a light that
-    turns on the first time detect-all reports a match for it (see
-    DetectTestWindow._handle_detect_all_status) and stays on — a lasting
-    confirmation ("yes, this one's wired up and recognized"), not a live
-    level meter. The underlying classifier only reports when its best
-    guess *changes* (see audio/instrument_classifier.py), so there's no
-    reliable "stopped playing" signal to turn it back off with — matching
-    face value in the interest of correctness we don't turn off.
-    Repeated detections of the same instrument just re-light an already-
-    lit row, a no-op."""
+    turns on when detect-all reports a match for it and back off when its
+    input's own channel light (see _DeviceIndicator) goes quiet — see
+    DetectTestWindow._handle_detect_all_status, which is what actually
+    decides when to call light_up/light_off (this class just renders
+    whatever it's told)."""
 
     def __init__(self, master: tk.Misc, full_name: str, label: str, input_label: str, musician: str,
                  freq_min_hz: float, freq_max_hz: float) -> None:
         super().__init__(master, bg=_BG, highlightbackground="#dddddd", highlightthickness=1)
         self.full_name = full_name
+        self.input_label = input_label
 
         self.light = tk.Label(self, text="\N{BLACK CIRCLE}", font=("TkDefaultFont", 20), bg=_BG, fg=_UNLIT, width=2)
         self.light.grid(row=0, column=0, rowspan=2, padx=(10, 6), pady=8)
@@ -70,6 +67,29 @@ class _InstrumentIndicator(tk.Frame):
     def light_up(self) -> None:
         self.light.configure(fg=_LIT)
 
+    def light_off(self) -> None:
+        self.light.configure(fg=_UNLIT)
+
+
+class _DeviceIndicator(tk.Frame):
+    """One read-only recording-device row: a green/gray light showing
+    whether that input currently has live (non-silent) signal on it —
+    see DetectTestWindow._handle_backend_event's "channel" phase — plus
+    its label/device/channel. Independent of whether any instrument has
+    actually been identified on it; this just answers "is anything
+    coming through this input right now"."""
+
+    def __init__(self, master: tk.Misc, label: str, device: str, channel: int) -> None:
+        super().__init__(master, bg=_BG)
+        self.light = tk.Label(self, text="\N{BLACK CIRCLE}", font=("TkDefaultFont", 12), bg=_BG, fg=_UNLIT, width=2)
+        self.light.pack(side="left", padx=(24, 4))
+        tk.Label(
+            self, text=f"{label}  —  {device}, channel {channel}", bg=_BG, fg="#333333",
+        ).pack(side="left")
+
+    def set_active(self, active: bool) -> None:
+        self.light.configure(fg=_LIT if active else _UNLIT)
+
 
 class DetectTestWindow(ttk.Frame):
     def __init__(self, master: tk.Misc, backend: LocalBackend) -> None:
@@ -77,6 +97,13 @@ class DetectTestWindow(ttk.Frame):
         self.backend = backend
         self._listening = False
         self._indicators: dict[str, _InstrumentIndicator] = {}  # keyed by instrument full_name
+        self._device_indicators: dict[str, _DeviceIndicator] = {}  # keyed by InputLabel.label
+        # Which instrument is currently the confirmed answer for a given
+        # input_label, if any — tracked here (not on the indicators
+        # themselves) so a "channel" phase event going inactive knows
+        # exactly which instrument's light, if any, to turn back off; an
+        # input_label with no entry has nothing currently lit for it.
+        self._lit_instrument_for_input: dict[str, str] = {}
 
         self.pack(fill="both", expand=True)
         self._build()
@@ -149,9 +176,9 @@ class DetectTestWindow(ttk.Frame):
                 anchor="w", padx=12, pady=(0, 12)
             )
         for il in config.input_labels:
-            ttk.Label(
-                content, text=f"{il.label}  —  {il.device}, channel {il.channel}", foreground="#333333",
-            ).pack(anchor="w", padx=24, pady=1)
+            device_indicator = _DeviceIndicator(content, il.label, il.device, il.channel)
+            device_indicator.pack(anchor="w", pady=1)
+            self._device_indicators[il.label] = device_indicator
 
         _bind_mousewheel(canvas)
 
@@ -199,6 +226,23 @@ class DetectTestWindow(ttk.Frame):
             indicator = self._indicators.get(name)
             if indicator is not None:
                 indicator.light_up()
+                self._lit_instrument_for_input[indicator.input_label] = name
+        elif phase == "channel":
+            input_label = data.get("input_label", "")
+            active = bool(data.get("active"))
+            device_indicator = self._device_indicators.get(input_label)
+            if device_indicator is not None:
+                device_indicator.set_active(active)
+            if not active:
+                # The channel just went quiet — whichever instrument was
+                # last confirmed on it (if any) isn't playing anymore
+                # either, since there's no finer-grained per-instrument
+                # "stopped" signal than this.
+                lit_name = self._lit_instrument_for_input.pop(input_label, None)
+                if lit_name is not None:
+                    indicator = self._indicators.get(lit_name)
+                    if indicator is not None:
+                        indicator.light_off()
         elif phase == "stopped":
             self._listening = False
 

@@ -561,20 +561,34 @@ class Backend(ABC):
     @abstractmethod
     def start_detect_all(self) -> None:
         """Opens every configured instrument's own input channel at once
-        and starts listening. Emits "detect_all_status" events: phase
-        "started" right away (its `status` notes any instrument skipped
-        because its input isn't available right now, e.g. the interface
-        is powered off), then phase "detected" with `instrument` set
-        whenever an instrument's channel (or, for a channel shared by
-        several instruments, the frequency classifier's current best
-        guess among just those) reports a match — order and timing
-        depend entirely on what the performer plays. Runs until
-        stop_detect_all() or the caller's own window closing (see
-        ui/detect_test.py's standalone `takeloom detect-test` window, the
-        only current caller). Raises BackendError immediately if a
-        session, video check, latency test, or an instrument train is
-        already active — same mutual exclusion as those — or if no
-        instrument's input can currently be opened at all."""
+        and starts listening. Emits "detect_all_status" events:
+
+        - phase "started" right away (its `status` notes any instrument
+          skipped because its input isn't available right now, e.g. the
+          interface is powered off)
+        - phase "detected", with `instrument` set, whenever an
+          instrument's channel (or, for a channel shared by several
+          instruments, the frequency classifier's current best guess
+          among just those) reports a match — order and timing depend
+          entirely on what the performer plays. Once "detected", stays
+          the presumed answer for that channel until a different
+          instrument on the same channel is identified — there's no
+          separate "un-detected" signal for a specific instrument, only
+          the channel-level one below.
+        - phase "channel", with `input_label` and `active` (bool), every
+          time a channel's live signal crosses the (silence-gated, ~0.5s-
+          held) threshold from quiet to playing or back — independent of
+          whether anything's been identified on it yet. This is what
+          lets a caller (see ui/detect_test.py's `takeloom detect-test`
+          window, the only current caller) turn an indicator back off
+          once the performer stops playing, which "detected" alone can't
+          do.
+
+        Runs until stop_detect_all() or the caller's own window closing.
+        Raises BackendError immediately if a session, video check,
+        latency test, or an instrument train is already active — same
+        mutual exclusion as those — or if no instrument's input can
+        currently be opened at all."""
         ...
 
     @abstractmethod
@@ -2699,7 +2713,7 @@ class LocalBackend(Backend):
     # --- Detect-all (local-only; RemoteBackend refuses) ---
 
     def _open_channel_classifier_streams(
-        self, config: StudioConfig, on_channel_detected,
+        self, config: StudioConfig, on_channel_detected, on_channel_active=None,
     ) -> tuple[list, list[str]]:
         """Shared scanning core behind start_detect_all and start_auto_
         detect_instrument: opens one raw sd.InputStream per distinct
@@ -2720,6 +2734,20 @@ class LocalBackend(Backend):
         it and keeps every stream running; start_auto_detect_instrument
         locks onto the first one and tears every stream down).
 
+        `on_channel_active(input_label, active)`, if given, fires
+        synchronously from the realtime callback itself (not a background
+        thread, unlike on_channel_detected — keep it cheap) on every
+        silent<->non-silent transition of a channel, using the same
+        SILENCE_THRESHOLD the classifier itself gates on, with a short
+        release hold (see `release_blocks` below) so an ordinary gap
+        between notes doesn't flicker it — this is what drives detect-
+        test's per-input "is anything coming through this channel right
+        now" light (see ui/detect_test.py), independent of and unrelated
+        to whether any instrument has actually been identified on it yet.
+        start_auto_detect_instrument has no use for this and leaves it
+        None, at zero extra cost (the level check is skipped entirely
+        when there's no callback to report it to).
+
         Caller must hold self._record_lock and have already called
         self._close_active_monitor(). Returns (streams, skipped_
         instrument_names) — skipped is every instrument whose input
@@ -2727,17 +2755,18 @@ class LocalBackend(Backend):
         off), left out rather than failing the whole scan. Raises
         BackendError if config has no instruments, or none of their
         inputs can currently be resolved."""
-        from .audio.instrument_classifier import InstrumentClassifier
+        from .audio.instrument_classifier import InstrumentClassifier, SILENCE_THRESHOLD
         if not config.instruments:
             raise BackendError("No instruments configured.")
 
         try:
+            import numpy as np
             import sounddevice as sd
         except Exception as e:
             raise BackendError(f"sounddevice unavailable: {e}") from e
         from .audio.devices import resolve_device
 
-        by_device: dict[int, list[tuple[Instrument, int]]] = {}
+        by_device: dict[int, list[tuple[Instrument, int, str]]] = {}
         skipped: list[str] = []
         for inst in config.instruments:
             input_info = config.resolve_input(inst.input_label)
@@ -2749,30 +2778,53 @@ class LocalBackend(Backend):
             if input_info.channel > in_info["max_input_channels"]:
                 skipped.append(inst.full_name)
                 continue
-            by_device.setdefault(in_dev, []).append((inst, input_info.channel - 1))
+            by_device.setdefault(in_dev, []).append((inst, input_info.channel - 1, inst.input_label))
 
         if not by_device:
             raise BackendError("None of the configured instruments' inputs are available right now.")
 
-        def make_callback(entries: list[tuple[Instrument, int]]):
+        # Consecutive silent blocks to ride through before reporting a
+        # channel inactive (~0.5s) — block-count rather than a wall-clock
+        # timer since this is evaluated inline in the realtime callback.
+        release_blocks = max(1, round(0.5 * config.sample_rate / config.buffer_size))
+
+        def make_callback(entries: list[tuple[Instrument, int, str]]):
             by_channel: dict[int, list] = {}
-            for inst, ch in entries:
+            channel_input_label: dict[int, str] = {}
+            for inst, ch, input_label in entries:
                 by_channel.setdefault(ch, []).append(inst)
+                channel_input_label[ch] = input_label
             classifiers = {
                 ch: InstrumentClassifier(config.sample_rate, insts, on_channel_detected)
                 for ch, insts in by_channel.items()
             }
+            active = {ch: False for ch in by_channel}
+            silent_run = {ch: 0 for ch in by_channel}
 
             def _callback(indata, frames, time_info, status) -> None:
                 for ch, classifier in classifiers.items():
-                    if ch < indata.shape[1]:
-                        classifier.process_block(indata[:, ch])
+                    if ch >= indata.shape[1]:
+                        continue
+                    block = indata[:, ch]
+                    classifier.process_block(block)
+                    if on_channel_active is None:
+                        continue
+                    if float(np.max(np.abs(block))) >= SILENCE_THRESHOLD:
+                        silent_run[ch] = 0
+                        if not active[ch]:
+                            active[ch] = True
+                            on_channel_active(channel_input_label[ch], True)
+                    elif active[ch]:
+                        silent_run[ch] += 1
+                        if silent_run[ch] >= release_blocks:
+                            active[ch] = False
+                            on_channel_active(channel_input_label[ch], False)
             return _callback
 
         streams = []
         try:
             for in_dev, entries in by_device.items():
-                channel_count = max(ch for _, ch in entries) + 1
+                channel_count = max(ch for _, ch, _ in entries) + 1
                 stream = sd.InputStream(
                     device=in_dev, channels=channel_count,
                     samplerate=config.sample_rate, blocksize=config.buffer_size,
@@ -2806,7 +2858,13 @@ class LocalBackend(Backend):
                 if not stop_event.is_set():
                     self._emit("detect_all_status", {"phase": "detected", "instrument": name})
 
-            streams, skipped = self._open_channel_classifier_streams(config, on_channel_detected)
+            def on_channel_active(input_label: str, active: bool) -> None:
+                if not stop_event.is_set():
+                    self._emit("detect_all_status", {"phase": "channel", "input_label": input_label, "active": active})
+
+            streams, skipped = self._open_channel_classifier_streams(
+                config, on_channel_detected, on_channel_active,
+            )
             self._active_detect_all = _ActiveDetectAll(streams=streams, stop_event=stop_event)
 
         status = "Listening on every instrument's own input — play each one to confirm it."
