@@ -570,11 +570,13 @@ class Backend(ABC):
           instrument's channel (or, for a channel shared by several
           instruments, the frequency classifier's current best guess
           among just those) reports a match — order and timing depend
-          entirely on what the performer plays. Once "detected", stays
-          the presumed answer for that channel until a different
-          instrument on the same channel is identified — there's no
-          separate "un-detected" signal for a specific instrument, only
-          the channel-level one below.
+          entirely on what the performer plays. Won't re-fire for the
+          same instrument back-to-back (see InstrumentClassifier's own
+          docstring), but a channel going quiet (see "channel" below)
+          resets that, so the same instrument confirmed again after a
+          real gap does re-fire — there's no separate "un-detected"
+          signal for a specific instrument, only the channel-level one
+          below.
         - phase "channel", with `input_label` and `active` (bool), every
           time a channel's live signal crosses the (silence-gated, ~0.5s-
           held) threshold from quiet to playing or back — independent of
@@ -583,6 +585,12 @@ class Backend(ABC):
           window, the only current caller) turn an indicator back off
           once the performer stops playing, which "detected" alone can't
           do.
+        - phase "stats", with `input_label`, `min_hz`, `max_hz`, and
+          `polyphony`, roughly every SpectralStatsTracker window
+          (audio/instrument_classifier.py) of non-silent audio on a
+          channel — raw frequency content, unrelated to whether an
+          instrument's been identified. Behind detect-test's "Currently
+          Detected" stats panel.
 
         Runs until stop_detect_all() or the caller's own window closing.
         Raises BackendError immediately if a session, video check,
@@ -2713,7 +2721,7 @@ class LocalBackend(Backend):
     # --- Detect-all (local-only; RemoteBackend refuses) ---
 
     def _open_channel_classifier_streams(
-        self, config: StudioConfig, on_channel_detected, on_channel_active=None,
+        self, config: StudioConfig, on_channel_detected, on_channel_active=None, on_channel_stats=None,
     ) -> tuple[list, list[str]]:
         """Shared scanning core behind start_detect_all and start_auto_
         detect_instrument: opens one raw sd.InputStream per distinct
@@ -2748,6 +2756,16 @@ class LocalBackend(Backend):
         None, at zero extra cost (the level check is skipped entirely
         when there's no callback to report it to).
 
+        `on_channel_stats(input_label, min_hz, max_hz, polyphony)`, if
+        given, fires from its own background thread (same pattern as
+        on_channel_detected) roughly every SpectralStatsTracker window of
+        non-silent audio on a channel — see that class and analyze_
+        spectrum in audio/instrument_classifier.py for what the values
+        mean. Independent of on_channel_detected/InstrumentClassifier
+        entirely: describes raw frequency content, not an identified
+        instrument. Also None (skipped, zero cost) for start_auto_detect_
+        instrument.
+
         Caller must hold self._record_lock and have already called
         self._close_active_monitor(). Returns (streams, skipped_
         instrument_names) — skipped is every instrument whose input
@@ -2755,7 +2773,7 @@ class LocalBackend(Backend):
         off), left out rather than failing the whole scan. Raises
         BackendError if config has no instruments, or none of their
         inputs can currently be resolved."""
-        from .audio.instrument_classifier import InstrumentClassifier, SILENCE_THRESHOLD
+        from .audio.instrument_classifier import InstrumentClassifier, SILENCE_THRESHOLD, SpectralStatsTracker
         if not config.instruments:
             raise BackendError("No instruments configured.")
 
@@ -2798,6 +2816,17 @@ class LocalBackend(Backend):
                 ch: InstrumentClassifier(config.sample_rate, insts, on_channel_detected)
                 for ch, insts in by_channel.items()
             }
+            stats_trackers = {}
+            if on_channel_stats is not None:
+                stats_trackers = {
+                    ch: SpectralStatsTracker(
+                        config.sample_rate,
+                        lambda min_hz, max_hz, poly, il=channel_input_label[ch]: on_channel_stats(
+                            il, min_hz, max_hz, poly,
+                        ),
+                    )
+                    for ch in by_channel
+                }
             active = {ch: False for ch in by_channel}
             silent_run = {ch: 0 for ch in by_channel}
 
@@ -2807,6 +2836,9 @@ class LocalBackend(Backend):
                         continue
                     block = indata[:, ch]
                     classifier.process_block(block)
+                    tracker = stats_trackers.get(ch)
+                    if tracker is not None:
+                        tracker.process_block(block)
                     if on_channel_active is None:
                         continue
                     if float(np.max(np.abs(block))) >= SILENCE_THRESHOLD:
@@ -2873,8 +2905,15 @@ class LocalBackend(Backend):
                 if not stop_event.is_set():
                     self._emit("detect_all_status", {"phase": "channel", "input_label": input_label, "active": active})
 
+            def on_channel_stats(input_label: str, min_hz: float, max_hz: float, polyphony: int) -> None:
+                if not stop_event.is_set():
+                    self._emit("detect_all_status", {
+                        "phase": "stats", "input_label": input_label,
+                        "min_hz": min_hz, "max_hz": max_hz, "polyphony": polyphony,
+                    })
+
             streams, skipped = self._open_channel_classifier_streams(
-                config, on_channel_detected, on_channel_active,
+                config, on_channel_detected, on_channel_active, on_channel_stats,
             )
             self._active_detect_all = _ActiveDetectAll(streams=streams, stop_event=stop_event)
 

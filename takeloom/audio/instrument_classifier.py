@@ -28,16 +28,23 @@ capture behind Studio Setup's per-instrument "Train" button, for "what's
 the actual Hz of the note just played" — answered by estimate_pitch
 rather than _energy_in_band.
 
-Studio Setup's single top-of-section "Detect" button (backend.py's
-start_detect_all) also uses InstrumentClassifier, but one instance per
-physical input channel rather than one global instance: a channel with
-only one instrument assigned to it needs no classification at all (any
-signal on it must be that instrument), and a channel shared by several
-instruments (e.g. bass and electric guitar through the same DI) gets a
-classifier scoped to just those instruments — narrower, and much less
-prone to this module's overlapping-range weakness, than comparing
-against every configured instrument regardless of which channel is
-actually shared.
+backend.py's start_detect_all (behind the standalone `takeloom detect-
+test` window, ui/detect_test.py) also uses InstrumentClassifier, but one
+instance per physical input channel rather than one global instance: a
+channel with only one instrument assigned to it needs no classification
+at all (any signal on it must be that instrument), and a channel shared
+by several instruments (e.g. bass and electric guitar through the same
+DI) gets a classifier scoped to just those instruments — narrower, and
+much less prone to this module's overlapping-range weakness, than
+comparing against every configured instrument regardless of which
+channel is actually shared.
+
+Also home to SpectralStatsTracker — a second, independent per-channel
+listener start_detect_all runs alongside InstrumentClassifier, behind
+detect-test's "Currently Detected" stats panel (min/max frequency heard,
+and a rough polyphony count from distinct spectral peaks). Unrelated to
+which instrument (if any) has been identified; see analyze_spectrum for
+the peak-picking heuristic and its honest limitations.
 """
 
 from __future__ import annotations
@@ -302,6 +309,118 @@ class InstrumentClassifier:
         if best_name is not None and best_name != self._last_emitted:
             self._last_emitted = best_name
             self._on_detected(best_name, best_score)
+
+
+# --- live spectral stats (detect-test's "Currently Detected" panel) ---
+
+# Range analyze_spectrum looks for peaks in at all — well outside it is
+# either sub-bass rumble/DC offset or above what any of these instruments
+# can plausibly produce as a fundamental, so excluding it up front keeps
+# stray peaks there from skewing min/max or inflating the polyphony count.
+_STATS_MIN_HZ = 30.0
+_STATS_MAX_HZ = 5000.0
+
+# A spectral bin has to reach this fraction of the window's single
+# loudest bin to count as a peak at all — filters out noise-floor/
+# harmonic-tail bins that are technically local maxima but not
+# perceptually a distinct note.
+_PEAK_RELATIVE_THRESHOLD = 0.15
+
+# Two peaks closer together than this are merged into one note rather
+# than counted separately — otherwise a single (possibly vibrato'd or
+# bent) note's energy spreading across a couple of adjacent FFT bins
+# would inflate the polyphony count on its own.
+_PEAK_MIN_SEPARATION_HZ = 20.0
+
+# How much captured audio to accumulate before reading the spectrum —
+# shorter than InstrumentClassifier's ANALYSIS_WINDOW_SECONDS since this
+# is meant to read as "live", not wait for a confident instrument guess.
+_STATS_WINDOW_SECONDS = 0.5
+
+
+def analyze_spectrum(samples: np.ndarray, sample_rate: int) -> tuple[float, float, int] | None:
+    """Best-effort read on `samples`' frequency content: (min_hz, max_hz,
+    polyphony) across every distinct spectral peak found in
+    [_STATS_MIN_HZ, _STATS_MAX_HZ], or None if the block's silent or
+    nothing peaks above the noise floor.
+
+    `polyphony` is a rough "how many separate notes does this look like"
+    count from local maxima in one FFT magnitude spectrum — not a
+    rigorous multi-pitch estimate (real polyphonic pitch detection needs
+    to reason about which peaks are harmonics of which fundamental, which
+    this doesn't attempt at all — see _energy_in_band's own module-level
+    disclaimer for the same "not real timbral/harmonic analysis" caveat).
+    Two guitar strings a third apart will genuinely read as polyphony 2
+    here; a single note's own overtones usually won't, only because
+    they're typically quieter than _PEAK_RELATIVE_THRESHOLD relative to
+    the fundamental — not because this code understands harmonics."""
+    if float(np.max(np.abs(samples))) < SILENCE_THRESHOLD:
+        return None
+    windowed = samples * np.hanning(len(samples))
+    spectrum = np.abs(np.fft.rfft(windowed))
+    freqs = np.fft.rfftfreq(len(samples), d=1.0 / sample_rate)
+
+    mask = (freqs >= _STATS_MIN_HZ) & (freqs <= _STATS_MAX_HZ)
+    freqs, spectrum = freqs[mask], spectrum[mask]
+    if len(spectrum) < 3:
+        return None
+
+    peak_mag = float(spectrum.max())
+    if peak_mag <= 0.0:
+        return None
+    threshold = peak_mag * _PEAK_RELATIVE_THRESHOLD
+
+    # A local maximum (louder than both neighbors) at or above threshold.
+    is_peak = (spectrum[1:-1] > spectrum[:-2]) & (spectrum[1:-1] > spectrum[2:]) & (spectrum[1:-1] >= threshold)
+    peak_freqs = np.sort(freqs[1:-1][is_peak])
+    if len(peak_freqs) == 0:
+        return None
+
+    merged = [float(peak_freqs[0])]
+    for f in peak_freqs[1:]:
+        if f - merged[-1] >= _PEAK_MIN_SEPARATION_HZ:
+            merged.append(float(f))
+
+    return min(merged), max(merged), len(merged)
+
+
+class SpectralStatsTracker:
+    """Feed captured mono blocks in via process_block(); on_stats(min_hz,
+    max_hz, polyphony) fires from a background thread roughly every
+    _STATS_WINDOW_SECONDS of non-silent audio — see analyze_spectrum for
+    what each value means and its limits. Independent of and unrelated to
+    InstrumentClassifier — this never identifies an instrument, just
+    describes the raw frequency content, and keeps running (there's no
+    reset()/_last_emitted-style suppression) for as long as there's
+    non-silent audio to read."""
+
+    def __init__(self, sample_rate: int, on_stats: Callable[[float, float, int], None]) -> None:
+        self._sample_rate = sample_rate
+        self._on_stats = on_stats
+        self._window_samples = int(sample_rate * _STATS_WINDOW_SECONDS)
+        self._buffer: list[np.ndarray] = []
+        self._buffered_samples = 0
+
+    def process_block(self, mono: np.ndarray) -> None:
+        block = mono[:, 0] if mono.ndim > 1 else mono
+        if float(np.max(np.abs(block))) < SILENCE_THRESHOLD:
+            return
+        self._buffer.append(block.copy())
+        self._buffered_samples += len(block)
+        if self._buffered_samples < self._window_samples:
+            return
+        snapshot = self._buffer
+        self._buffer = []
+        self._buffered_samples = 0
+        threading.Thread(target=self._analyze, args=(snapshot,), daemon=True).start()
+
+    def _analyze(self, blocks: list[np.ndarray]) -> None:
+        samples = np.concatenate(blocks).astype(np.float64)
+        if len(samples) < 2:
+            return
+        result = analyze_spectrum(samples, self._sample_rate)
+        if result is not None:
+            self._on_stats(*result)
 
 
 class NoteCapture:

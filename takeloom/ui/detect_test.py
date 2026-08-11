@@ -2,12 +2,17 @@
 
 A read-only diagnostic, deliberately its own top-level window rather than
 a tab in the main app: lists every configured instrument (and all its
-metadata) and every configured recording device, then listens on all of
-them at once — Backend.start_detect_all/stop_detect_all, the same
-detect-all mechanism Studio Setup's Instruments table used to expose
-inline (see studio_setup.py's module docstring for why it was pulled out
-of there) — and lights up an instrument's row the moment its input is
-recognized as being played.
+metadata), a live "Currently Detected" stats readout, and every
+configured recording device, then listens on all of them at once —
+Backend.start_detect_all/stop_detect_all, the same detect-all mechanism
+Studio Setup's Instruments table used to expose inline (see
+studio_setup.py's module docstring for why it was pulled out of there).
+Lights up an instrument's row the moment its input is recognized as
+being played, and back off once its channel goes quiet; the stats
+section (min/max frequency heard, and a rough polyphony count — see
+audio/instrument_classifier.py's analyze_spectrum) tracks whatever's
+currently playing on any channel, independent of instrument
+identification, and blanks out once everything goes quiet too.
 
 Local hardware only, same as start_detect_all itself (RemoteBackend
 refuses it — see Backend's docstring) — this always talks to a fresh
@@ -104,6 +109,11 @@ class DetectTestWindow(ttk.Frame):
         # exactly which instrument's light, if any, to turn back off; an
         # input_label with no entry has nothing currently lit for it.
         self._lit_instrument_for_input: dict[str, str] = {}
+        # input_labels currently reporting live signal (see "channel"
+        # phase) — once this empties out, the stats panel resets to "—"
+        # rather than keep showing a stale reading from whatever was last
+        # played.
+        self._active_channels: set[str] = set()
 
         self.pack(fill="both", expand=True)
         self._build()
@@ -165,6 +175,33 @@ class DetectTestWindow(ttk.Frame):
             )
             indicator.pack(fill="x", padx=12, pady=(0, 4))
             self._indicators[inst.full_name] = indicator
+
+        ttk.Separator(content, orient="horizontal").pack(fill="x", padx=12, pady=12)
+
+        ttk.Label(content, text="Currently Detected", font=("TkDefaultFont", 12, "bold")).pack(
+            anchor="w", padx=12, pady=(0, 4)
+        )
+        ttk.Label(
+            content,
+            text="Raw frequency content of whatever's playing right now, independent of instrument "
+                 "identification — resets to — once everything goes quiet.",
+            foreground="#666666", wraplength=640, justify="left",
+        ).pack(anchor="w", padx=12, pady=(0, 6))
+
+        stats_row = tk.Frame(content, bg=_BG)
+        stats_row.pack(anchor="w", padx=12, pady=(0, 4))
+        self.stats_min_var = tk.StringVar(value="—")
+        self.stats_max_var = tk.StringVar(value="—")
+        self.stats_poly_var = tk.StringVar(value="—")
+        for col, (caption, var) in enumerate((
+            ("Min frequency", self.stats_min_var),
+            ("Max frequency", self.stats_max_var),
+            ("Polyphony", self.stats_poly_var),
+        )):
+            cell = tk.Frame(stats_row, bg=_BG)
+            cell.grid(row=0, column=col, padx=(0, 32), sticky="w")
+            tk.Label(cell, text=caption, font=("TkDefaultFont", 9), bg=_BG, fg="#666666").pack(anchor="w")
+            tk.Label(cell, textvariable=var, font=("TkDefaultFont", 16, "bold"), bg=_BG).pack(anchor="w")
 
         ttk.Separator(content, orient="horizontal").pack(fill="x", padx=12, pady=12)
 
@@ -233,16 +270,29 @@ class DetectTestWindow(ttk.Frame):
             device_indicator = self._device_indicators.get(input_label)
             if device_indicator is not None:
                 device_indicator.set_active(active)
-            if not active:
+            if active:
+                self._active_channels.add(input_label)
+            else:
                 # The channel just went quiet — whichever instrument was
                 # last confirmed on it (if any) isn't playing anymore
                 # either, since there's no finer-grained per-instrument
                 # "stopped" signal than this.
+                self._active_channels.discard(input_label)
                 lit_name = self._lit_instrument_for_input.pop(input_label, None)
                 if lit_name is not None:
                     indicator = self._indicators.get(lit_name)
                     if indicator is not None:
                         indicator.light_off()
+                if not self._active_channels:
+                    # Nothing playing anywhere anymore — don't leave a
+                    # stale reading from whichever channel went quiet last.
+                    self.stats_min_var.set("—")
+                    self.stats_max_var.set("—")
+                    self.stats_poly_var.set("—")
+        elif phase == "stats":
+            self.stats_min_var.set(f"{data.get('min_hz', 0):.0f} Hz")
+            self.stats_max_var.set(f"{data.get('max_hz', 0):.0f} Hz")
+            self.stats_poly_var.set(str(data.get("polyphony", "—")))
         elif phase == "stopped":
             self._listening = False
 
