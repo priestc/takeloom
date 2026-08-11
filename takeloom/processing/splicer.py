@@ -51,14 +51,14 @@ referencing the same song can find it too.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import soundfile as sf
 
 from ..config import StudioConfig
 from ..project import Project, TakeInfo
-from ..utils import take_filename, next_take_number, ensure_dir
+from ..utils import atomic_write_text, take_filename, next_take_number, ensure_dir
 from ..vault import record_inspiration_take, vault_root
 
 # An abandoned (skipped/stopped) play-through this long is kept as a take
@@ -199,6 +199,16 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
 
     saved = 0
     videos = 0
+    # Exactly which take(s) *this* session produced, per track_index — a
+    # durable snapshot written back into session_log.json below, so the
+    # Sessions tab (backend.py's get_session_detail) can show only takes
+    # this session actually made instead of whatever's currently on file
+    # for that track (which may include takes from other sessions
+    # entirely, or a since-superseded one of this session's own — see
+    # get_session_detail's docstring). A list per track_index rather than
+    # one entry, since a track revisited more than once in the same
+    # session (e.g. redrawn/re-recorded) can produce more than one take.
+    session_takes: dict[int, list[dict]] = {}
     completed_dir = ensure_dir(project.completed_takes_dir)
     if completed:
         with sf.SoundFile(str(session_flac)) as src:
@@ -300,9 +310,19 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                             root, slot.inspiration_track_id, slot.name, slot.backing_track,
                             slot.duration_seconds, take_label, take_info,
                         )
+                session_takes.setdefault(take.track_index, []).append(
+                    {"instrument": take_label, **asdict(take_info)}
+                )
                 saved += 1
 
     project.save_setlist()
+
+    if session_takes:
+        # Snapshot written back into session_log.json itself — see
+        # session_takes' own docstring above for why get_session_detail
+        # needs this rather than reading current preferred_takes state.
+        data["takes"] = {str(k): v for k, v in session_takes.items()}
+        atomic_write_text(log_path, json.dumps(data, indent=2))
 
     # The whole-session archive video, watermarked once for the session.
     session_video_ok = False

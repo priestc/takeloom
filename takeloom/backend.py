@@ -224,18 +224,22 @@ class Backend(ABC):
     def get_session_detail(self, session_dir: str) -> dict:
         """Full session_log.json contents for `session_dir` (a `session_dir`
         value from list_sessions()), plus, for each track name it touched,
-        every instrument `preferred_takes` currently holds a take for —
-        not filtered to session_dir's own logged instrument, since that
-        field is exactly what correct_session_instrument rewrites; keying
-        this lookup off it would stop finding the track's take to
-        reassign the moment someone corrects the log first. Each track's
-        entry also reports whether it was an inspiration filter-slot draw
-        (session_log.json's filter_slot_draws) — those aren't offered for
-        reassign_take (see its docstring), but their takes (looked up from
-        the shared vault-wide inspiration-take index instead of the
-        project's own setlist, since a filter slot's own TrackEntry never
-        holds one — see TrackEntry's docstring) are still included, since
-        analyze_take works on them fine."""
+        exactly which take(s) *this session* produced for it — never a
+        take some other session made for the same track/song, and never
+        one of this session's own that's since been superseded by a later
+        session's re-record, both of which a naive "whatever's currently
+        filed for this track" lookup would wrongly include. Sourced from
+        session_log.json's own "takes" snapshot (written by processing/
+        splicer.py's process_session once it finishes splicing this
+        session — one entry per take, in the same shape reassign_take/
+        analyze_take's `instrument_name` param expects). Falls back to
+        "whatever's currently filed for this track" — the old, no-longer-
+        session-scoped behavior, with its stated risk — only for a session
+        recorded before that snapshot existed. Each track's entry also
+        reports whether it was an inspiration filter-slot draw
+        (session_log.json's filter_slot_draws) — reassign_take/
+        analyze_take both work on those the same as any other take (see
+        reassign_take's docstring)."""
         ...
 
     @abstractmethod
@@ -1440,18 +1444,24 @@ class LocalBackend(Backend):
         from .vault import get_inspiration_entry, vault_root
         root = vault_root(config)
 
+        # This session's own snapshot of exactly which take(s) it produced,
+        # per track_index — written by processing/splicer.py's
+        # process_session once it finishes splicing. Absent only for a
+        # session recorded before this existed, in which case there's no
+        # record of what specifically got made here, so this falls back to
+        # whatever's *currently* filed for the track (which does risk
+        # showing another session's take, or missing one of this session's
+        # own that's since been superseded — the very reason the snapshot
+        # exists now).
+        session_takes = data.get("takes")
+
         tracks = []
         for name in track_names:
             track_index = track_index_by_name.get(name)
             is_filter_draw = track_index in filter_slot_indices
-            # Every instrument this track currently has a take filed
-            # under, not just whichever one session_log.json's own
-            # "instrument" field says right now — that field is exactly
-            # what correct_session_instrument rewrites, so keying this
-            # lookup off it would silently stop finding the track's take
-            # to reassign the moment someone corrects the log first.
-            takes = []
-            if is_filter_draw:
+            if session_takes is not None:
+                takes = session_takes.get(str(track_index), [])
+            elif is_filter_draw:
                 # A filter slot's own TrackEntry never holds a take (see
                 # TrackEntry's docstring) — what this session actually
                 # drew and recorded lives in the shared vault-wide
@@ -1460,18 +1470,18 @@ class LocalBackend(Backend):
                 draw_info = filter_slot_draws.get(str(track_index))
                 track_id = draw_info.get("inspiration_track_id") if draw_info else None
                 shared = get_inspiration_entry(root, track_id) if track_id else None
-                if shared is not None:
-                    takes = [
-                        {"instrument": take_instrument, **asdict(take)}
-                        for take_instrument, take in shared.preferred_takes.items()
-                    ]
+                takes = [
+                    {"instrument": take_instrument, **asdict(take)}
+                    for take_instrument, take in shared.preferred_takes.items()
+                ] if shared is not None else []
             elif project is not None:
                 entry = next((t for t in project.setlist.tracks if t.name == name), None)
-                if entry is not None:
-                    takes = [
-                        {"instrument": take_instrument, **asdict(take)}
-                        for take_instrument, take in entry.preferred_takes.items()
-                    ]
+                takes = [
+                    {"instrument": take_instrument, **asdict(take)}
+                    for take_instrument, take in entry.preferred_takes.items()
+                ] if entry is not None else []
+            else:
+                takes = []
             tracks.append({"track_name": name, "is_filter_draw": is_filter_draw, "takes": takes})
 
         return {**data, "session_dir": session_dir, "tracks": tracks}
