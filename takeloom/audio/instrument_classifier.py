@@ -238,7 +238,19 @@ class InstrumentClassifier:
     """Feed captured mono input blocks in via process_block() (safe to call
     from the realtime audio callback thread — see AudioEngine._callback's
     set_instrument_sink hook); on_detected(name, confidence) fires from a
-    background thread whenever the best-guess instrument changes."""
+    background thread whenever the best-guess instrument changes.
+
+    "Changes" is relative to _last_emitted, which only reset() clears —
+    so the *same* instrument being confirmed again in a row never re-
+    fires on_detected on its own, deliberately: repeat notes on the one
+    instrument someone's already been confirmed playing shouldn't spam
+    the callback. But that means a caller that wants "confirmed again
+    after a real gap" (e.g. detect-test's per-instrument light, which
+    turns back off when its channel goes quiet — see backend.py's
+    _open_channel_classifier_streams) must call reset() at that gap
+    itself, or the second confirmation is silently suppressed as "no
+    change" even though, from that caller's point of view, playing
+    stopped and started again in between."""
 
     def __init__(
         self,
@@ -253,6 +265,14 @@ class InstrumentClassifier:
         self._buffer: list[np.ndarray] = []
         self._buffered_samples = 0
         self._last_emitted: str | None = None
+
+    def reset(self) -> None:
+        """Clear "already reported" state (and any partially-accumulated
+        window) so the next detection re-fires on_detected regardless of
+        whether it's the same instrument as before — see class docstring."""
+        self._buffer = []
+        self._buffered_samples = 0
+        self._last_emitted = None
 
     def process_block(self, mono: np.ndarray) -> None:
         """Realtime-safe: a peak check, an array copy/append, and a sample

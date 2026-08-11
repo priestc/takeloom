@@ -2818,6 +2818,17 @@ class LocalBackend(Backend):
                         silent_run[ch] += 1
                         if silent_run[ch] >= release_blocks:
                             active[ch] = False
+                            # Reset before notifying: on_channel_active's
+                            # caller (detect-test) turns the channel's
+                            # instrument light off on this same event, and
+                            # the classifier needs to forget its last
+                            # answer now too — otherwise the *same*
+                            # instrument being confirmed again after this
+                            # gap would be silently suppressed as "no
+                            # change" (see InstrumentClassifier.reset's
+                            # docstring) and the light would never come
+                            # back on for it.
+                            classifier.reset()
                             on_channel_active(channel_input_label[ch], False)
             return _callback
 
