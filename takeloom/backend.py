@@ -585,12 +585,14 @@ class Backend(ABC):
           window, the only current caller) turn an indicator back off
           once the performer stops playing, which "detected" alone can't
           do.
-        - phase "stats", with `input_label`, `min_hz`, `max_hz`, and
-          `polyphony`, roughly every SpectralStatsTracker window
-          (audio/instrument_classifier.py) of non-silent audio on a
-          channel — raw frequency content, unrelated to whether an
-          instrument's been identified. Behind detect-test's "Currently
-          Detected" stats panel.
+        - phase "stats", with `input_label`, `min_hz`, `max_hz`,
+          `polyphony`, and `peak_hz` (every individual fundamental found,
+          ascending — `polyphony` is just its length), roughly every
+          SpectralStatsTracker window (audio/instrument_classifier.py) of
+          non-silent audio on a channel — raw frequency content,
+          unrelated to whether an instrument's been identified. Behind
+          detect-test's "Currently Detected" stats panel and its spectrum
+          indicator.
 
         Runs until stop_detect_all() or the caller's own window closing.
         Raises BackendError immediately if a session, video check,
@@ -2756,15 +2758,16 @@ class LocalBackend(Backend):
         None, at zero extra cost (the level check is skipped entirely
         when there's no callback to report it to).
 
-        `on_channel_stats(input_label, min_hz, max_hz, polyphony)`, if
-        given, fires from its own background thread (same pattern as
+        `on_channel_stats(input_label, min_hz, max_hz, polyphony, peak_hz)`,
+        if given, fires from its own background thread (same pattern as
         on_channel_detected) roughly every SpectralStatsTracker window of
         non-silent audio on a channel — see that class and analyze_
         spectrum in audio/instrument_classifier.py for what the values
-        mean. Independent of on_channel_detected/InstrumentClassifier
-        entirely: describes raw frequency content, not an identified
-        instrument. Also None (skipped, zero cost) for start_auto_detect_
-        instrument.
+        mean (`peak_hz` is every individual fundamental found, ascending;
+        `polyphony` is just its length). Independent of on_channel_
+        detected/InstrumentClassifier entirely: describes raw frequency
+        content, not an identified instrument. Also None (skipped, zero
+        cost) for start_auto_detect_instrument.
 
         Caller must hold self._record_lock and have already called
         self._close_active_monitor(). Returns (streams, skipped_
@@ -2821,8 +2824,8 @@ class LocalBackend(Backend):
                 stats_trackers = {
                     ch: SpectralStatsTracker(
                         config.sample_rate,
-                        lambda min_hz, max_hz, poly, il=channel_input_label[ch]: on_channel_stats(
-                            il, min_hz, max_hz, poly,
+                        lambda min_hz, max_hz, poly, peaks, il=channel_input_label[ch]: on_channel_stats(
+                            il, min_hz, max_hz, poly, peaks,
                         ),
                     )
                     for ch in by_channel
@@ -2905,11 +2908,13 @@ class LocalBackend(Backend):
                 if not stop_event.is_set():
                     self._emit("detect_all_status", {"phase": "channel", "input_label": input_label, "active": active})
 
-            def on_channel_stats(input_label: str, min_hz: float, max_hz: float, polyphony: int) -> None:
+            def on_channel_stats(
+                input_label: str, min_hz: float, max_hz: float, polyphony: int, peak_hz: list[float],
+            ) -> None:
                 if not stop_event.is_set():
                     self._emit("detect_all_status", {
                         "phase": "stats", "input_label": input_label,
-                        "min_hz": min_hz, "max_hz": max_hz, "polyphony": polyphony,
+                        "min_hz": min_hz, "max_hz": max_hz, "polyphony": polyphony, "peak_hz": peak_hz,
                     })
 
             streams, skipped = self._open_channel_classifier_streams(

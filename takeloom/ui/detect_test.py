@@ -9,10 +9,11 @@ Studio Setup's Instruments table used to expose inline (see
 studio_setup.py's module docstring for why it was pulled out of there).
 Lights up an instrument's row the moment its input is recognized as
 being played, and back off once its channel goes quiet; the stats
-section (min/max frequency heard, and a rough polyphony count — see
-audio/instrument_classifier.py's analyze_spectrum) tracks whatever's
-currently playing on any channel, independent of instrument
-identification, and blanks out once everything goes quiet too.
+section (min/max frequency heard, a rough polyphony count, and a log-
+scaled spectrum strip with one tick per detected note — see audio/
+instrument_classifier.py's analyze_spectrum) tracks whatever's currently
+playing on any channel, independent of instrument identification, and
+blanks out once everything goes quiet too.
 
 Local hardware only, same as start_detect_all itself (RemoteBackend
 refuses it — see Backend's docstring) — this always talks to a fresh
@@ -21,11 +22,13 @@ LocalBackend, never app_state/a Remote connection.
 
 from __future__ import annotations
 
+import math
 import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+from ..audio.instrument_classifier import STATS_MAX_HZ, STATS_MIN_HZ
 from ..backend import BackendError, LocalBackend
 from .platform_style import normalize as normalize_platform_style
 
@@ -94,6 +97,55 @@ class _DeviceIndicator(tk.Frame):
 
     def set_active(self, active: bool) -> None:
         self.light.configure(fg=_LIT if active else _UNLIT)
+
+
+class _SpectrumIndicator(tk.Canvas):
+    """A horizontal, log-frequency-scaled strip spanning [STATS_MIN_HZ,
+    STATS_MAX_HZ] — the same "normal musical instrument range" trim
+    analyze_spectrum itself applies (see audio/instrument_classifier.py),
+    so this only ever shows the band a real instrument's fundamental
+    could plausibly sit in, not the raw FFT's full range up to Nyquist.
+    Log-scaled (not linear) because that range spans several octaves and
+    octaves, not raw Hz, are the musically-even unit — a linear scale
+    would crush every bass/guitar/vocal fundamental into a sliver at the
+    left. One tick per currently-detected fundamental (see set_peaks);
+    cleared back to bare whenever the stats numbers above it reset too."""
+
+    _HEIGHT = 40
+    _REFERENCE_HZ = (30, 100, 300, 1000, 3000)
+
+    def __init__(self, master: tk.Misc) -> None:
+        super().__init__(master, height=self._HEIGHT, background=_BG, highlightthickness=1, highlightbackground="#dddddd")
+        self._peaks: list[float] = []
+        self.bind("<Configure>", lambda _e: self._redraw())
+
+    def set_peaks(self, freqs: list[float]) -> None:
+        self._peaks = list(freqs)
+        self._redraw()
+
+    def clear(self) -> None:
+        self.set_peaks([])
+
+    def _x_for(self, hz: float, width: int) -> float:
+        log_lo, log_hi = math.log10(STATS_MIN_HZ), math.log10(STATS_MAX_HZ)
+        hz = min(max(hz, STATS_MIN_HZ), STATS_MAX_HZ)
+        t = (math.log10(hz) - log_lo) / (log_hi - log_lo)
+        return 2 + t * (width - 4)
+
+    def _redraw(self) -> None:
+        self.delete("all")
+        width = self.winfo_width()
+        if width <= 1:
+            return
+        mid = self._HEIGHT / 2
+        self.create_line(0, mid, width, mid, fill="#eeeeee")
+        for hz in self._REFERENCE_HZ:
+            x = self._x_for(hz, width)
+            self.create_line(x, mid - 3, x, mid + 3, fill="#cccccc")
+            self.create_text(x, self._HEIGHT - 6, text=f"{hz}", font=("TkDefaultFont", 7), fill="#999999")
+        for hz in self._peaks:
+            x = self._x_for(hz, width)
+            self.create_line(x, 3, x, self._HEIGHT - 12, fill=_LIT, width=3)
 
 
 class DetectTestWindow(ttk.Frame):
@@ -203,6 +255,9 @@ class DetectTestWindow(ttk.Frame):
             tk.Label(cell, text=caption, font=("TkDefaultFont", 9), bg=_BG, fg="#666666").pack(anchor="w")
             tk.Label(cell, textvariable=var, font=("TkDefaultFont", 16, "bold"), bg=_BG).pack(anchor="w")
 
+        self.spectrum_indicator = _SpectrumIndicator(content)
+        self.spectrum_indicator.pack(fill="x", padx=12, pady=(4, 4))
+
         ttk.Separator(content, orient="horizontal").pack(fill="x", padx=12, pady=12)
 
         ttk.Label(content, text="Recording Devices", font=("TkDefaultFont", 12, "bold")).pack(
@@ -289,10 +344,12 @@ class DetectTestWindow(ttk.Frame):
                     self.stats_min_var.set("—")
                     self.stats_max_var.set("—")
                     self.stats_poly_var.set("—")
+                    self.spectrum_indicator.clear()
         elif phase == "stats":
             self.stats_min_var.set(f"{data.get('min_hz', 0):.0f} Hz")
             self.stats_max_var.set(f"{data.get('max_hz', 0):.0f} Hz")
             self.stats_poly_var.set(str(data.get("polyphony", "—")))
+            self.spectrum_indicator.set_peaks(data.get("peak_hz", []))
         elif phase == "stopped":
             self._listening = False
 

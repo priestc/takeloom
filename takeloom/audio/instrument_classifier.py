@@ -317,8 +317,12 @@ class InstrumentClassifier:
 # either sub-bass rumble/DC offset or above what any of these instruments
 # can plausibly produce as a fundamental, so excluding it up front keeps
 # stray peaks there from skewing min/max or inflating the polyphony count.
-_STATS_MIN_HZ = 30.0
-_STATS_MAX_HZ = 5000.0
+# Public (not underscore-prefixed): ui/detect_test.py's spectrum
+# indicator trims its own display to this exact same "normal musical
+# instrument range", so both places share one definition rather than a
+# second range that could drift out of sync with this one.
+STATS_MIN_HZ = 30.0
+STATS_MAX_HZ = 5000.0
 
 # A spectral bin has to reach this fraction of the window's single
 # loudest bin to count as a peak at all — filters out noise-floor/
@@ -332,35 +336,84 @@ _PEAK_RELATIVE_THRESHOLD = 0.15
 # would inflate the polyphony count on its own.
 _PEAK_MIN_SEPARATION_HZ = 20.0
 
+# A peak within this relative distance of an exact integer multiple of an
+# already-accepted fundamental counts as *that fundamental's harmonic*,
+# not a second note — see _fundamental_peaks. 3% is roughly half a
+# semitone (a semitone is ~5.9%), loose enough to absorb real instruments'
+# slightly-inharmonic overtones (piano strings, especially) without
+# starting to swallow genuinely different, closely-spaced notes.
+_HARMONIC_RELATIVE_TOLERANCE = 0.03
+
+# Harmonics past this multiple of a fundamental are usually too quiet to
+# clear _PEAK_RELATIVE_THRESHOLD anyway; capping the search here just
+# avoids an unrelated peak coincidentally lining up with some very high
+# multiple of an unrelated fundamental and getting wrongly absorbed by it.
+_MAX_HARMONIC_NUMBER = 8
+
 # How much captured audio to accumulate before reading the spectrum —
 # shorter than InstrumentClassifier's ANALYSIS_WINDOW_SECONDS since this
 # is meant to read as "live", not wait for a confident instrument guess.
 _STATS_WINDOW_SECONDS = 0.5
 
 
-def analyze_spectrum(samples: np.ndarray, sample_rate: int) -> tuple[float, float, int] | None:
+def _fundamental_peaks(peak_freqs: list[float]) -> list[float]:
+    """Collapse a list of spectral peaks (ascending) down to just the
+    ones that aren't explainable as a harmonic of an earlier (lower-
+    frequency) one already kept — e.g. a single plucked string's
+    fundamental plus its 2nd/3rd/... harmonics collapses to one entry,
+    not one per harmonic, which is what actually made polyphony read
+    ~20 for a 6-string guitar chord before this existed (every string's
+    own overtone series was being counted as extra "notes").
+
+    Ambiguous by nature, not just approximate: a real second note whose
+    own fundamental happens to sit near a small-integer multiple of an
+    already-kept one (e.g. an octave, or — on a guitar in standard
+    tuning — the high E string sitting almost exactly a 4th harmonic
+    above the low E string) reads as "just a harmonic" and gets
+    absorbed too. Distinguishing "one note's overtone" from "a different
+    note at a harmonically-related pitch" from spectral content alone
+    needs real multi-pitch estimation, which this doesn't attempt (see
+    analyze_spectrum's own docstring) — this trades a rare, narrow
+    undercount for fixing a much more common, unbounded overcount."""
+    fundamentals: list[float] = []
+    for freq in peak_freqs:
+        is_harmonic = False
+        for fundamental in fundamentals:
+            ratio = freq / fundamental
+            nearest = round(ratio)
+            if 2 <= nearest <= _MAX_HARMONIC_NUMBER and abs(ratio - nearest) / nearest <= _HARMONIC_RELATIVE_TOLERANCE:
+                is_harmonic = True
+                break
+        if not is_harmonic:
+            fundamentals.append(freq)
+    return fundamentals
+
+
+def analyze_spectrum(samples: np.ndarray, sample_rate: int) -> tuple[float, float, int, list[float]] | None:
     """Best-effort read on `samples`' frequency content: (min_hz, max_hz,
-    polyphony) across every distinct spectral peak found in
-    [_STATS_MIN_HZ, _STATS_MAX_HZ], or None if the block's silent or
-    nothing peaks above the noise floor.
+    polyphony, peak_hz) across every distinct *fundamental* found in
+    [STATS_MIN_HZ, STATS_MAX_HZ] (peak_hz lists each one, ascending), or
+    None if the block's silent or nothing peaks above the noise floor.
 
     `polyphony` is a rough "how many separate notes does this look like"
-    count from local maxima in one FFT magnitude spectrum — not a
-    rigorous multi-pitch estimate (real polyphonic pitch detection needs
-    to reason about which peaks are harmonics of which fundamental, which
-    this doesn't attempt at all — see _energy_in_band's own module-level
-    disclaimer for the same "not real timbral/harmonic analysis" caveat).
-    Two guitar strings a third apart will genuinely read as polyphony 2
-    here; a single note's own overtones usually won't, only because
+    count — not a rigorous multi-pitch estimate (real polyphonic pitch
+    detection needs to reason about which peaks are harmonics of which
+    fundamental in a much more principled way than _fundamental_peaks'
+    plain integer-ratio check — see _energy_in_band's own module-level
+    disclaimer for the same "not real timbral/harmonic analysis" caveat,
+    and _fundamental_peaks' for exactly where this approximation can go
+    wrong). Two guitar strings a third apart will genuinely read as
+    polyphony 2 here; a single note's own overtones won't, both because
     they're typically quieter than _PEAK_RELATIVE_THRESHOLD relative to
-    the fundamental — not because this code understands harmonics."""
+    the fundamental and because _fundamental_peaks collapses any that do
+    clear it back into the one note they actually belong to."""
     if float(np.max(np.abs(samples))) < SILENCE_THRESHOLD:
         return None
     windowed = samples * np.hanning(len(samples))
     spectrum = np.abs(np.fft.rfft(windowed))
     freqs = np.fft.rfftfreq(len(samples), d=1.0 / sample_rate)
 
-    mask = (freqs >= _STATS_MIN_HZ) & (freqs <= _STATS_MAX_HZ)
+    mask = (freqs >= STATS_MIN_HZ) & (freqs <= STATS_MAX_HZ)
     freqs, spectrum = freqs[mask], spectrum[mask]
     if len(spectrum) < 3:
         return None
@@ -381,20 +434,23 @@ def analyze_spectrum(samples: np.ndarray, sample_rate: int) -> tuple[float, floa
         if f - merged[-1] >= _PEAK_MIN_SEPARATION_HZ:
             merged.append(float(f))
 
-    return min(merged), max(merged), len(merged)
+    fundamentals = _fundamental_peaks(merged)
+    if not fundamentals:
+        return None
+    return min(fundamentals), max(fundamentals), len(fundamentals), fundamentals
 
 
 class SpectralStatsTracker:
     """Feed captured mono blocks in via process_block(); on_stats(min_hz,
-    max_hz, polyphony) fires from a background thread roughly every
-    _STATS_WINDOW_SECONDS of non-silent audio — see analyze_spectrum for
-    what each value means and its limits. Independent of and unrelated to
-    InstrumentClassifier — this never identifies an instrument, just
+    max_hz, polyphony, peak_hz) fires from a background thread roughly
+    every _STATS_WINDOW_SECONDS of non-silent audio — see analyze_spectrum
+    for what each value means and its limits. Independent of and unrelated
+    to InstrumentClassifier — this never identifies an instrument, just
     describes the raw frequency content, and keeps running (there's no
     reset()/_last_emitted-style suppression) for as long as there's
     non-silent audio to read."""
 
-    def __init__(self, sample_rate: int, on_stats: Callable[[float, float, int], None]) -> None:
+    def __init__(self, sample_rate: int, on_stats: Callable[[float, float, int, list[float]], None]) -> None:
         self._sample_rate = sample_rate
         self._on_stats = on_stats
         self._window_samples = int(sample_rate * _STATS_WINDOW_SECONDS)
