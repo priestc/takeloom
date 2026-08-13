@@ -5,12 +5,14 @@ backend.py's list_completed_takes for exactly what's gathered and why).
 A title filter narrows by track name; "Filter by this project" further
 narrows to only takes whose track name is currently in the loaded
 project's own setlist (config.last_selected_project) — the same project
-the Record tab has open. A filter-slot-drawn take's track name is the
-specific song that got drawn, not the slot's own generic setlist entry
-name (e.g. "Doo Wop"), so this checkbox generally won't surface those —
-a deliberate, simple reading of "songs that match the playlist" rather
-than chasing session logs to reconstruct which project actually recorded
-each take.
+the Record tab has open. An ordinary track matches by its own name
+directly; a filter slot has no single fixed song of its own, so it
+matches by every song currently in its cached_matches (see project.py's
+TrackEntry and backend.py's get_filter_slot_previews) — the same cached
+list the Record tab's Setlist panel shows "next up" from, not a fresh
+inspiration-server query. A filter slot never yet opened in the Record
+tab (empty cache) contributes no songs here, same as it shows nothing
+"next up" there either.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from tkinter import messagebox, ttk
 
 from ..backend import BackendError
 from ..config import StudioConfig
+from ..inspiration import build_inspiration_track_entry
 from .app_state import AppState
 
 
@@ -60,7 +63,12 @@ class CompletedTakesFrame(ttk.Frame):
             current_track_names: set[str] = set()
             if current_project:
                 setlist = backend.get_setlist(current_project)
-                current_track_names = {t["name"] for t in setlist.get("tracks", [])}
+                for t in setlist.get("tracks", []):
+                    if t.get("is_inspiration_filter"):
+                        for match in t.get("cached_matches", []):
+                            current_track_names.add(build_inspiration_track_entry(match).name)
+                    else:
+                        current_track_names.add(t["name"])
             play_project = current_project or (projects[0] if projects else "")
             return config, takes, current_project, current_track_names, play_project
 
