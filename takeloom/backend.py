@@ -227,15 +227,12 @@ class Backend(ABC):
         exactly which take(s) *this session* produced for it — never a
         take some other session made for the same track/song, and never
         one of this session's own that's since been superseded by a later
-        session's re-record, both of which a naive "whatever's currently
-        filed for this track" lookup would wrongly include. Sourced from
-        session_log.json's own "takes" snapshot (written by processing/
-        splicer.py's process_session once it finishes splicing this
-        session — one entry per take, in the same shape reassign_take/
-        analyze_take's `instrument_name` param expects). Falls back to
-        "whatever's currently filed for this track" — the old, no-longer-
-        session-scoped behavior, with its stated risk — only for a session
-        recorded before that snapshot existed. Each track's entry also
+        session's re-record. Sourced from session_log.json's own "takes"
+        snapshot (written by processing/splicer.py's process_session once
+        it finishes splicing this session — one entry per take, in the
+        same shape reassign_take/analyze_take's `instrument_name` param
+        expects; kept in sync by reassign_take if a take it names is later
+        renamed — see that method's docstring). Each track's entry also
         reports whether it was an inspiration filter-slot draw
         (session_log.json's filter_slot_draws) — reassign_take/
         analyze_take both work on those the same as any other take (see
@@ -286,9 +283,8 @@ class Backend(ABC):
         session keeps showing (and, via play_take, keeps able to
         actually fetch) the take it produced instead of a now-stale
         reference to the pre-rename filename — silently, since this is
-        secondary to the reassignment itself actually succeeding; a
-        session recorded before that snapshot existed, or a log read/
-        write failure, just leaves it as-is rather than failing the
+        secondary to the reassignment itself actually succeeding; a log
+        read/write failure just leaves it as-is rather than failing the
         whole call.
 
         Raises BackendError if `new_instrument` isn't a recognized
@@ -310,34 +306,29 @@ class Backend(ABC):
         to reach for reassign_take). Works for an inspiration filter-slot
         draw too, same as reassign_take (looked up from the shared
         vault-wide inspiration-take index, same as get_session_detail).
-        Narrows the comparison as precisely as the take's own recorded
-        history allows, in order: if the take carries its own
+        Narrows the comparison to instruments on the take's own
         TakeInfo.input_label (the physical input it was actually recorded
-        from, captured at record time — see _SessionEvent/CompletedTake),
-        compares only against instruments currently on that exact input —
-        the most precise scope, since it's an immutable fact about the
-        take rather than derived from today's config, and survives the
-        take's label being renamed or removed entirely. Failing that
-        (an older take with no stored input_label), falls back to every
-        instrument sharing a physical channel with one of `instrument_
-        name`'s own label, if that label still resolves. Either way,
-        narrowing to unrelated hardware inputs is avoided because it
+        from, captured at record time — see _SessionEvent/CompletedTake)
+        — the most precise possible scope, since it's an immutable fact
+        about the take rather than derived from today's config, and
+        survives the take's label being renamed or removed entirely.
+        Narrowing to unrelated hardware inputs is avoided because it
         would reintroduce the classifier's bias toward whichever
-        candidate has the widest default frequency range. If neither
-        signal narrows anything (e.g. the label's since been renamed or
-        removed *and* there's no stored input_label either) — precisely
-        the take most worth analyzing, since there's no other way left to
-        tell where it belongs — falls back to comparing against every
-        currently configured instrument instead of refusing; the same
-        bias caveat applies there with less precision, but a
-        possibly-imprecise guess beats none. Returns {"guess": str |
-        None, "confidence": float} — guess (a label) is None if the
-        take's audio had no non-silent windows to analyze (e.g. it's
-        silence). Never modifies anything. Raises BackendError if
-        `track_name` isn't one of session_dir's tracks, there's no take
-        currently filed under `instrument_name` (same as reassign_take),
-        the take's file isn't available locally right now (e.g. pruned
-        under "remote" vault mode), or no instruments are configured at
+        candidate has the widest default frequency range. If nothing
+        currently configured shares that input (e.g. the instrument's
+        since been removed from config) — precisely the take most worth
+        analyzing, since there's no other way left to tell where it
+        belongs — falls back to comparing against every currently
+        configured instrument instead of refusing; the same bias caveat
+        applies there with less precision, but a possibly-imprecise guess
+        beats none. Returns {"guess": str | None, "confidence": float} —
+        guess (a label) is None if the take's audio had no non-silent
+        windows to analyze (e.g. it's silence). Never modifies anything.
+        Raises BackendError if `track_name` isn't one of session_dir's
+        tracks, there's no take currently filed under `instrument_name`
+        (same as reassign_take), the take's file isn't available locally
+        right now (e.g. pruned under "remote" vault mode), or no
+        instruments are configured at
         all to compare against."""
         ...
 
@@ -1495,7 +1486,6 @@ class LocalBackend(Backend):
 
     def get_session_detail(self, session_dir: str) -> dict:
         _, data = self._read_session_log(session_dir)
-        project_name = data.get("project", "")
         filter_slot_indices = {int(k) for k in data.get("filter_slot_draws", {})}
 
         track_names: list[str] = []
@@ -1506,54 +1496,16 @@ class LocalBackend(Backend):
                 track_names.append(name)
                 track_index_by_name[name] = e.get("track_index")
 
-        try:
-            project = self._open_project(project_name)
-        except BackendError:
-            project = None  # project may have been deleted/renamed since
-
-        config = self.get_config()
-        filter_slot_draws = data.get("filter_slot_draws", {})
-        from .vault import get_inspiration_entry, vault_root
-        root = vault_root(config)
-
         # This session's own snapshot of exactly which take(s) it produced,
         # per track_index — written by processing/splicer.py's
-        # process_session once it finishes splicing. Absent only for a
-        # session recorded before this existed, in which case there's no
-        # record of what specifically got made here, so this falls back to
-        # whatever's *currently* filed for the track (which does risk
-        # showing another session's take, or missing one of this session's
-        # own that's since been superseded — the very reason the snapshot
-        # exists now).
-        session_takes = data.get("takes")
+        # process_session once it finishes splicing.
+        session_takes = data.get("takes", {})
 
         tracks = []
         for name in track_names:
             track_index = track_index_by_name.get(name)
             is_filter_draw = track_index in filter_slot_indices
-            if session_takes is not None:
-                takes = session_takes.get(str(track_index), [])
-            elif is_filter_draw:
-                # A filter slot's own TrackEntry never holds a take (see
-                # TrackEntry's docstring) — what this session actually
-                # drew and recorded lives in the shared vault-wide
-                # inspiration-take index instead, keyed by the song's
-                # inspiration_track_id (filter_slot_draws[track_index]).
-                draw_info = filter_slot_draws.get(str(track_index))
-                track_id = draw_info.get("inspiration_track_id") if draw_info else None
-                shared = get_inspiration_entry(root, track_id) if track_id else None
-                takes = [
-                    {"instrument": take_instrument, **asdict(take)}
-                    for take_instrument, take in shared.preferred_takes.items()
-                ] if shared is not None else []
-            elif project is not None:
-                entry = next((t for t in project.setlist.tracks if t.name == name), None)
-                takes = [
-                    {"instrument": take_instrument, **asdict(take)}
-                    for take_instrument, take in entry.preferred_takes.items()
-                ] if entry is not None else []
-            else:
-                takes = []
+            takes = session_takes.get(str(track_index), [])
             tracks.append({"track_name": name, "is_filter_draw": is_filter_draw, "takes": takes})
 
         return {**data, "session_dir": session_dir, "tracks": tracks}
@@ -1625,18 +1577,13 @@ class LocalBackend(Backend):
         take keeps pointing at a filename that no longer exists the
         moment it's ever reassigned, which later surfaces as a "could
         not download" error for a take that isn't actually gone, just
-        renamed (confirmed: this is exactly what happened for a couple
-        of early sessions predating this method, whose snapshot had to
-        be backfilled from filenames that a later reassignment had
-        already moved out from under them by the time the backfill ran).
+        renamed.
 
-        Best-effort and silent on any failure (log read/write, or a
-        session recorded before "takes" existed at all, or one where
-        this take doesn't actually appear under old_filename) —
-        reassign_take's own, more important work (the actual file move)
-        has already succeeded by the time this runs; a session history
-        staying one step stale isn't worth failing the whole
-        reassignment over."""
+        Best-effort and silent on any failure (log read/write, or this
+        take not actually appearing under old_filename) — reassign_take's
+        own, more important work (the actual file move) has already
+        succeeded by the time this runs; a session history staying one
+        step stale isn't worth failing the whole reassignment over."""
         try:
             log_path, data = self._read_session_log(session_dir)
         except BackendError:
@@ -1773,41 +1720,29 @@ class LocalBackend(Backend):
             # ever got to look at.
             raise BackendError(f"'{take.filename}' isn't available locally right now.")
 
-        # Narrow the comparison as precisely as possible, in order of how
-        # trustworthy each signal is — comparing against unrelated
+        # Narrow the comparison to instruments on the take's own actual
+        # input — take.input_label is the physical input this take was
+        # *actually* recorded from, captured at record time (see backend.
+        # py's _SessionEvent/_save_session_log and processing/splicer.py's
+        # CompletedTake) — an immutable fact about the take itself, so
+        # this is the most precise possible scope and survives instrument_
+        # name's label being renamed or removed from config entirely
+        # since the take was recorded. Comparing against unrelated
         # hardware inputs (e.g. a guitar's DI against a piano on a
         # different device entirely) can't be what actually got recorded
         # here regardless of what the audio sounds like, and would
         # reintroduce the classifier's bias toward whichever candidate has
         # the widest default frequency range (see audio/instrument_
         # classifier.py's module docstring and _DEFAULT_RANGES_BY_LABEL).
-        if take.input_label:
-            # take.input_label is the physical input this take was
-            # *actually* recorded from, captured at record time (see
-            # backend.py's _SessionEvent/_save_session_log and processing/
-            # splicer.py's CompletedTake) — an immutable fact about the
-            # take itself, so this is the most precise possible scope and
-            # survives instrument_name's label being renamed or removed
-            # from config entirely since the take was recorded.
-            candidates = [i for i in config.instruments if i.input_label == take.input_label]
-        else:
-            # Older take, recorded before takes carried their own
-            # input_label — fall back to the label-based heuristic: every
-            # instrument currently sharing a physical channel with any
-            # instrument of instrument_name's own label (empty if
-            # instrument_name doesn't match anything currently configured
-            # either).
-            label_instruments = [i for i in config.instruments if i.label == instrument_name]
-            input_labels = {i.input_label for i in label_instruments}
-            candidates = [i for i in config.instruments if i.input_label in input_labels]
+        candidates = [i for i in config.instruments if i.input_label == take.input_label]
         if not candidates:
-            # Nothing currently configured shares the take's actual
-            # (or label-inferred) input — exactly the take that most needs
-            # analysis, not less: refusing outright leaves no way to find
-            # out where it actually belongs. Fall back to comparing
-            # against every currently configured instrument instead — the
-            # bias caveat above still applies with less precision, but a
-            # possibly-imprecise guess beats no guess at all here.
+            # Nothing currently configured shares the take's actual input
+            # — exactly the take that most needs analysis, not less:
+            # refusing outright leaves no way to find out where it
+            # actually belongs. Fall back to comparing against every
+            # currently configured instrument instead — the bias caveat
+            # above still applies with less precision, but a possibly-
+            # imprecise guess beats no guess at all here.
             candidates = list(config.instruments)
         if not candidates:
             raise BackendError("No instruments are currently configured to compare this take's audio against.")

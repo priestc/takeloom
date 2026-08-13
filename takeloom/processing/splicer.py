@@ -135,13 +135,9 @@ def parse_session_log(data: dict) -> list[CompletedTake]:
             track_index = event.get("track_index", 0)
             track_name = event.get("track_name", "")
             start_wall = event.get("wall_time", "")
-            # Fall back to the session-wide fields for a log recorded
-            # before events carried their own instrument (this file's
-            # events would all have "" here) — same instrument either way
-            # for one of those, so the fallback is exact, not a guess.
-            instrument = event.get("instrument") or data.get("instrument", "")
-            instrument_label = event.get("instrument_label") or data.get("instrument_label", "")
-            input_label = event.get("input_label") or data.get("input_label", "")
+            instrument = event.get("instrument", "")
+            instrument_label = event.get("instrument_label", "")
+            input_label = event.get("input_label", "")
         elif etype == "song_end":
             close_segment(frame, natural_end=True)
         elif etype in ("track_skipped", "song_stopped", "track_loaded", "session_end"):

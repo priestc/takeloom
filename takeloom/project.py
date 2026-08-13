@@ -39,7 +39,7 @@ class TakeInfo:
     # fact about the take itself, so backend.py's analyze_take can use it
     # to precisely scope its comparison even after the take's label has
     # been renamed or removed from config entirely — see that method's
-    # docstring. "" for a take recorded before this field existed.
+    # docstring.
     input_label: str = ""
 
 
