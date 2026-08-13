@@ -38,6 +38,7 @@ class RemoteBackend(Backend):
         self._preview_callbacks: list[FrameCallback] = []
         self._preview_subscribed = False
         self._video_check_result_buffer = bytearray()
+        self._take_file_buffer = bytearray()
         client._on_event = self._on_raw_event
 
     def is_remote(self) -> bool:
@@ -138,6 +139,37 @@ class RemoteBackend(Backend):
             "analyze_take",
             {"session_dir": session_dir, "track_name": track_name, "instrument_name": instrument_name},
         )
+
+    def ensure_take_local(self, project_name: str, filename: str) -> str:
+        raise BackendError(
+            "ensure_take_local downloads to whichever machine runs it — over Remote that's the "
+            "studio's own disk, not this one. Use play_take instead."
+        )
+
+    def play_take(self, project_name: str, filename: str) -> None:
+        # Server resolves/downloads the file on its own end (see backend.
+        # py's ensure_take_local) and streams it back in chunks as
+        # "take_file" events on this same connection (see _on_raw_event)
+        # rather than one giant RPC response — same reasoning as
+        # RemoteServer.broadcast_file's own docstring. The "fetch_take_
+        # file" op's server-side handler (remote/server.py) sends every
+        # chunk *before* its RPC response, and this connection's single
+        # reader thread processes lines strictly in order, so by the time
+        # this call() returns, every chunk has already been received and
+        # appended to self._take_file_buffer by _on_raw_event — no extra
+        # wait/Event needed here.
+        self._take_file_buffer = bytearray()
+        self._client.call(
+            "fetch_take_file", {"project_name": project_name, "filename": filename}, timeout=DOWNLOAD_TIMEOUT,
+        )
+        data = bytes(self._take_file_buffer)
+        if not data:
+            raise BackendError(f"No data received for '{filename}'.")
+        work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_remote_takes")
+        local_path = work_dir / filename
+        local_path.write_bytes(data)
+        from ..video.capture import open_in_default_player
+        open_in_default_player(local_path)
 
     # --- inspiration ---
 
@@ -310,6 +342,24 @@ class RemoteBackend(Backend):
                     cb(jpeg)
                 except Exception:
                     pass
+            return
+
+        if event == "take_file":
+            # Chunked transfer behind play_take — accumulated here so
+            # that by the time play_take's own call() returns (after the
+            # server's "fetch_take_file" response, sent only once every
+            # chunk before it has gone out), self._take_file_buffer is
+            # already complete. Malformed chunks are dropped silently,
+            # same as video_check_result below — play_take's own "no data
+            # received" check catches the resulting empty buffer.
+            try:
+                seq, total = data["seq"], data["total"]
+                chunk = base64.b64decode(data["data_b64"])
+            except Exception:
+                return
+            if seq == 0:
+                self._take_file_buffer = bytearray()
+            self._take_file_buffer += chunk
             return
 
         if event == "video_check_result":

@@ -50,7 +50,7 @@ _READ_ONLY_OPS = {
     "list_projects", "get_setlist", "get_filter_slot_previews",
     "search_inspiration_artists", "search_inspiration_by_filter",
     "is_recording", "get_compressor_settings", "get_monitoring_mode",
-    "list_sessions", "get_session_detail", "analyze_take",
+    "list_sessions", "get_session_detail", "analyze_take", "fetch_take_file",
 }
 
 
@@ -331,6 +331,18 @@ class _ClientHandler(socketserver.StreamRequestHandler):
                     self._preview_sub.close()
                     self._preview_sub = None
                 result = {}
+            elif op == "fetch_take_file":
+                # Not a plain 1:1 Backend method: ensure_take_local only
+                # resolves/downloads the file to *this* (server) machine's
+                # disk — sending it back to whichever client actually
+                # asked for it is this op's own job, via chunked "take_
+                # file" events on this connection (see send_file), before
+                # the ordinary RPC response below so that by the time the
+                # client's blocking call() returns, every chunk has
+                # already arrived (see RemoteBackend.play_take).
+                path = self._owner.backend.ensure_take_local(args["project_name"], args["filename"])
+                self.send_file("take_file", Path(path), extra={"filename": args["filename"]})
+                result = {}
             else:
                 result = dispatch(self._owner.backend, op, args)
             self._write({"kind": "response", "id": req_id, "ok": True, "result": result})
@@ -349,6 +361,22 @@ class _ClientHandler(socketserver.StreamRequestHandler):
             self._write({"kind": "event", "event": event, "data": data})
         except OSError:
             pass
+
+    def send_file(self, event: str, path: Path, extra: dict | None = None, chunk_size: int = 512 * 1024) -> None:
+        """Same chunking as RemoteServer.broadcast_file, but to this one
+        connection only — used by "fetch_take_file" to send a requested
+        take back to whichever client asked for it, not every connected
+        client."""
+        extra = extra or {}
+        data = path.read_bytes()
+        total = max(1, (len(data) + chunk_size - 1) // chunk_size)
+        for seq in range(total):
+            chunk = data[seq * chunk_size:(seq + 1) * chunk_size]
+            self.send_event(event, {
+                "seq": seq, "total": total,
+                "data_b64": base64.b64encode(chunk).decode("ascii"),
+                **extra,
+            })
 
     def _write(self, obj: dict) -> None:
         data = (json.dumps(obj) + "\n").encode("utf-8")

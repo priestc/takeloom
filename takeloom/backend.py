@@ -329,6 +329,41 @@ class Backend(ABC):
         all to compare against."""
         ...
 
+    @abstractmethod
+    def ensure_take_local(self, project_name: str, filename: str) -> str:
+        """Make sure a specific take file (`filename`, relative to
+        project_name's completed_takes_dir — as named in a get_session_
+        detail/reassign_take/analyze_take take dict) actually exists on
+        *this machine's* local disk, downloading it from the configured
+        backup server if it doesn't (same reasoning as vault.
+        ensure_setlist_files_local, just for one arbitrary already-named
+        file rather than everything a setlist currently needs — a
+        Sessions tab take can be one no project currently has as its
+        *preferred* take at all, e.g. superseded by a later reassign_
+        take). Returns the local absolute path as a string. Raises
+        BackendError if it's not local and either no backup server is
+        configured or the download fails.
+
+        Local-only: on a Remote connection this would download to the
+        *server's* disk, useless to a client that wants to actually play
+        the file — RemoteBackend refuses outright; see play_take for the
+        Remote-capable equivalent, which uses this method server-side as
+        a step of its own, not by calling this one directly over the
+        wire."""
+        ...
+
+    @abstractmethod
+    def play_take(self, project_name: str, filename: str) -> None:
+        """Open a specific take file (see ensure_take_local for what
+        `filename` means and the local-availability guarantee this gives
+        first) in the OS's default player, on whichever machine the
+        caller is actually running on — the point being that a UI tab
+        can call this identically whether app_state.backend is local or
+        a Remote connection, and it Just Plays on the right machine
+        either way, unlike ensure_take_local. Raises BackendError under
+        the same conditions ensure_take_local does."""
+        ...
+
     # --- inspiration ---
 
     @abstractmethod
@@ -1722,6 +1757,24 @@ class LocalBackend(Backend):
         from .audio.instrument_classifier import classify_audio_file
         guess, confidence = classify_audio_file(take_path, candidates)
         return {"guess": guess, "confidence": confidence}
+
+    def ensure_take_local(self, project_name: str, filename: str) -> str:
+        config = self.get_config()
+        project = self._open_project(project_name)
+        local_path = project.completed_takes_dir / filename
+        if local_path.exists():
+            return str(local_path)
+        if not config.backup_server:
+            raise BackendError(f"'{filename}' isn't available locally, and no backup server is configured.")
+        from .sync import sync_vault_file_down
+        if not sync_vault_file_down(config.backup_server, f"completed_takes/{filename}", local_path):
+            raise BackendError(f"Could not download '{filename}' from {config.backup_server}.")
+        return str(local_path)
+
+    def play_take(self, project_name: str, filename: str) -> None:
+        path = self.ensure_take_local(project_name, filename)
+        from .video.capture import open_in_default_player
+        open_in_default_player(Path(path))
 
     # --- inspiration ---
 

@@ -3,9 +3,10 @@ they were recorded under, for the case where the "Instrument" dropdown on
 the Record tab was left on the wrong one (e.g. a bass take recorded while
 still set to "electric").
 
-Three separate, independently-usable actions per session — see backend.py's
+Four separate, independently-usable actions per session — see backend.py's
 list_sessions/get_session_detail/correct_session_instrument/reassign_take/
-analyze_take for exactly what each one touches and why they're kept apart:
+analyze_take/play_take for exactly what each one touches and why they're
+kept apart:
 
 1. "Correct instrument" fixes the session's own historical record
    (session_log.json) — always safe, no ambiguity.
@@ -21,6 +22,16 @@ analyze_take for exactly what each one touches and why they're kept apart:
    resembles, right next to the "Reassign" row for the same take — a hint
    for whether Reassign is actually warranted, not a replacement for it
    (it never touches anything itself).
+4. "▶ Play" opens the take in the OS's default player. Downloads it from
+   the backup server first if it isn't already on local disk (see
+   backend.py's ensure_take_local) — a take shown here doesn't have to be
+   any project's *current* preferred one (see get_session_detail), so
+   this can't assume next_untaken_track_index-style "still local" the
+   way an active session's own playback can. Also the only one of the
+   four that behaves genuinely differently over a Remote connection: the
+   server resolves/downloads the file on its own end and streams the
+   bytes back in chunks to actually play on the machine looking at this
+   tab, not the studio's.
 
 Everything here goes through app_state.backend, same as every other tab —
 works identically pointed at local hardware or a Remote connection.
@@ -187,10 +198,13 @@ class SessionsFrame(ttk.Frame):
             foreground="#666666", wraplength=760, justify="left",
         ).pack(anchor="w", pady=(0, 10))
 
+        project_name = detail.get("project", "")
         for track in detail.get("tracks", []):
-            self._build_track_row(session_dir, track, instrument_labels)
+            self._build_track_row(session_dir, project_name, track, instrument_labels)
 
-    def _build_track_row(self, session_dir: str, track: dict, instrument_labels: list[str]) -> None:
+    def _build_track_row(
+        self, session_dir: str, project_name: str, track: dict, instrument_labels: list[str],
+    ) -> None:
         header_row = ttk.Frame(self.detail_frame)
         header_row.pack(fill="x", pady=(6, 0))
         ttk.Label(header_row, text=track["track_name"], width=28, anchor="w", font=("TkDefaultFont", 10, "bold")).pack(
@@ -215,10 +229,10 @@ class SessionsFrame(ttk.Frame):
         # track with takes under more than one instrument doesn't hide any
         # of them.
         for take in takes:
-            self._build_take_row(session_dir, track["track_name"], take, instrument_labels)
+            self._build_take_row(session_dir, project_name, track["track_name"], take, instrument_labels)
 
     def _build_take_row(
-        self, session_dir: str, track_name: str, take: dict, instrument_labels: list[str],
+        self, session_dir: str, project_name: str, track_name: str, take: dict, instrument_labels: list[str],
     ) -> None:
         old_instrument = take["instrument"]  # a label — takes are filed by label, see reassign_take's docstring
         row = ttk.Frame(self.detail_frame)
@@ -231,6 +245,7 @@ class SessionsFrame(ttk.Frame):
         # filter-slot draw's shared inspiration-take index.
         ttk.Label(row, text=old_instrument, font=("TkDefaultFont", 9, "bold")).pack(side="left", padx=(0, 6))
         ttk.Label(row, text=take["filename"], foreground="#666666").pack(side="left", padx=(0, 8))
+        self._build_play_controls(row, project_name, take["filename"])
         # Default the target to whatever label isn't this take's own —
         # the common case (this whole tab exists for) is a 2-label
         # mix-up, so this is usually already the right answer.
@@ -247,6 +262,22 @@ class SessionsFrame(ttk.Frame):
         ).pack(side="left", padx=(6, 0))
         self._build_analyze_controls(row, session_dir, track_name, old_instrument)
 
+    def _build_play_controls(self, row: ttk.Frame, project_name: str, filename: str) -> None:
+        # Read-only, same spirit as Analyze — opens the take in the OS's
+        # default player (backend.py's play_take) rather than anything
+        # this tab renders itself. Works identically pointed at local
+        # hardware or a Remote connection: locally it just needs the file
+        # to exist (downloading it from the backup server first if
+        # "remote" vault mode already pruned it — see ensure_take_local),
+        # remotely the server does that same local-availability step on
+        # its own end and streams the bytes back to actually play here.
+        play_var = tk.StringVar(value="")
+        ttk.Button(
+            row, text="▶ Play",
+            command=lambda: self._on_play_take(project_name, filename, play_var),
+        ).pack(side="left", padx=(0, 4))
+        ttk.Label(row, textvariable=play_var, foreground="#666666").pack(side="left", padx=(0, 4))
+
     def _build_analyze_controls(self, row: ttk.Frame, session_dir: str, track_name: str, instrument: str) -> None:
         # Read-only (see backend.py's analyze_take) — its result just
         # updates analyze_var in place, no _refresh_after_change/rebuild,
@@ -260,6 +291,26 @@ class SessionsFrame(ttk.Frame):
         ttk.Label(row, textvariable=analyze_var, foreground="#2a6db0").pack(side="left", padx=(6, 0))
 
     # --- actions ---
+
+    def _on_play_take(self, project_name: str, filename: str, status_var: tk.StringVar) -> None:
+        # "Loading..." matters most over a Remote connection, where this
+        # can mean a real wait — downloading the take from the backup
+        # server to the studio machine, then streaming it here (see
+        # backend.py's play_take/ensure_take_local) — but costs nothing
+        # to show locally either, where it's normally near-instant.
+        status_var.set("Loading...")
+        backend = self.app_state.backend
+        self._run_backend(
+            lambda: backend.play_take(project_name, filename),
+            lambda _result, error: self._on_play_take_result(status_var, error),
+        )
+
+    def _on_play_take_result(self, status_var: tk.StringVar, error: str | None) -> None:
+        if not self.winfo_exists():
+            return
+        status_var.set("")
+        if error:
+            messagebox.showerror("Could not play take", error)
 
     def _on_correct_instrument(self, session_dir: str, new_instrument: str) -> None:
         backend = self.app_state.backend
