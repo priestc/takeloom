@@ -22,10 +22,16 @@ _SEPARATOR = "#e0e0e0"
 
 class SetlistRow(tk.Frame):
     """A single setlist entry: a large title line (track name, duration,
-    and — for the currently detected instrument — a take checkmark), plus
-    a smaller grey stats line below it (per-installed-label take status
-    for an ordinary track; match count and per-label "next up" pick for
-    an inspiration filter slot — see record.py's _track_stats).
+    and — for the currently detected instrument — a take checkmark), a
+    smaller grey stats line below it (per-installed-label take status for
+    an ordinary track; match count, and per-label "next up" picks before
+    autodetect knows what's being recorded, for an inspiration filter
+    slot — see record.py's _track_stats), and an optional highlight line
+    below that in slightly bigger text — the filter slot's "next up" pick
+    for specifically the currently-detected instrument, once autodetect
+    knows one, called out on its own instead of having to be picked out
+    of the full per-label list above. Empty/absent for an ordinary track,
+    or before autodetect has locked onto anything.
 
     `index` is this row's position in the setlist at the time it was
     built — record.py rebuilds every row from scratch on each refresh
@@ -59,12 +65,21 @@ class SetlistRow(tk.Frame):
             self, font=("TkDefaultFont", 10), bg=_BG, fg=_STATS_FG,
             anchor="w", justify="left", wraplength=1,
         )
-        self.stats_label.pack(fill="x", padx=10, pady=(1, 8), anchor="w")
+        self.stats_label.pack(fill="x", padx=10, pady=(1, 0), anchor="w")
+
+        self.highlight_label = tk.Label(
+            self, font=("TkDefaultFont", 12, "bold"), bg=_BG, fg=_STATS_FG,
+            anchor="w", justify="left", wraplength=1,
+        )
+        # Not packed here — set_content() packs/unpacks it on demand, since
+        # most rows (every ordinary track, and a filter slot before
+        # autodetect knows what's being recorded) have nothing to show here
+        # and shouldn't reserve blank space for it.
 
         separator = tk.Frame(self, height=1, bg=_SEPARATOR)
         separator.pack(fill="x", side="bottom")
 
-        for widget in (self, self.title_label, self.stats_label):
+        for widget in (self, self.title_label, self.stats_label, self.highlight_label):
             widget.bind("<ButtonPress-1>", lambda _e, i=index: on_press(i))
             widget.bind("<B1-Motion>", on_motion)
             widget.bind("<ButtonRelease-1>", lambda _e: on_release())
@@ -78,10 +93,21 @@ class SetlistRow(tk.Frame):
         width = max(1, event.width - 20)  # type: ignore[attr-defined]
         self.title_label.configure(wraplength=width)
         self.stats_label.configure(wraplength=width)
+        self.highlight_label.configure(wraplength=width)
 
-    def set_content(self, title: str, stats: str) -> None:
+    def set_content(self, title: str, stats: str, highlight: str = "") -> None:
         self.title_label.configure(text=title)
         self.stats_label.configure(text=stats)
+        if highlight:
+            self.highlight_label.configure(text=highlight)
+            self.highlight_label.pack(fill="x", padx=10, pady=(0, 8), anchor="w")
+            self.stats_label.pack_configure(pady=(1, 0))
+        else:
+            self.highlight_label.pack_forget()
+            # stats_label was packed assuming a highlight line follows it
+            # (top padding only, see __init__) — without one, it's the
+            # last line in the row and needs the bottom padding itself.
+            self.stats_label.pack_configure(pady=(1, 8))
 
     def set_selected(self, selected: bool) -> None:
         bg = _BG_SELECTED if selected else _BG
@@ -90,3 +116,4 @@ class SetlistRow(tk.Frame):
         self.configure(bg=bg)
         self.title_label.configure(bg=bg, fg=fg)
         self.stats_label.configure(bg=bg, fg=stats_fg)
+        self.highlight_label.configure(bg=bg, fg=stats_fg)

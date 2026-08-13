@@ -594,29 +594,42 @@ class RecordFrame(ttk.Frame):
             mark = " ✓ (audio only)"
         return f"{track.name}  ({dur}){mark}"
 
-    def _track_stats(self, track: TrackEntry, preview: dict | None) -> str:
-        """The smaller-text line(s) shown below a setlist row's title —
-        see _refresh_setlist. For an ordinary track: which installed
-        instrument labels already have a completed take. For an
-        inspiration filter slot: how many inspiration-server tracks
-        currently match its criteria, plus, per installed label, what
-        song it would draw next right now (`preview`, from
-        self._filter_previews — see that field's docstring for why it's
-        not recomputed on every call)."""
+    def _track_stats(self, track: TrackEntry, preview: dict | None, inst_name: str) -> tuple[str, str]:
+        """(stats, highlight) — the smaller-text line(s) shown below a
+        setlist row's title, and an optional "next up" line called out in
+        bigger text (see SetlistRow) — see _refresh_setlist. For an
+        ordinary track: (which installed instrument labels already have a
+        completed take, ""). For an inspiration filter slot: how many
+        inspiration-server tracks currently match its criteria, plus —
+        once autodetect knows what's being recorded (`inst_name`) — its
+        "next up" pick specifically for that instrument's label, broken
+        out as `highlight` instead of just another line among every
+        installed label's; before that's known, every installed label's
+        "next up" pick is listed in `stats` instead, same as before
+        autodetect existed. (`preview` is from self._filter_previews —
+        see that field's docstring for why it's not recomputed on every
+        call.)"""
         labels = self._installed_labels()
         if not labels:
-            return ""
+            return "", ""
         if track.is_inspiration_filter:
             if preview is None:
-                return "Checking matches..."
+                return "Checking matches...", ""
             count = preview.get("match_count", 0)
-            lines = [f"{count} matching track{'s' if count != 1 else ''}"]
+            stats = f"{count} matching track{'s' if count != 1 else ''}"
             next_up = preview.get("next_up") or {}
+            detected_label = self.config_obj.label_for_instrument(inst_name) if inst_name and self.config_obj else ""
+            if detected_label and detected_label in labels:
+                song = next_up.get(detected_label)
+                name = self._label_display_name(detected_label)
+                highlight = f"{name} next up: {song}" if song else f"{name}: no match"
+                return stats, highlight
+            lines = [stats]
             for label in labels:
                 song = next_up.get(label)
                 name = self._label_display_name(label)
                 lines.append(f"{name} next up: {song}" if song else f"{name}: no match")
-            return "\n".join(lines)
+            return "\n".join(lines), ""
         parts = []
         for label in labels:
             take = track.get_take_for_instrument(label)
@@ -627,7 +640,7 @@ class RecordFrame(ttk.Frame):
                 parts.append(f"{name} ✓")
             else:
                 parts.append(f"{name} ✓ (audio)")
-        return "    ".join(parts)
+        return "    ".join(parts), ""
 
     def _refresh_setlist(self) -> None:
         for row in self._setlist_rows:
@@ -644,7 +657,8 @@ class RecordFrame(ttk.Frame):
                 on_press=self._on_row_press, on_motion=self._on_row_motion,
                 on_release=self._on_row_release, on_right_click=self._on_row_right_click,
             )
-            row.set_content(self._track_title(track, inst_name), self._track_stats(track, preview))
+            stats, highlight = self._track_stats(track, preview, inst_name)
+            row.set_content(self._track_title(track, inst_name), stats, highlight)
             row.set_selected(i == self._selected_track_index)
             row.pack(fill="x")
             self._setlist_rows.append(row)
