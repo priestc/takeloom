@@ -527,9 +527,8 @@ def new_project() -> None:
 @main.command()
 def sync_push() -> None:
     """Push every project's setlist file to the backup server. A project
-    is just <projects_dir>/<name>.json now — this pushes them all at
-    once rather than one project's own folder, unlike the old per-project
-    layout. Recorded sessions, backing tracks, and completed takes sync
+    is just <projects_dir>/<name>.json — this pushes them all at once.
+    Recorded sessions, backing tracks, and completed takes sync
     separately via the Studio Session Vault (see 'takeloom setup-studio')."""
     config = StudioConfig.load()
     remote = config.backup_server
@@ -544,7 +543,7 @@ def sync_push() -> None:
 @main.command()
 def sync_pull() -> None:
     """Pull every project's setlist file from the backup server. See
-    sync-push for why this operates on all projects at once now."""
+    sync-push for why this operates on all projects at once."""
     config = StudioConfig.load()
     remote = config.backup_server
     if not remote:
@@ -555,45 +554,14 @@ def sync_pull() -> None:
     sync_down(Path(config.projects_dir), remote)
 
 
-@main.command(name="migrate-sessions-to-vault")
-def migrate_sessions_to_vault_command() -> None:
-    """One-time migration from the old per-project folder layout
-    (<projects_dir>/<name>/{setlist.json, backing_tracks/,
-    completed_takes/, sessions/}) to the current one: a flat
-    <projects_dir>/<name>.json setlist file, with backing tracks,
-    completed takes, and sessions all moved into the Studio Session Vault
-    (see 'takeloom setup-studio'). Going forward, all of these are read
-    from and written straight into the vault — this is only for content
-    recorded before it existed.
-
-    Safe to re-run: a project already migrated (its flat .json already
-    exists) is skipped entirely.
-    """
-    config = StudioConfig.load()
-    if not config.session_vault_path:
-        click.echo("Error: no vault path configured. Run 'takeloom setup-studio' first.", err=True)
-        raise SystemExit(1)
-    if config.session_vault_mode in ("remote", "both") and not config.backup_server:
-        click.echo(
-            f"Warning: vault mode is '{config.session_vault_mode}' but no backup server is configured — "
-            "migrated content will only be moved locally.",
-        )
-
-    from .vault import migrate_projects_to_vault
-    click.echo(f"Migrating into vault: {config.session_vault_path}\n")
-    projects_migrated, sessions_migrated = migrate_projects_to_vault(config, log=click.echo)
-    click.echo(f"\nDone: migrated {projects_migrated} project(s), moving {sessions_migrated} session(s).")
-
-
 @main.command()
 @click.argument("project_name", required=False, default=None)
 def update_setlist(project_name: str | None) -> None:
     """Add any of the vault's backing tracks not yet in PROJECT_NAME's
     setlist (falls back to the last-used project). backing_tracks/ is
     shared vault-wide across every project now (see 'takeloom
-    setup-studio'), so unlike the old per-project folder, this only adds
-    — it never removes a track for a file that's simply used by some
-    other project instead."""
+    setup-studio'), so this only adds — it never removes a track for a
+    file that's simply used by some other project instead."""
     config = StudioConfig.load()
     project = _resolve_project(config, project_name)
 
