@@ -367,6 +367,27 @@ class Backend(ABC):
         the same conditions ensure_take_local does."""
         ...
 
+    @abstractmethod
+    def list_completed_takes(self) -> list[dict]:
+        """Every completed take currently on file, vault-wide — behind
+        the Completed Takes tab, which (unlike Sessions) isn't scoped to
+        one session or project. Gathered from every project's own
+        setlist.json (an ordinary track's preferred_takes) plus the
+        shared vault-wide inspiration-take index (vault.py's
+        load_inspiration_index) — the only place a take drawn from an
+        inspiration filter slot is ever recorded, since a filter slot's
+        own TrackEntry.preferred_takes stays empty forever (see
+        TrackEntry's docstring) — deduplicated by filename, since a
+        non-filter inspiration-sourced track's take is written to both.
+        Each dict: {"track_name": str, "instrument": str (a label),
+        "filename": str, "take_number": int, "has_video": bool,
+        "volume": float}, sorted by track_name. A take superseded by a
+        later reassign_take/re-record no longer appears here, same as
+        it wouldn't in any project's setlist — this reflects each
+        track+label's *current* take, not every file ever written to
+        completed_takes/."""
+        ...
+
     # --- inspiration ---
 
     @abstractmethod
@@ -1768,6 +1789,33 @@ class LocalBackend(Backend):
         path = self.ensure_take_local(project_name, filename)
         from .video.capture import open_in_default_player
         open_in_default_player(Path(path))
+
+    def list_completed_takes(self) -> list[dict]:
+        config = self.get_config()
+        vault_root = Path(config.session_vault_path)
+        by_filename: dict[str, dict] = {}
+
+        def add(track_name: str, label: str, take: TakeInfo) -> None:
+            by_filename[take.filename] = {
+                "track_name": track_name, "instrument": label, "filename": take.filename,
+                "take_number": take.take_number, "has_video": take.has_video, "volume": take.volume,
+            }
+
+        for path in Project.list_projects(Path(config.projects_dir)):
+            try:
+                project = Project.open(path, vault_root)
+            except Exception:
+                continue
+            for track in project.setlist.tracks:
+                for label, take in track.preferred_takes.items():
+                    add(track.name, label, take)
+
+        from .vault import load_inspiration_index
+        for entry in load_inspiration_index(vault_root).values():
+            for label, take in entry.preferred_takes.items():
+                add(entry.name, label, take)
+
+        return sorted(by_filename.values(), key=lambda d: d["track_name"].lower())
 
     # --- inspiration ---
 

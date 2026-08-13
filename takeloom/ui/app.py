@@ -12,6 +12,7 @@ from tkinterdnd2 import TkinterDnD
 from ..backend import BackendError
 from ..device_check import check_configured_devices
 from .app_state import AppState
+from .completed_takes import CompletedTakesFrame
 from .latency import LatencyFrame
 from .platform_style import normalize as normalize_platform_style
 from .record import RecordFrame
@@ -32,6 +33,7 @@ TABS = [
     ("Recording Devices", RecordingDevicesFrame, False),
     ("Streaming", StreamingFrame, False),
     ("Sessions", SessionsFrame, False),
+    ("Completed Takes", CompletedTakesFrame, False),
     ("Latency", LatencyFrame, True),
     ("Remote", RemoteFrame, True),
 ]

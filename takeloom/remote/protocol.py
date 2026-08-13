@@ -89,6 +89,8 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
         return {}
     if op == "analyze_take":
         return backend.analyze_take(args["session_dir"], args["track_name"], args["instrument_name"])
+    if op == "list_completed_takes":
+        return {"takes": backend.list_completed_takes()}
     if op == "start_auto_detect_instrument":
         backend.start_auto_detect_instrument()
         return {}

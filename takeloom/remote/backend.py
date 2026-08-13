@@ -140,6 +140,9 @@ class RemoteBackend(Backend):
             {"session_dir": session_dir, "track_name": track_name, "instrument_name": instrument_name},
         )
 
+    def list_completed_takes(self) -> list[dict]:
+        return self._client.call("list_completed_takes", {})["takes"]
+
     def ensure_take_local(self, project_name: str, filename: str) -> str:
         raise BackendError(
             "ensure_take_local downloads to whichever machine runs it — over Remote that's the "

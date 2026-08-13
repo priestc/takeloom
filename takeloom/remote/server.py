@@ -51,6 +51,7 @@ _READ_ONLY_OPS = {
     "search_inspiration_artists", "search_inspiration_by_filter",
     "is_recording", "get_compressor_settings", "get_monitoring_mode",
     "list_sessions", "get_session_detail", "analyze_take", "fetch_take_file",
+    "list_completed_takes",
 }
 
 
