@@ -15,19 +15,32 @@ import click
 def _remote_path(remote: str, project_name: str) -> str:
     """Join remote base and project name, handling host:path format.
 
-    Backslash-escapes spaces in the path portion (never the host). rsync
-    forwards this argument to the remote shell over ssh, and the rsync
-    client bundled with macOS (an openrsync build that reports itself as
-    "rsync version 2.6.9 compatible" and doesn't support --protect-args)
-    does not shell-quote it — an unescaped space gets split into
-    separate arguments on the remote end, silently truncating the
-    destination path (e.g. ".../Takeloom Studio Vault/sessions/..."
-    becomes just ".../Takeloom", with everything after the space lost —
-    this is exactly what happened before this fix, more than once)."""
+    shlex.quotes the path portion (never the host). rsync forwards this
+    argument to the remote shell over ssh, and the rsync client bundled
+    with macOS (an openrsync build that reports itself as "rsync version
+    2.6.9 compatible" and doesn't support --protect-args) does not
+    shell-quote it itself — an unquoted space gets split into separate
+    arguments on the remote end, silently truncating the destination
+    path (e.g. ".../Takeloom Studio Vault/sessions/..." becomes just
+    ".../Takeloom", with everything after the space lost — this is
+    exactly what happened before a first fix here, more than once).
+
+    That first fix only backslash-escaped spaces, which is why it still
+    broke on a real take filename containing '&' and parentheses (both
+    shell metacharacters to the remote bash — '&' backgrounds a command,
+    '(' opens a subshell) — confirmed live: the un-escaped '(' produced
+    "syntax error near unexpected token" on the remote end and the
+    download silently failed, which is what surfaced as a Sessions tab
+    "Could not download" popup for a take that otherwise genuinely
+    existed on the backup server the whole time. shlex.quote() wraps the
+    whole path in single quotes instead of escaping characters one at a
+    time, so it's correct for the full range of shell metacharacters a
+    real song title/artist name can contain, not just space — verified
+    directly against that exact filename over the real SSH connection."""
     if ":" in remote:
         host, path = remote.split(":", 1)
         joined = os.path.join(path, project_name)
-        return f"{host}:{joined.replace(' ', chr(92) + ' ')}"
+        return f"{host}:{shlex.quote(joined)}"
     return os.path.join(remote, project_name)
 
 
