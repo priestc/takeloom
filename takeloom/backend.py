@@ -2126,6 +2126,18 @@ class LocalBackend(Backend):
         for other_inst, take_info in other_takes.items():
             if other_inst.lower() == session.inst.label.lower():
                 continue
+            if other_inst not in INSTRUMENT_LABELS:
+                # A stale/orphaned key — e.g. a bare "bass"/"acoustic"/
+                # "electric" from before instrument labels were
+                # standardized to the current vocabulary (see
+                # config.INSTRUMENT_LABELS), rather than "electric-bass"/
+                # "acoustic-guitar"/"electric-guitar" etc. Not a real
+                # label any instrument could ever actually be assigned,
+                # so it can't legitimately be "some other instrument's
+                # take" layering in here — skip it rather than silently
+                # mixing in audio filed under a name that was never a
+                # real instrument in the first place.
+                continue
             take_path = project.completed_takes_dir / take_info.filename
             if take_path.exists():
                 effective_vol = take_info.volume * (track.takes_volume / 100.0)
