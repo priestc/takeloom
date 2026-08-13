@@ -3405,7 +3405,14 @@ class LocalBackend(Backend):
 
         session_name = wall_timestamp().replace(":", "-").replace(" ", "_")
         from .vault import vault_session_dir
-        session_dir = ensure_dir(vault_session_dir(config, project.name, f"{session_name}_{inst.full_name}"))
+        # inst.label (e.g. "electric-bass-fretless"), not inst.full_name
+        # (e.g. "Ibanez SDGR fretless") — the directory name is cosmetic
+        # only (see correct_session_instrument's docstring: nothing reads
+        # it back out, every real lookup goes through session_log.json's
+        # own instrument/instrument_label fields), but the label is the
+        # shorter, filesystem-friendlier, and more useful-at-a-glance of
+        # the two for browsing the vault directly.
+        session_dir = ensure_dir(vault_session_dir(config, project.name, f"{session_name}_{inst.label}"))
         session_flac = session_dir / "session.flac"
         engine.start_session_recording(session_flac)
 
