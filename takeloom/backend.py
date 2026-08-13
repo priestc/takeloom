@@ -279,10 +279,22 @@ class Backend(ABC):
         get_session_detail's `current_take` reported) rather than re-read
         from session_dir's session_log.json, so this gives the right
         answer regardless of whether correct_session_instrument has
-        already been called on the same session. Raises BackendError if
-        `new_instrument` isn't a recognized label, `track_name` isn't one
-        of session_dir's tracks, or if there's no take currently filed
-        under `old_instrument` to reassign."""
+        already been called on the same session.
+
+        Also best-effort updates session_dir's own "takes" snapshot (see
+        get_session_detail's docstring) to the new filename, so this
+        session keeps showing (and, via play_take, keeps able to
+        actually fetch) the take it produced instead of a now-stale
+        reference to the pre-rename filename — silently, since this is
+        secondary to the reassignment itself actually succeeding; a
+        session recorded before that snapshot existed, or a log read/
+        write failure, just leaves it as-is rather than failing the
+        whole call.
+
+        Raises BackendError if `new_instrument` isn't a recognized
+        label, `track_name` isn't one of session_dir's tracks, or if
+        there's no take currently filed under `old_instrument` to
+        reassign."""
         ...
 
     @abstractmethod
@@ -1604,6 +1616,49 @@ class LocalBackend(Backend):
             volume=take.volume, has_video=has_video, input_label=take.input_label,
         )
 
+    def _update_session_take_snapshot(
+        self, session_dir: str, track_index: int, old_filename: str, new_take: TakeInfo,
+    ) -> None:
+        """Keep session_dir's own "takes" snapshot (see get_session_
+        detail's docstring) in sync with a take reassign_take just
+        renamed — without this, the session that originally produced a
+        take keeps pointing at a filename that no longer exists the
+        moment it's ever reassigned, which later surfaces as a "could
+        not download" error for a take that isn't actually gone, just
+        renamed (confirmed: this is exactly what happened for a couple
+        of early sessions predating this method, whose snapshot had to
+        be backfilled from filenames that a later reassignment had
+        already moved out from under them by the time the backfill ran).
+
+        Best-effort and silent on any failure (log read/write, or a
+        session recorded before "takes" existed at all, or one where
+        this take doesn't actually appear under old_filename) —
+        reassign_take's own, more important work (the actual file move)
+        has already succeeded by the time this runs; a session history
+        staying one step stale isn't worth failing the whole
+        reassignment over."""
+        try:
+            log_path, data = self._read_session_log(session_dir)
+        except BackendError:
+            return
+        entries = (data.get("takes") or {}).get(str(track_index))
+        if not entries:
+            return
+        changed = False
+        for i, entry in enumerate(entries):
+            if entry.get("filename") == old_filename:
+                entries[i] = {"instrument": new_take.instrument, **asdict(new_take)}
+                changed = True
+        if not changed:
+            return
+        if log_path is not None:
+            log_path.write_text(json.dumps(data, indent=2))
+        else:
+            from .sync import write_remote_session_log
+            config = self.get_config()
+            if config.backup_server:
+                write_remote_session_log(config.backup_server, session_dir, data)
+
     def reassign_take(self, session_dir: str, track_name: str, old_instrument: str, new_instrument: str) -> None:
         config = self.get_config()
         if new_instrument not in INSTRUMENT_LABELS:
@@ -1647,6 +1702,7 @@ class LocalBackend(Backend):
             del shared.preferred_takes[old_instrument]
             shared.set_preferred_take(new_instrument, new_take)
             save_inspiration_index(root, index)
+            self._update_session_take_snapshot(session_dir, track_index, take.filename, new_take)
             return
 
         entry = next((t for t in project.setlist.tracks if t.name == track_name), None)
@@ -1676,6 +1732,8 @@ class LocalBackend(Backend):
                 del shared_entry.preferred_takes[old_instrument]
                 shared_entry.set_preferred_take(new_instrument, new_take)
                 save_inspiration_index(root, index)
+
+        self._update_session_take_snapshot(session_dir, track_index, take.filename, new_take)
 
     def analyze_take(self, session_dir: str, track_name: str, instrument_name: str) -> dict:
         config = self.get_config()
