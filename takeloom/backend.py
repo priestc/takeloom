@@ -199,10 +199,20 @@ class Backend(ABC):
         that visit rather than re-randomizing on every setlist
         redisplay.
 
+        Each filter slot's raw match list is cached on its own TrackEntry
+        (cached_matches, in project.json/setlist.json) the first time
+        it's fetched, so opening the project again later reuses it
+        instead of re-querying the inspiration server — this method only
+        actually queries for a slot that's never been previewed before,
+        or whose criteria just changed (record.py's _on_edit_filter
+        clears the cache when that happens). Persists the cache back to
+        setlist.json as a side effect whenever it had to query.
+
         Emits a "filter_preview_status" event ({"project_name", "index",
         "total", "label"}) just before each filter slot's own query, so a
         caller can show live progress across what can be a several-second
-        call over a setlist with many filter slots."""
+        call over a setlist with many filter slots — still emitted for a
+        slot served from cache, so "checking N of M" stays accurate."""
         ...
 
     # --- sessions (browse/correct past recordings) ---
@@ -1345,6 +1355,7 @@ class LocalBackend(Backend):
             raise BackendError("Enter at least one filter field (artist and/or genre).")
         project = self._open_project(project_name)
         from .inspiration import InspirationError, average_duration, search_tracks_by_filter
+        matches: list[dict] = []
         try:
             matches = search_tracks_by_filter(self.get_config(), filter_criteria)
             duration = average_duration(matches)
@@ -1353,7 +1364,9 @@ class LocalBackend(Backend):
             # is briefly unreachable — just without a duration estimate
             # yet (0.0, same as before this was tracked at all).
             duration = 0.0
-        entry = project.add_inspiration_filter_slot(label, filter_criteria, duration_seconds=duration)
+        entry = project.add_inspiration_filter_slot(
+            label, filter_criteria, duration_seconds=duration, cached_matches=matches,
+        )
         return entry.to_dict()
 
     def get_filter_slot_previews(self, project_name: str) -> list[dict | None]:
@@ -1371,6 +1384,7 @@ class LocalBackend(Backend):
         index = None  # lazily loaded — only needed once any filter slot is actually hit
         previews: list[dict | None] = []
         checked = 0
+        cache_dirty = False
         for track in project.setlist.tracks:
             if not track.is_inspiration_filter:
                 previews.append(None)
@@ -1383,15 +1397,29 @@ class LocalBackend(Backend):
             # (and know when to put up/take down its loading overlay — see
             # record.py's _show_loading_overlay) instead of just staring at
             # a stalled-looking Setlist panel for however long it takes.
+            # Still emitted even when the cache below skips the actual
+            # network call, so "checking N of M" stays accurate across a
+            # setlist mixing cached and not-yet-cached slots.
             self._emit(
                 "filter_preview_status",
                 {"project_name": project_name, "index": checked, "total": total, "label": track.name},
             )
-            try:
-                matches = search_tracks_by_filter(config, track.inspiration_filter)
-            except InspirationError:
-                previews.append({"match_count": 0, "next_up": {label: None for label in labels}})
-                continue
+            if track.cached_matches:
+                # Reuses the last search_tracks_by_filter result cached on
+                # this slot (see TrackEntry.cached_matches) instead of
+                # re-querying the inspiration server — cleared by record.
+                # py's _on_edit_filter whenever inspiration_filter itself
+                # changes, so this can't go stale against new criteria.
+                matches = track.cached_matches
+            else:
+                try:
+                    matches = search_tracks_by_filter(config, track.inspiration_filter)
+                except InspirationError:
+                    previews.append({"match_count": 0, "next_up": {label: None for label in labels}})
+                    continue
+                if matches:
+                    track.cached_matches = matches
+                    cache_dirty = True
             if not matches:
                 previews.append({"match_count": 0, "next_up": {label: None for label in labels}})
                 continue
@@ -1402,6 +1430,8 @@ class LocalBackend(Backend):
                 chosen = self._pick_filter_match(matches, label, index)
                 next_up[label] = build_inspiration_track_entry(chosen).name
             previews.append({"match_count": len(matches), "next_up": next_up})
+        if cache_dirty:
+            project.save_setlist()
         return previews
 
     # --- sessions (browse/correct past recordings) ---

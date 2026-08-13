@@ -975,6 +975,12 @@ class RecordFrame(ttk.Frame):
 
         def on_save(new_criteria: dict) -> None:
             track.inspiration_filter = new_criteria
+            # The cached match list (backend.py's get_filter_slot_previews)
+            # was queried against the *old* criteria — stale now, and left
+            # alone it would keep being reused for a filter it no longer
+            # describes. Clearing it here forces a fresh inspiration-server
+            # query (and a fresh cache) the next time previews are fetched.
+            track.cached_matches = []
             track.name = derive_filter_label(new_criteria)
             if self._selected_track_index == index:
                 self.selection_var.set(f"Selected: {track.name}")

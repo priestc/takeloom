@@ -70,6 +70,15 @@ class TrackEntry:
     inspiration_track_id: int = 0  # radioserver track ID (0 = local file)
     is_inspiration_filter: bool = False
     inspiration_filter: dict = field(default_factory=dict)
+    # Raw inspiration-server search results for inspiration_filter, from
+    # the most recent search_tracks_by_filter call made on this slot's
+    # behalf (see backend.py's get_filter_slot_previews) — cached here so
+    # opening the project again doesn't re-hit the inspiration server just
+    # to redisplay the same "next up" previews. Cleared whenever
+    # inspiration_filter itself changes (see record.py's _on_edit_filter)
+    # so a stale list under new criteria can't linger; empty for an
+    # ordinary track or a filter slot never yet previewed.
+    cached_matches: list[dict] = field(default_factory=list)
     preferred_takes: dict[str, TakeInfo] = field(default_factory=dict)
     # key = instrument label (not full_name — a Stratocaster and a
     # Telecaster take of the same song share one "electric-guitar" key
@@ -113,6 +122,7 @@ class TrackEntry:
             inspiration_track_id=data.get("inspiration_track_id", 0),
             is_inspiration_filter=data.get("is_inspiration_filter", False),
             inspiration_filter=data.get("inspiration_filter", {}),
+            cached_matches=data.get("cached_matches", []),
             preferred_takes=takes,
             source=data.get("source", "upload"),
         )
@@ -211,6 +221,7 @@ class Project:
 
     def add_inspiration_filter_slot(
         self, label: str, filter_criteria: dict, duration_seconds: float = 0.0,
+        cached_matches: list[dict] | None = None,
     ) -> TrackEntry:
         """Add a standing "draw a random song from this filter each
         session" slot to the setlist — see TrackEntry's docstring. Unlike
@@ -218,10 +229,14 @@ class Project:
         never played directly. `duration_seconds` is the average across
         every currently-matching track (see inspiration.average_duration)
         — the slot has no single fixed song of its own to derive a
-        duration from otherwise."""
+        duration from otherwise. `cached_matches`, if the caller already
+        queried the inspiration server for this criteria (e.g. to compute
+        duration_seconds), seeds TrackEntry.cached_matches so the first
+        get_filter_slot_previews call right after doesn't repeat that same
+        query."""
         entry = TrackEntry(
             name=label, backing_track="", is_inspiration_filter=True, inspiration_filter=dict(filter_criteria),
-            duration_seconds=duration_seconds,
+            duration_seconds=duration_seconds, cached_matches=list(cached_matches or []),
         )
         self.setlist.add_track(entry)
         self.save_setlist()
