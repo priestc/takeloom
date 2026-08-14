@@ -2,10 +2,14 @@
 — not scoped to one session or project, unlike the Sessions tab (see
 backend.py's list_completed_takes for exactly what's gathered and why).
 
-Takes are grouped by song: one expandable row per track name, with each
-instrument's take nested underneath it (native ttk.Treeview hierarchy) —
-takes["track_name"] is already the group key list_completed_takes sorts
-by, so grouping here is just a consecutive-run split, not a re-sort.
+Takes are grouped by song: one header row per track name, with each
+instrument's take listed underneath it — takes["track_name"] is already
+the group key list_completed_takes sorts by, so grouping here is just a
+consecutive-run split, not a re-sort. Built from plain widgets in a
+scrollable canvas rather than a ttk.Treeview: a Treeview can only color a
+whole row via tags, not one cell's text on its own, and the point of a
+label's badge (see instrument_colors.py) is specifically to color just
+the label text, not everything next to it.
 
 A title filter narrows by track name (whole song groups shown/hidden
 together); "Filter by this project" further narrows to only songs
@@ -32,7 +36,7 @@ from ..backend import BackendError
 from ..config import StudioConfig
 from ..inspiration import build_inspiration_track_entry
 from .app_state import AppState
-from .instrument_colors import configure_label_tags, label_tag
+from .instrument_colors import make_label_badge
 
 
 def _format_time_ago(recorded_at: float | None) -> str:
@@ -70,7 +74,6 @@ class CompletedTakesFrame(ttk.Frame):
         self._play_project: str = ""  # any project name — only used to resolve the (shared) vault path
         self._current_project: str = ""
         self._current_track_names: set[str] = set()
-        self._take_by_iid: dict[str, dict] = {}
 
         ttk.Label(self, text="Loading...").pack(anchor="w")
         self._load()
@@ -153,34 +156,43 @@ class CompletedTakesFrame(ttk.Frame):
         if not self._current_project:
             project_check.state(["disabled"])
 
-        tree_frame = ttk.Frame(self)
-        tree_frame.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(
-            tree_frame, columns=("take", "recorded", "video"),
-            show="tree headings", height=18, selectmode="browse",
-        )
-        self.tree.heading("#0", text="Song / Instrument")
-        self.tree.heading("take", text="Take #")
-        self.tree.heading("recorded", text="Recorded")
-        self.tree.heading("video", text="Video")
-        self.tree.column("#0", width=420)
-        self.tree.column("take", width=60, anchor="center")
-        self.tree.column("recorded", width=100, anchor="center")
-        self.tree.column("video", width=60, anchor="center")
-        configure_label_tags(self.tree)
-        self.tree.pack(side="left", fill="both", expand=True)
-        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="left", fill="y")
-        self.tree.bind("<Double-1>", lambda _e: self._on_play_selected())
-
-        play_row = ttk.Frame(self)
-        play_row.pack(fill="x", pady=(8, 0))
-        ttk.Button(play_row, text="▶ Play selected", command=self._on_play_selected).pack(side="left")
-        self.status_var = tk.StringVar(value="")
-        ttk.Label(play_row, textvariable=self.status_var, foreground="#666666").pack(side="left", padx=(8, 0))
-
+        self._build_scroll_container()
         self._apply_filter()
+
+    def _build_scroll_container(self) -> None:
+        """A scrollable canvas for the song/take list — plain widgets, not
+        a Treeview (see module docstring for why), so it can grow past
+        the window's height the same way Studio Setup's own content does
+        (see studio_setup.py's _build_scroll_container, which this
+        mirrors)."""
+        canvas = tk.Canvas(self, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        self.content = ttk.Frame(canvas)
+        content_window = canvas.create_window((0, 0), window=self.content, anchor="nw")
+
+        def _on_content_configure(_event: object) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event: object) -> None:
+            canvas.itemconfigure(content_window, width=event.width)
+
+        self.content.bind("<Configure>", _on_content_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        self._canvas = canvas
+        self._bind_mousewheel(canvas)
+
+    def _on_mousewheel(self, event: object) -> None:
+        self._canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")  # type: ignore[attr-defined]
+
+    def _bind_mousewheel(self, widget: tk.Misc) -> None:
+        widget.bind("<MouseWheel>", self._on_mousewheel)
+        for child in widget.winfo_children():
+            self._bind_mousewheel(child)
 
     # --- filtering ---
 
@@ -193,54 +205,60 @@ class CompletedTakesFrame(ttk.Frame):
             and (not project_only or take["track_name"] in self._current_track_names)
         ]
 
-        self.tree.delete(*self.tree.get_children())
-        self._take_by_iid = {}
+        for child in self.content.winfo_children():
+            child.destroy()
+
         # self._takes is already sorted by track_name (see backend.py's
         # list_completed_takes) and filtering above preserves order, so
         # groupby's usual "only groups consecutive runs" caveat doesn't
         # apply here — every take for a given song is already adjacent.
-        for song_index, (track_name, group) in enumerate(groupby(filtered, key=lambda t: t["track_name"])):
+        for track_name, group in groupby(filtered, key=lambda t: t["track_name"]):
             takes_for_song = list(group)
-            song_iid = f"song{song_index}"
             plural = "" if len(takes_for_song) == 1 else "s"
-            self.tree.insert(
-                "", "end", iid=song_iid, open=True,
-                text=f"{track_name}  ({len(takes_for_song)} take{plural})",
-            )
-            for take_index, take in enumerate(takes_for_song):
-                take_iid = f"{song_iid}:take{take_index}"
-                self._take_by_iid[take_iid] = take
-                self.tree.insert(
-                    song_iid, "end", iid=take_iid, text=take["instrument"],
-                    values=(
-                        take["take_number"], _format_time_ago(take.get("recorded_at")),
-                        "Yes" if take["has_video"] else "",
-                    ),
-                    tags=(label_tag(take["instrument"]),),
-                )
+            ttk.Label(
+                self.content, text=f"{track_name}  ({len(takes_for_song)} take{plural})",
+                font=("TkDefaultFont", 11, "bold"),
+            ).pack(anchor="w", pady=(10, 2))
+            for take in takes_for_song:
+                self._build_take_row(take)
+
+        self._bind_mousewheel(self._canvas)
+
+    def _build_take_row(self, take: dict) -> None:
+        row = ttk.Frame(self.content)
+        row.pack(fill="x", padx=(16, 0), pady=1)
+        make_label_badge(row, take["instrument"]).pack(side="left", padx=(0, 8))
+        ttk.Label(row, text=f"take {take['take_number']}", width=10).pack(side="left")
+        ttk.Label(row, text=_format_time_ago(take.get("recorded_at")), foreground="#666666", width=10).pack(
+            side="left"
+        )
+        ttk.Label(row, text="video" if take["has_video"] else "", foreground="#666666", width=6).pack(side="left")
+        self._build_play_controls(row, take)
+
+    def _build_play_controls(self, row: ttk.Frame, take: dict) -> None:
+        status_var = tk.StringVar(value="")
+        ttk.Button(row, text="▶ Play", command=lambda: self._on_play_take(take, status_var)).pack(
+            side="left", padx=(8, 4)
+        )
+        ttk.Label(row, textvariable=status_var, foreground="#666666").pack(side="left")
 
     # --- play ---
 
-    def _on_play_selected(self) -> None:
-        selection = self.tree.selection()
-        if not selection:
-            return
-        take = self._take_by_iid.get(selection[0])
-        if take is None:
-            return  # a song-level grouping row was selected/double-clicked, not an actual take
+    def _on_play_take(self, take: dict, status_var: tk.StringVar) -> None:
         if not self._play_project:
+            status_var.set("")
             messagebox.showerror("Could not play take", "No project available to locate the vault.")
             return
-        self.status_var.set("Loading...")
+        status_var.set("Loading...")
         backend = self.app_state.backend
         self._run_backend(
             lambda: backend.play_take(self._play_project, take["filename"], take["instrument"]),
-            self._on_play_result,
+            lambda _result, error: self._on_play_result(status_var, error),
         )
 
-    def _on_play_result(self, _result: object, error: str | None) -> None:
+    def _on_play_result(self, status_var: tk.StringVar, error: str | None) -> None:
         if not self.winfo_exists():
             return
-        self.status_var.set("")
+        status_var.set("")
         if error:
             messagebox.showerror("Could not play take", error)

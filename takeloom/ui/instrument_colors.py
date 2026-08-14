@@ -10,12 +10,17 @@ anywhere a label is only a word inside a longer sentence rather than its
 own standalone element (e.g. record.py's "Detected (label — full_name)"
 status line) — there's no clean way to color one word out of a plain
 Label's text.
-"""
+
+Always a plain tk.Label badge (make_label_badge below), never a
+ttk.Treeview row tag — a Treeview can only color a whole row via tags,
+not one cell's text on its own, and the point of a badge is specifically
+to color just the label text, not everything next to it (see
+completed_takes.py's module docstring, which used to use Treeview row
+tags here before switching to plain widgets for exactly this reason)."""
 
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk
 
 # One fixed color per current label (config.py's INSTRUMENT_LABELS) —
 # same color family for labels of the same rough instrument type (the
@@ -52,29 +57,3 @@ def make_label_badge(master: tk.Misc, label: str, font_size: int = 9, padx: int 
         master, text=label, font=("TkDefaultFont", font_size, "bold"),
         bg=color_for_label(label), fg="white", padx=padx, pady=pady,
     )
-
-
-def configure_label_tags(tree: ttk.Treeview, font_size: int = 10) -> None:
-    """Register one Treeview tag per known label (tag name == the label
-    itself), styled the same badge way (colored background, bold white
-    text) — unlike a plain tk.Label, a Treeview row's color can only be
-    set via tag_configure, applied to the whole row rather than one
-    cell. Confirmed (unlike ttk.Frame/Label background styling — see
-    make_label_badge) that Treeview tag backgrounds *do* render under
-    Aqua. Call once after creating `tree`; callers then pass
-    tags=(label,) to insert() for any row that should be colored by
-    label — an unrecognized tag (nothing configured) just falls back to
-    the Treeview's normal, unstyled row."""
-    for label, color in _LABEL_COLORS.items():
-        tree.tag_configure(label, background=color, foreground="white", font=("TkDefaultFont", font_size, "bold"))
-    tree.tag_configure(
-        "_unknown_label", background=_FALLBACK_COLOR, foreground="white", font=("TkDefaultFont", font_size, "bold"),
-    )
-
-
-def label_tag(label: str) -> str:
-    """The tag name to pass to a Treeview row's tags=(...,) for `label`
-    — configure_label_tags() must have been called on that tree first.
-    Falls back to the shared "unknown label" tag for anything outside
-    today's INSTRUMENT_LABELS, same reasoning as color_for_label."""
-    return label if label in _LABEL_COLORS else "_unknown_label"
