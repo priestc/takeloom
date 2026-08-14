@@ -31,6 +31,7 @@ from ..audio.filters import COMPRESSOR_PRESETS, CompressorSettings
 from ..backend import BackendError
 from ..config import INSTRUMENT_LABELS, Instrument, InputLabel, StudioConfig
 from .app_state import AppState
+from .instrument_colors import make_label_badge
 
 FIELDS = [
     ("studio_name", "Studio name"),
@@ -210,7 +211,7 @@ class _CompressorRow:
         self.ratio_var = tk.DoubleVar(value=settings.ratio)
         self.makeup_var = tk.DoubleVar(value=settings.makeup_gain_db)
 
-        ttk.Label(table, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=2)
+        make_label_badge(table, label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=2)
 
         self.enabled_check = ttk.Checkbutton(table, variable=self.enabled_var, command=self._on_enabled_change)
         self.enabled_check.grid(row=row, column=1, padx=(0, 8))

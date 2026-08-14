@@ -30,6 +30,7 @@ from tkinter import messagebox, ttk
 
 from ..audio.instrument_classifier import STATS_MAX_HZ, STATS_MIN_HZ
 from ..backend import BackendError, LocalBackend
+from .instrument_colors import make_label_badge
 from .platform_style import normalize as normalize_platform_style
 
 _BG = "#ffffff"
@@ -62,13 +63,21 @@ class _InstrumentIndicator(tk.Frame):
             self, text=full_name or "(unnamed)", font=("TkDefaultFont", 13, "bold"), bg=_BG, anchor="w",
         ).grid(row=0, column=1, sticky="w", padx=(0, 12), pady=(8, 0))
 
-        detail = (
-            f"label: {label or '—'}    input: {input_label or '—'}    musician: {musician or '—'}    "
-            f"range: {_fmt_hz(freq_min_hz)}\N{EN DASH}{_fmt_hz(freq_max_hz)} Hz"
-        )
+        detail_row = tk.Frame(self, bg=_BG)
+        detail_row.grid(row=1, column=1, sticky="w", padx=(0, 12), pady=(0, 8))
+        tk.Label(detail_row, text="label: ", font=("TkDefaultFont", 10), bg=_BG, fg="#666666").pack(side="left")
+        if label:
+            make_label_badge(detail_row, label, font_size=9, padx=4, pady=0).pack(side="left")
+        else:
+            tk.Label(detail_row, text="—", font=("TkDefaultFont", 10), bg=_BG, fg="#666666").pack(side="left")
         tk.Label(
-            self, text=detail, font=("TkDefaultFont", 10), bg=_BG, fg="#666666", anchor="w",
-        ).grid(row=1, column=1, sticky="w", padx=(0, 12), pady=(0, 8))
+            detail_row,
+            text=(
+                f"    input: {input_label or '—'}    musician: {musician or '—'}    "
+                f"range: {_fmt_hz(freq_min_hz)}\N{EN DASH}{_fmt_hz(freq_max_hz)} Hz"
+            ),
+            font=("TkDefaultFont", 10), bg=_BG, fg="#666666",
+        ).pack(side="left")
 
         self.columnconfigure(1, weight=1)
 

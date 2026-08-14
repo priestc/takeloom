@@ -46,6 +46,7 @@ from tkinter import messagebox, ttk
 from ..backend import BackendError
 from ..config import INSTRUMENT_LABELS, StudioConfig
 from .app_state import AppState
+from .instrument_colors import make_label_badge
 
 
 class SessionsFrame(ttk.Frame):
@@ -238,12 +239,14 @@ class SessionsFrame(ttk.Frame):
         row = ttk.Frame(self.detail_frame)
         row.pack(fill="x", pady=1)
         ttk.Label(row, text="", width=28).pack(side="left")  # aligns under the track name above
-        # Label called out as its own bold label, not just bracketed into
-        # the filename text below it — the filename usually repeats it
-        # too, but this is what actually answers "what was this filed
+        # Label called out as its own colored badge, not just bracketed
+        # into the filename text below it — the filename usually repeats
+        # it too, but this is what actually answers "what was this filed
         # under" at a glance, including for a take pulled in from a
-        # filter-slot draw's shared inspiration-take index.
-        ttk.Label(row, text=old_instrument, font=("TkDefaultFont", 9, "bold")).pack(side="left", padx=(0, 6))
+        # filter-slot draw's shared inspiration-take index — and the
+        # same color for a given label everywhere it's shown (see
+        # instrument_colors.py) makes it a fast visual scan across rows.
+        make_label_badge(row, old_instrument).pack(side="left", padx=(0, 6))
         ttk.Label(row, text=take["filename"], foreground="#666666").pack(side="left", padx=(0, 8))
         self._build_play_controls(row, project_name, take["filename"], old_instrument)
         # Default the target to whatever label isn't this take's own —

@@ -32,6 +32,7 @@ from ..backend import BackendError
 from ..config import StudioConfig
 from ..inspiration import build_inspiration_track_entry
 from .app_state import AppState
+from .instrument_colors import configure_label_tags, label_tag
 
 
 def _format_time_ago(recorded_at: float | None) -> str:
@@ -166,6 +167,7 @@ class CompletedTakesFrame(ttk.Frame):
         self.tree.column("take", width=60, anchor="center")
         self.tree.column("recorded", width=100, anchor="center")
         self.tree.column("video", width=60, anchor="center")
+        configure_label_tags(self.tree)
         self.tree.pack(side="left", fill="both", expand=True)
         scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
@@ -214,6 +216,7 @@ class CompletedTakesFrame(ttk.Frame):
                         take["take_number"], _format_time_ago(take.get("recorded_at")),
                         "Yes" if take["has_video"] else "",
                     ),
+                    tags=(label_tag(take["instrument"]),),
                 )
 
     # --- play ---
