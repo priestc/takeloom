@@ -2,29 +2,62 @@
 — not scoped to one session or project, unlike the Sessions tab (see
 backend.py's list_completed_takes for exactly what's gathered and why).
 
-A title filter narrows by track name; "Filter by this project" further
-narrows to only takes whose track name is currently in the loaded
-project's own setlist (config.last_selected_project) — the same project
-the Record tab has open. An ordinary track matches by its own name
-directly; a filter slot has no single fixed song of its own, so it
-matches by every song currently in its cached_matches (see project.py's
-TrackEntry and backend.py's get_filter_slot_previews) — the same cached
-list the Record tab's Setlist panel shows "next up" from, not a fresh
-inspiration-server query. A filter slot never yet opened in the Record
-tab (empty cache) contributes no songs here, same as it shows nothing
-"next up" there either.
+Takes are grouped by song: one expandable row per track name, with each
+instrument's take nested underneath it (native ttk.Treeview hierarchy) —
+takes["track_name"] is already the group key list_completed_takes sorts
+by, so grouping here is just a consecutive-run split, not a re-sort.
+
+A title filter narrows by track name (whole song groups shown/hidden
+together); "Filter by this project" further narrows to only songs
+currently in the loaded project's own setlist (config.last_selected_
+project) — the same project the Record tab has open. An ordinary track
+matches by its own name directly; a filter slot has no single fixed song
+of its own, so it matches by every song currently in its cached_matches
+(see project.py's TrackEntry and backend.py's get_filter_slot_previews)
+— the same cached list the Record tab's Setlist panel shows "next up"
+from, not a fresh inspiration-server query. A filter slot never yet
+opened in the Record tab (empty cache) contributes no songs here, same
+as it shows nothing "next up" there either.
 """
 
 from __future__ import annotations
 
 import threading
+import time
 import tkinter as tk
+from itertools import groupby
 from tkinter import messagebox, ttk
 
 from ..backend import BackendError
 from ..config import StudioConfig
 from ..inspiration import build_inspiration_track_entry
 from .app_state import AppState
+
+
+def _format_time_ago(recorded_at: float | None) -> str:
+    """"3h ago"/"5d ago"-style relative time, or "—" when recorded_at is
+    None (the take file isn't on local disk right now — see backend.py's
+    list_completed_takes docstring for why there's nothing better to
+    show in that case)."""
+    if recorded_at is None:
+        return "—"
+    delta = time.time() - recorded_at
+    if delta < 60:
+        return "just now"
+    minutes = delta / 60
+    if minutes < 60:
+        return f"{int(minutes)}m ago"
+    hours = minutes / 60
+    if hours < 24:
+        return f"{int(hours)}h ago"
+    days = hours / 24
+    if days < 30:
+        return f"{int(days)}d ago"
+    months = days / 30.44
+    if months < 12:
+        return f"{int(months)}mo ago"
+    years = days / 365.25
+    return f"{int(years)}y ago"
 
 
 class CompletedTakesFrame(ttk.Frame):
@@ -36,6 +69,7 @@ class CompletedTakesFrame(ttk.Frame):
         self._play_project: str = ""  # any project name — only used to resolve the (shared) vault path
         self._current_project: str = ""
         self._current_track_names: set[str] = set()
+        self._take_by_iid: dict[str, dict] = {}
 
         ttk.Label(self, text="Loading...").pack(anchor="w")
         self._load()
@@ -96,7 +130,7 @@ class CompletedTakesFrame(ttk.Frame):
         ttk.Label(self, text="Completed Takes", font=("TkDefaultFont", 14, "bold")).pack(anchor="w", pady=(0, 4))
         ttk.Label(
             self,
-            text="Every completed take across the whole vault, not just one project or session.",
+            text="Every completed take across the whole vault, not just one project or session — grouped by song.",
             foreground="#666666", wraplength=760, justify="left",
         ).pack(anchor="w", pady=(0, 12))
 
@@ -121,16 +155,16 @@ class CompletedTakesFrame(ttk.Frame):
         tree_frame = ttk.Frame(self)
         tree_frame.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(
-            tree_frame, columns=("track", "instrument", "take", "video"),
-            show="headings", height=18, selectmode="browse",
+            tree_frame, columns=("take", "recorded", "video"),
+            show="tree headings", height=18, selectmode="browse",
         )
-        self.tree.heading("track", text="Track")
-        self.tree.heading("instrument", text="Instrument")
+        self.tree.heading("#0", text="Song / Instrument")
         self.tree.heading("take", text="Take #")
+        self.tree.heading("recorded", text="Recorded")
         self.tree.heading("video", text="Video")
-        self.tree.column("track", width=420)
-        self.tree.column("instrument", width=140)
+        self.tree.column("#0", width=420)
         self.tree.column("take", width=60, anchor="center")
+        self.tree.column("recorded", width=100, anchor="center")
         self.tree.column("video", width=60, anchor="center")
         self.tree.pack(side="left", fill="both", expand=True)
         scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
@@ -144,7 +178,6 @@ class CompletedTakesFrame(ttk.Frame):
         self.status_var = tk.StringVar(value="")
         ttk.Label(play_row, textvariable=self.status_var, foreground="#666666").pack(side="left", padx=(8, 0))
 
-        self._filtered: list[dict] = []
         self._apply_filter()
 
     # --- filtering ---
@@ -152,16 +185,36 @@ class CompletedTakesFrame(ttk.Frame):
     def _apply_filter(self) -> None:
         title = self.title_var.get().strip().lower()
         project_only = self.project_only_var.get()
-        self._filtered = [
+        filtered = [
             take for take in self._takes
             if (not title or title in take["track_name"].lower())
             and (not project_only or take["track_name"] in self._current_track_names)
         ]
+
         self.tree.delete(*self.tree.get_children())
-        for i, take in enumerate(self._filtered):
-            self.tree.insert("", "end", iid=str(i), values=(
-                take["track_name"], take["instrument"], take["take_number"], "Yes" if take["has_video"] else "",
-            ))
+        self._take_by_iid = {}
+        # self._takes is already sorted by track_name (see backend.py's
+        # list_completed_takes) and filtering above preserves order, so
+        # groupby's usual "only groups consecutive runs" caveat doesn't
+        # apply here — every take for a given song is already adjacent.
+        for song_index, (track_name, group) in enumerate(groupby(filtered, key=lambda t: t["track_name"])):
+            takes_for_song = list(group)
+            song_iid = f"song{song_index}"
+            plural = "" if len(takes_for_song) == 1 else "s"
+            self.tree.insert(
+                "", "end", iid=song_iid, open=True,
+                text=f"{track_name}  ({len(takes_for_song)} take{plural})",
+            )
+            for take_index, take in enumerate(takes_for_song):
+                take_iid = f"{song_iid}:take{take_index}"
+                self._take_by_iid[take_iid] = take
+                self.tree.insert(
+                    song_iid, "end", iid=take_iid, text=take["instrument"],
+                    values=(
+                        take["take_number"], _format_time_ago(take.get("recorded_at")),
+                        "Yes" if take["has_video"] else "",
+                    ),
+                )
 
     # --- play ---
 
@@ -169,7 +222,9 @@ class CompletedTakesFrame(ttk.Frame):
         selection = self.tree.selection()
         if not selection:
             return
-        take = self._filtered[int(selection[0])]
+        take = self._take_by_iid.get(selection[0])
+        if take is None:
+            return  # a song-level grouping row was selected/double-clicked, not an actual take
         if not self._play_project:
             messagebox.showerror("Could not play take", "No project available to locate the vault.")
             return

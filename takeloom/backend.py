@@ -401,11 +401,23 @@ class Backend(ABC):
         non-filter inspiration-sourced track's take is written to both.
         Each dict: {"track_name": str, "instrument": str (a label),
         "filename": str, "take_number": int, "has_video": bool,
-        "volume": float}, sorted by track_name. A take superseded by a
-        later reassign_take/re-record no longer appears here, same as
-        it wouldn't in any project's setlist — this reflects each
-        track+label's *current* take, not every file ever written to
-        completed_takes/."""
+        "volume": float, "recorded_at": float | None}, sorted by
+        track_name. A take superseded by a later reassign_take/re-record
+        no longer appears here, same as it wouldn't in any project's
+        setlist — this reflects each track+label's *current* take, not
+        every file ever written to completed_takes/.
+
+        recorded_at is the take file's own filesystem mtime (a Unix
+        timestamp), or None if it isn't on local disk right now (e.g.
+        pruned under "remote" vault mode) — there's no dedicated "when
+        was this actually recorded" field tracked anywhere else, and
+        deriving it would mean either a network round trip per take just
+        to list them (unacceptable for what's otherwise a fast, local-
+        only read) or reconstructing it from session history, which
+        predates plenty of existing takes anyway. mtime survives a
+        reassign_take rename (same-filesystem renames don't touch it),
+        so this stays meaningful even for a take that's been re-filed
+        under a different label since it was recorded."""
         ...
 
     # --- inspiration ---
@@ -1854,12 +1866,18 @@ class LocalBackend(Backend):
     def list_completed_takes(self) -> list[dict]:
         config = self.get_config()
         vault_root = Path(config.session_vault_path)
+        completed_dir = vault_root / "completed_takes"
         by_filename: dict[str, dict] = {}
 
         def add(track_name: str, label: str, take: TakeInfo) -> None:
+            try:
+                recorded_at = (completed_dir / take.filename).stat().st_mtime
+            except OSError:
+                recorded_at = None
             by_filename[take.filename] = {
                 "track_name": track_name, "instrument": label, "filename": take.filename,
                 "take_number": take.take_number, "has_video": take.has_video, "volume": take.volume,
+                "recorded_at": recorded_at,
             }
 
         for path in Project.list_projects(Path(config.projects_dir)):
