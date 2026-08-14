@@ -98,3 +98,33 @@ class Compressor:
         # clip rather than let it overflow into the recorded file/monitor mix.
         np.clip(out, -1.0, 1.0, out=out)
         return out
+
+
+def apply_compressor(data: np.ndarray, sample_rate: int, settings: CompressorSettings) -> np.ndarray:
+    """Run every channel of `data` (shape (N, channels)) through a fresh
+    Compressor, independently per channel — for offline (whole-file-at-
+    once, non-realtime) use, unlike AudioEngine's own per-block streaming
+    use of Compressor.process(). Feeding an entire array through one
+    process() call is mathematically identical to many small sequential
+    calls (same recursive envelope update either way), so this is exact,
+    not an approximation.
+
+    A stereo array that started life as a mono take duplicated into two
+    identical channels (see mixer.py's Mixer.add_source) still comes out
+    with both channels identical, since Compressor.process is a pure
+    function of its input and gets the same input on both channels here.
+
+    Used by Mixer.add_source (an "other instrument's take" layered into a
+    live session's monitor mix) and backend.py's play_take (a take opened
+    from the Sessions/Completed Takes tab) — the two places a previously-
+    recorded take actually gets listened to "from within takeloom" per
+    that label's own settings, as opposed to the take's file on disk,
+    which AudioEngine always writes raw/uncompressed regardless of this.
+    Returns `data` unchanged if settings.enabled is False — no reason to
+    allocate a copy nobody asked for."""
+    if not settings.enabled:
+        return data
+    out = np.empty_like(data)
+    for ch in range(data.shape[1]):
+        out[:, ch:ch + 1] = Compressor(sample_rate, settings).process(data[:, ch:ch + 1])
+    return out

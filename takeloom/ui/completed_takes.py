@@ -176,7 +176,7 @@ class CompletedTakesFrame(ttk.Frame):
         self.status_var.set("Loading...")
         backend = self.app_state.backend
         self._run_backend(
-            lambda: backend.play_take(self._play_project, take["filename"]),
+            lambda: backend.play_take(self._play_project, take["filename"], take["instrument"]),
             self._on_play_result,
         )
 

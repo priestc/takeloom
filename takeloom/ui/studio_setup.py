@@ -23,9 +23,11 @@ from __future__ import annotations
 
 import threading
 import tkinter as tk
+from dataclasses import asdict
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from ..audio.filters import COMPRESSOR_PRESETS, CompressorSettings
 from ..backend import BackendError
 from ..config import INSTRUMENT_LABELS, Instrument, InputLabel, StudioConfig
 from .app_state import AppState
@@ -178,6 +180,100 @@ class _InstrumentRow:
             return 0.0
 
 
+class _CompressorRow:
+    """One instrument label's compressor settings row, in the Compressor
+    table — always one row per INSTRUMENT_LABELS entry, all 7, regardless
+    of how many (if any) currently-configured instruments actually use
+    that label. Keyed by label (not by which specific Instrument/
+    full_name), matching how takes are actually filed and played back —
+    see config.py's StudioConfig.compressor_for_label and backend.py's
+    play_take: two instruments sharing a label share these same settings.
+    A recorded take file itself is always raw on disk no matter what's
+    set here — this only ever shapes what's actually heard, live or on
+    playback (see AudioEngine._callback/Mixer.add_source/backend.py's
+    play_take).
+
+    attack_ms/release_ms aren't exposed as their own controls (yet) —
+    carried through unchanged from whatever's already in config, same as
+    the Record-tab version this replaced, so picking a preset (which does
+    set them) doesn't get silently overwritten by fields with no control
+    of their own."""
+
+    def __init__(self, table: ttk.Frame, row: int, label: str, settings: CompressorSettings) -> None:
+        self.label = label
+        self._attack_ms = settings.attack_ms
+        self._release_ms = settings.release_ms
+
+        self.enabled_var = tk.BooleanVar(value=settings.enabled)
+        self.preset_var = tk.StringVar(value="")
+        self.threshold_var = tk.DoubleVar(value=settings.threshold_db)
+        self.ratio_var = tk.DoubleVar(value=settings.ratio)
+        self.makeup_var = tk.DoubleVar(value=settings.makeup_gain_db)
+
+        ttk.Label(table, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=2)
+
+        self.enabled_check = ttk.Checkbutton(table, variable=self.enabled_var, command=self._on_enabled_change)
+        self.enabled_check.grid(row=row, column=1, padx=(0, 8))
+
+        self.preset_combo = ttk.Combobox(
+            table, textvariable=self.preset_var, values=list(COMPRESSOR_PRESETS.keys()),
+            state="readonly", width=16,
+        )
+        self.preset_combo.grid(row=row, column=2, padx=(0, 8))
+        self.preset_combo.bind("<<ComboboxSelected>>", self._on_preset_selected)
+
+        self.threshold_spin = ttk.Spinbox(
+            table, from_=-60, to=0, increment=1, width=6, textvariable=self.threshold_var,
+        )
+        self.threshold_spin.grid(row=row, column=3, padx=(0, 6))
+
+        self.ratio_spin = ttk.Spinbox(table, from_=1, to=20, increment=0.5, width=6, textvariable=self.ratio_var)
+        self.ratio_spin.grid(row=row, column=4, padx=(0, 6))
+
+        self.makeup_spin = ttk.Spinbox(table, from_=0, to=24, increment=0.5, width=6, textvariable=self.makeup_var)
+        self.makeup_spin.grid(row=row, column=5, padx=(0, 6))
+
+        self._set_controls_enabled(settings.enabled)
+
+    def _set_controls_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        self.threshold_spin.configure(state=state)
+        self.ratio_spin.configure(state=state)
+        self.makeup_spin.configure(state=state)
+
+    def _on_enabled_change(self) -> None:
+        self._set_controls_enabled(self.enabled_var.get())
+
+    def _on_preset_selected(self, _event: object = None) -> None:
+        preset = COMPRESSOR_PRESETS.get(self.preset_var.get())
+        if preset is None:
+            return
+        # Picking a preset both fills in the numbers and turns the
+        # compressor on — selecting one only to have it silently stay
+        # disabled would be a confusing dead click.
+        self.enabled_var.set(preset.enabled)
+        self.threshold_var.set(preset.threshold_db)
+        self.ratio_var.set(preset.ratio)
+        self.makeup_var.set(preset.makeup_gain_db)
+        self._attack_ms = preset.attack_ms
+        self._release_ms = preset.release_ms
+        self._set_controls_enabled(preset.enabled)
+
+    def to_settings(self) -> CompressorSettings:
+        try:
+            threshold_db = self.threshold_var.get()
+            ratio = self.ratio_var.get()
+            makeup_gain_db = self.makeup_var.get()
+        except tk.TclError:
+            # A spinbox is mid-edit with invalid/empty text — fall back to
+            # whatever was last valid rather than raising out of Save.
+            threshold_db, ratio, makeup_gain_db = -24.0, 4.0, 0.0
+        return CompressorSettings(
+            enabled=self.enabled_var.get(), threshold_db=threshold_db, ratio=ratio,
+            attack_ms=self._attack_ms, release_ms=self._release_ms, makeup_gain_db=makeup_gain_db,
+        )
+
+
 class StudioSetupFrame(ttk.Frame):
     """Form for studio identity, input labels, and instrument assignment."""
 
@@ -190,6 +286,7 @@ class StudioSetupFrame(ttk.Frame):
         self._vars: dict[str, tk.StringVar] = {}
         self._input_rows: list[_InputRow] = []
         self._instrument_rows: list[_InstrumentRow] = []
+        self._compressor_rows: list[_CompressorRow] = []
 
         self.bind("<Destroy>", self._on_destroy)
 
@@ -315,6 +412,7 @@ class StudioSetupFrame(ttk.Frame):
             child.destroy()
         self._input_rows = []
         self._instrument_rows = []
+        self._compressor_rows = []
         if error or config is None:
             ttk.Label(
                 self.content, text=error or "Could not load configuration.", foreground="#b00020",
@@ -347,6 +445,7 @@ class StudioSetupFrame(ttk.Frame):
         row = self._build_vault_section(row)
         row = self._build_input_labels(row)
         row = self._build_instruments(row)
+        row = self._build_compressor_section(row)
 
         # status_var/save_button themselves live in the fixed footer (see
         # _build_footer) — just enabling it here, now that there's an
@@ -527,6 +626,39 @@ class StudioSetupFrame(ttk.Frame):
         row += 1
         return row
 
+    def _build_compressor_section(self, row: int) -> int:
+        ttk.Separator(self.content, orient="horizontal").grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
+        row += 1
+
+        ttk.Label(self.content, text="Compressor", font=("TkDefaultFont", 11, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w"
+        )
+        row += 1
+
+        ttk.Label(
+            self.content,
+            text="Per instrument label, not per specific instrument — a Stratocaster and a Telecaster "
+                 "both sharing \"electric-guitar\" share one set of settings here too, the same way they "
+                 "share one take-number sequence. Recorded takes are always stored raw; this only shapes "
+                 "what's actually heard, live while recording or on playback (Sessions/Completed Takes' "
+                 "Play button).",
+            foreground="#666666", wraplength=760, justify="left",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(2, 6))
+        row += 1
+
+        table = ttk.Frame(self.content)
+        table.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        row += 1
+
+        for col, text in enumerate(["Label", "On", "Preset", "Threshold (dB)", "Ratio", "Makeup (dB)"]):
+            ttk.Label(table, text=text).grid(row=0, column=col, sticky="w", padx=(0, 6))
+
+        for i, label in enumerate(INSTRUMENT_LABELS, start=1):
+            settings = self.config_obj.compressor_for_label(label)
+            self._compressor_rows.append(_CompressorRow(table, i, label, settings))
+
+        return row
+
     def _current_input_label_names(self) -> list[str]:
         return [name for row in self._input_rows if (name := row.label_var.get().strip())]
 
@@ -571,6 +703,7 @@ class StudioSetupFrame(ttk.Frame):
                 break
         self.config_obj.input_labels = [il for row in self._input_rows if (il := row.to_input_label())]
         self.config_obj.instruments = [inst for row in self._instrument_rows if (inst := row.to_instrument())]
+        self.config_obj.compressor_settings = {row.label: row.to_settings() for row in self._compressor_rows}
 
         errors = self.config_obj.validate()
         if errors:
@@ -579,11 +712,21 @@ class StudioSetupFrame(ttk.Frame):
 
         backend = self.app_state.backend
         config = self.config_obj
+        compressor_settings = dict(config.compressor_settings)
         self.save_button.state(["disabled"])
 
         def worker() -> None:
             try:
                 backend.save_config(config)
+                # save_config alone persists everything, including this —
+                # these extra calls are purely so a compressor tweak takes
+                # effect immediately on a currently-running engine (see
+                # Backend.set_compressor_settings), the one field here
+                # that can matter to something already live in the
+                # background (the Record tab's persistent engine) while
+                # this tab is open.
+                for label, settings in compressor_settings.items():
+                    backend.set_compressor_settings(label, asdict(settings))
                 error = None
             except BackendError as e:
                 error = str(e)

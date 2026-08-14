@@ -135,10 +135,8 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
     if op == "adjust_instrument_volume":
         backend.adjust_instrument_volume(args["delta"])
         return {}
-    if op == "get_compressor_settings":
-        return {"settings": backend.get_compressor_settings()}
     if op == "set_compressor_settings":
-        backend.set_compressor_settings(args["settings"])
+        backend.set_compressor_settings(args["label"], args["settings"])
         return {}
     if op == "get_monitoring_mode":
         return {"mode": backend.get_monitoring_mode()}

@@ -366,7 +366,7 @@ class Backend(ABC):
         ...
 
     @abstractmethod
-    def play_take(self, project_name: str, filename: str) -> None:
+    def play_take(self, project_name: str, filename: str, label: str) -> None:
         """Open a specific take file (see ensure_take_local for what
         `filename` means and the local-availability guarantee this gives
         first) in the OS's default player, on whichever machine the
@@ -374,7 +374,17 @@ class Backend(ABC):
         can call this identically whether app_state.backend is local or
         a Remote connection, and it Just Plays on the right machine
         either way, unlike ensure_take_local. Raises BackendError under
-        the same conditions ensure_take_local does."""
+        the same conditions ensure_take_local does.
+
+        `label` is the take's own instrument label (e.g. a Sessions-tab
+        take row's `take["instrument"]`, or a Completed Takes row's
+        `take["instrument"]`) — the take file itself is always raw on
+        disk (see AudioEngine._callback), so if that label's compressor
+        (StudioConfig.compressor_for_label) is enabled, this processes a
+        scratch temp copy through it (see audio.filters.apply_compressor)
+        before opening *that*, leaving the original file untouched. Plays
+        the original directly, no temp copy, if that label's compressor
+        is disabled."""
         ...
 
     @abstractmethod
@@ -502,17 +512,19 @@ class Backend(ABC):
     # --- audio filters (compressor now, more later) ---
 
     @abstractmethod
-    def get_compressor_settings(self) -> dict:
-        """Current compressor settings (enabled + threshold/ratio/attack/
-        release/makeup gain), applied to the instrument input before it's
-        recorded or monitored."""
-        ...
-
-    @abstractmethod
-    def set_compressor_settings(self, settings: dict) -> None:
-        """Update compressor settings — persisted for next time, and applied
-        immediately to whatever recording/video-check/session engine is
-        currently running (mirrors adjust_backing_volume/adjust_takes_volume)."""
+    def set_compressor_settings(self, label: str, settings: dict) -> None:
+        """Update `label`'s compressor settings (one of INSTRUMENT_LABELS,
+        not a particular Instrument's full_name — see StudioConfig.
+        compressor_for_label, which is how everything else reads them
+        back, including get_config() itself; there's no dedicated getter)
+        — persisted for next time, and applied immediately to a
+        currently-running recording/video-check/session engine *if* it's
+        currently open for an instrument sharing this exact label (mirrors
+        adjust_backing_volume/adjust_takes_volume for how "immediately"
+        works here). Has no live effect on an "other instrument's take"
+        already layered into a running session's monitor mix — those were
+        compressed once, offline, at load time (see Mixer.add_source) —
+        only takes effect the next time that track is loaded."""
         ...
 
     # --- live monitoring mode (Record page headphone mix) ---
@@ -1123,6 +1135,28 @@ class _ActiveAutoDetect:
     stop_event: threading.Event
 
 
+def _compressed_playback_path(path: Path, settings: CompressorSettings) -> Path:
+    """If `settings` is enabled, run `path`'s audio through the compressor
+    and write the result to a scratch temp copy, returning that instead of
+    `path` — shared by LocalBackend.play_take and RemoteBackend.play_take
+    so a completed take's own file on disk always stays exactly what
+    AudioEngine captured (raw), while anything actually listened to
+    through a takeloom player reflects that take's current instrument-
+    label compressor settings, looked up fresh each time rather than
+    whatever was true the day it was recorded. Returns `path` unchanged
+    when disabled — no reason to make a redundant copy nobody asked for."""
+    if not settings.enabled:
+        return path
+    from .audio.filters import apply_compressor
+    from .audio.formats import read_audio, write_flac
+    data, sr = read_audio(path)
+    processed = apply_compressor(data, sr, settings)
+    work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_playback")
+    out_path = work_dir / path.name
+    write_flac(out_path, processed, sr)
+    return out_path
+
+
 class LocalBackend(Backend):
     """Direct local implementation — talks to this machine's config, disk,
     and audio/video hardware. Historical RecordFrame behavior, unchanged."""
@@ -1155,31 +1189,12 @@ class LocalBackend(Backend):
         self._backing_volume: int = config.last_backing_volume
         self._takes_volume: int = config.last_takes_volume
         self._instrument_volume: int = config.last_instrument_volume
-        self._compressor_settings = CompressorSettings(
-            enabled=config.compressor_enabled,
-            threshold_db=config.compressor_threshold_db,
-            ratio=config.compressor_ratio,
-            attack_ms=config.compressor_attack_ms,
-            release_ms=config.compressor_release_ms,
-            makeup_gain_db=config.compressor_makeup_db,
-        )
 
     def _save_last_volumes(self) -> None:
         config = self.get_config()
         config.last_backing_volume = self._backing_volume
         config.last_takes_volume = self._takes_volume
         config.last_instrument_volume = self._instrument_volume
-        config.save(self._config_path)
-
-    def _save_compressor_settings(self) -> None:
-        config = self.get_config()
-        s = self._compressor_settings
-        config.compressor_enabled = s.enabled
-        config.compressor_threshold_db = s.threshold_db
-        config.compressor_ratio = s.ratio
-        config.compressor_attack_ms = s.attack_ms
-        config.compressor_release_ms = s.release_ms
-        config.compressor_makeup_db = s.makeup_gain_db
         config.save(self._config_path)
 
     def _get_active_engine(self):
@@ -1815,10 +1830,12 @@ class LocalBackend(Backend):
             raise BackendError(f"Could not download '{filename}' from {config.backup_server}.")
         return str(local_path)
 
-    def play_take(self, project_name: str, filename: str) -> None:
-        path = self.ensure_take_local(project_name, filename)
+    def play_take(self, project_name: str, filename: str, label: str) -> None:
+        path = Path(self.ensure_take_local(project_name, filename))
+        settings = self.get_config().compressor_for_label(label)
+        play_path = _compressed_playback_path(path, settings)
         from .video.capture import open_in_default_player
-        open_in_default_player(Path(path))
+        open_in_default_player(play_path)
 
     def list_completed_takes(self) -> list[dict]:
         config = self.get_config()
@@ -1951,16 +1968,15 @@ class LocalBackend(Backend):
 
     # --- audio filters (compressor now, more later) ---
 
-    def get_compressor_settings(self) -> dict:
-        return asdict(self._compressor_settings)
-
-    def set_compressor_settings(self, settings: dict) -> None:
+    def set_compressor_settings(self, label: str, settings: dict) -> None:
         with self._record_lock:
-            self._compressor_settings = CompressorSettings(**settings)
-            self._save_compressor_settings()
-            engine = self._get_active_engine()
-            if engine is not None:
-                engine.set_compressor_settings(self._compressor_settings)
+            config = self.get_config()
+            new_settings = CompressorSettings(**settings)
+            config.compressor_settings[label] = new_settings
+            config.save(self._config_path)
+            engine, inst = self._get_active_engine_and_inst()
+            if engine is not None and inst is not None and inst.label == label:
+                engine.set_compressor_settings(new_settings)
 
     # --- live monitoring mode (Record page headphone mix) ---
 
@@ -2070,7 +2086,7 @@ class LocalBackend(Backend):
                 input_channels=max(input_info.channel, 1),
                 output_channels=max(1, output_channels),
                 monitor_channel=input_info.channel - 1,
-                compressor_settings=self._compressor_settings,
+                compressor_settings=config.compressor_for_label(inst.label),
                 monitor_instrument=self._monitoring_mode == "production",
                 instrument_volume=self._instrument_volume / 100.0,
             )
@@ -2219,7 +2235,10 @@ class LocalBackend(Backend):
             take_path = project.completed_takes_dir / take_info.filename
             if take_path.exists():
                 effective_vol = take_info.volume * (track.takes_volume / 100.0)
-                engine.mixer.add_source(f"take:{other_inst}", take_path, volume=effective_vol, trim_frames=trim)
+                engine.mixer.add_source(
+                    f"take:{other_inst}", take_path, volume=effective_vol, trim_frames=trim,
+                    compressor_settings=config.compressor_for_label(other_inst),
+                )
 
         engine.mixer.reset()
         session.current_track = track
@@ -2637,7 +2656,7 @@ class LocalBackend(Backend):
                 input_channels=max(input_info.channel, 1),
                 output_channels=max(1, output_channels),
                 monitor_channel=input_info.channel - 1,
-                compressor_settings=self._compressor_settings,
+                compressor_settings=config.compressor_for_label(inst.label),
             )
             if play_metronome:
                 engine.mixer.add_source("metronome", metronome_wav)
@@ -2765,7 +2784,7 @@ class LocalBackend(Backend):
             sample_rate=config.sample_rate, buffer_size=config.buffer_size,
             input_device=in_dev, output_device=out_dev,
             input_channels=max(input_info.channel, 1), output_channels=max(1, output_channels),
-            monitor_channel=input_info.channel - 1, compressor_settings=self._compressor_settings,
+            monitor_channel=input_info.channel - 1, compressor_settings=config.compressor_for_label(inst.label),
         )
         engine.start()
         return inst, engine
@@ -3213,7 +3232,7 @@ class LocalBackend(Backend):
                 input_channels=max(input_info.channel, 1),
                 output_channels=max(1, output_channels),
                 monitor_channel=input_info.channel - 1,
-                compressor_settings=self._compressor_settings,
+                compressor_settings=config.compressor_for_label(inst.label),
                 # Video Check is played the same way a real take is, so it
                 # always runs Recording Monitoring (zero-latency hardware
                 # direct monitor for the instrument) regardless of whatever
@@ -3233,7 +3252,10 @@ class LocalBackend(Backend):
                 take_path = project.completed_takes_dir / take_info.filename
                 if take_path.exists():
                     effective_vol = take_info.volume * (self._takes_volume / 100.0)
-                    engine.mixer.add_source(f"take:{other_inst}", take_path, volume=effective_vol, trim_frames=trim)
+                    engine.mixer.add_source(
+                        f"take:{other_inst}", take_path, volume=effective_vol, trim_frames=trim,
+                        compressor_settings=config.compressor_for_label(other_inst),
+                    )
 
             work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_video_check")
             take_path = work_dir / "instrument.flac"
@@ -3472,7 +3494,7 @@ class LocalBackend(Backend):
             input_channels=max(input_info.channel, 1),
             output_channels=max(1, output_channels),
             monitor_channel=input_info.channel - 1,
-            compressor_settings=self._compressor_settings,
+            compressor_settings=config.compressor_for_label(inst.label),
             monitor_instrument=self._monitoring_mode == "production",
             instrument_volume=self._instrument_volume / 100.0,
         )

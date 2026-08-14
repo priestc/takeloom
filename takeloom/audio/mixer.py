@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .filters import CompressorSettings, apply_compressor
 from .formats import read_audio
 
 
@@ -33,17 +34,31 @@ class Mixer:
         self._position: int = 0  # current frame position
         self._playing: bool = False
 
-    def add_source(self, name: str, path: Path, volume: float = 1.0, trim_frames: int = 0) -> None:
+    def add_source(
+        self, name: str, path: Path, volume: float = 1.0, trim_frames: int = 0,
+        compressor_settings: CompressorSettings | None = None,
+    ) -> None:
         """Load an audio file and add it as a mix source.
 
         trim_frames: number of frames to skip from the start (for latency compensation).
-        """
+
+        compressor_settings, if given, is applied once here (offline,
+        whole-file — see filters.apply_compressor) rather than live per
+        block — the source file on disk (e.g. a completed take) always
+        stays raw; this is what makes an "other instrument's take" heard
+        with that take's own instrument-label compressor settings, same
+        as backend.py's play_take, without touching the file itself.
+        Never used for "backing"/"metronome" sources (see backend.py's
+        callers) — only an actual take has an instrument label to look
+        settings up by."""
         data, sr = read_audio(path, self.sample_rate)
         # Ensure stereo
         if data.ndim == 1:
             data = np.column_stack([data, data])
         elif data.shape[1] == 1:
             data = np.column_stack([data[:, 0], data[:, 0]])
+        if compressor_settings is not None:
+            data = apply_compressor(data, sr, compressor_settings)
         original = data
         if trim_frames > 0 and trim_frames < len(data):
             data = data[trim_frames:]

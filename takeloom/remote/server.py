@@ -49,7 +49,7 @@ _READ_ONLY_OPS = {
     "hostname", "get_config", "list_audio_devices", "list_cameras",
     "list_projects", "get_setlist", "get_filter_slot_previews",
     "search_inspiration_artists", "search_inspiration_by_filter",
-    "is_recording", "get_compressor_settings", "get_monitoring_mode",
+    "is_recording", "get_monitoring_mode",
     "list_sessions", "get_session_detail", "analyze_take", "fetch_take_file",
     "list_completed_takes",
 }

@@ -245,7 +245,7 @@ class SessionsFrame(ttk.Frame):
         # filter-slot draw's shared inspiration-take index.
         ttk.Label(row, text=old_instrument, font=("TkDefaultFont", 9, "bold")).pack(side="left", padx=(0, 6))
         ttk.Label(row, text=take["filename"], foreground="#666666").pack(side="left", padx=(0, 8))
-        self._build_play_controls(row, project_name, take["filename"])
+        self._build_play_controls(row, project_name, take["filename"], old_instrument)
         # Default the target to whatever label isn't this take's own —
         # the common case (this whole tab exists for) is a 2-label
         # mix-up, so this is usually already the right answer.
@@ -262,7 +262,7 @@ class SessionsFrame(ttk.Frame):
         ).pack(side="left", padx=(6, 0))
         self._build_analyze_controls(row, session_dir, track_name, old_instrument)
 
-    def _build_play_controls(self, row: ttk.Frame, project_name: str, filename: str) -> None:
+    def _build_play_controls(self, row: ttk.Frame, project_name: str, filename: str, label: str) -> None:
         # Read-only, same spirit as Analyze — opens the take in the OS's
         # default player (backend.py's play_take) rather than anything
         # this tab renders itself. Works identically pointed at local
@@ -271,10 +271,14 @@ class SessionsFrame(ttk.Frame):
         # "remote" vault mode already pruned it — see ensure_take_local),
         # remotely the server does that same local-availability step on
         # its own end and streams the bytes back to actually play here.
+        # `label` (the take's own instrument label — see the bold label
+        # right next to this in _build_take_row) is what play_take looks
+        # its compressor settings up by; the take file itself is always
+        # raw on disk regardless.
         play_var = tk.StringVar(value="")
         ttk.Button(
             row, text="▶ Play",
-            command=lambda: self._on_play_take(project_name, filename, play_var),
+            command=lambda: self._on_play_take(project_name, filename, label, play_var),
         ).pack(side="left", padx=(0, 4))
         ttk.Label(row, textvariable=play_var, foreground="#666666").pack(side="left", padx=(0, 4))
 
@@ -292,7 +296,7 @@ class SessionsFrame(ttk.Frame):
 
     # --- actions ---
 
-    def _on_play_take(self, project_name: str, filename: str, status_var: tk.StringVar) -> None:
+    def _on_play_take(self, project_name: str, filename: str, label: str, status_var: tk.StringVar) -> None:
         # "Loading..." matters most over a Remote connection, where this
         # can mean a real wait — downloading the take from the backup
         # server to the studio machine, then streaming it here (see
@@ -301,7 +305,7 @@ class SessionsFrame(ttk.Frame):
         status_var.set("Loading...")
         backend = self.app_state.backend
         self._run_backend(
-            lambda: backend.play_take(project_name, filename),
+            lambda: backend.play_take(project_name, filename, label),
             lambda _result, error: self._on_play_take_result(status_var, error),
         )
 

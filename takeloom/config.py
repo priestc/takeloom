@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
+from .audio.filters import CompressorSettings
 from .utils import atomic_write_text
 
 DEFAULT_CONFIG_PATH = Path.home() / "studio_config.json"
@@ -155,12 +156,15 @@ class StudioConfig:
     camera_label: str = ""   # human-friendly camera name, for display only
     streamdeck_id: str = ""     # serial number of the selected physical Stream Deck; empty = don't connect to one
     streamdeck_label: str = ""  # human-friendly Stream Deck name, for display only
-    compressor_enabled: bool = False
-    compressor_threshold_db: float = -24.0
-    compressor_ratio: float = 4.0
-    compressor_attack_ms: float = 10.0
-    compressor_release_ms: float = 150.0
-    compressor_makeup_db: float = 0.0
+    # Keyed by instrument *label* (one of INSTRUMENT_LABELS), not by which
+    # specific Instrument/full_name — takes are filed by label (see
+    # project.py's TrackEntry.preferred_takes), and two instruments can
+    # share one label, so there's no other coherent way to know which
+    # settings apply once you're just looking at a stored take. See
+    # compressor_for_label(). Missing a key means "never configured" —
+    # compressor_for_label() falls back to CompressorSettings()'s default
+    # (disabled), not to some other label's settings.
+    compressor_settings: dict[str, CompressorSettings] = field(default_factory=dict)
     streaming_enabled: bool = False  # stream every session live while it records; see takeloom/streaming.py
     youtube_stream_key: str = ""  # from YouTube Studio's "Go Live" stream settings
     # Matches STREAM_QUALITY_PRESETS[0] in takeloom/streaming.py — the
@@ -224,6 +228,17 @@ class StudioConfig:
         inst = self.get_instrument(instrument_name)
         return inst.label if inst is not None and inst.label else instrument_name
 
+    def compressor_for_label(self, label: str) -> CompressorSettings:
+        """This label's compressor settings — see AudioEngine._callback
+        (live monitoring) and backend.py's play_take/Mixer.add_source
+        (playback of a previously-recorded take) for where this actually
+        gets applied. A recorded take file itself is always raw/
+        uncompressed on disk regardless of this; the compressor only ever
+        shapes what gets *heard*, live or on playback, never what gets
+        written. Disabled CompressorSettings() default if `label` has
+        never been configured."""
+        return self.compressor_settings.get(label, CompressorSettings())
+
     def get_instrument(self, name: str) -> Instrument | None:
         for inst in self.instruments:
             if inst.full_name.lower() == name.lower():
@@ -256,6 +271,10 @@ class StudioConfig:
         remote_authorized_clients = [
             AuthorizedClient(**_filtered(c, AuthorizedClient)) for c in data.pop("remote_authorized_clients", [])
         ]
+        compressor_settings = {
+            label: CompressorSettings(**_filtered(cs, CompressorSettings))
+            for label, cs in data.pop("compressor_settings", {}).items()
+        }
         filtered = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
         return cls(
             **filtered,
@@ -263,6 +282,7 @@ class StudioConfig:
             instruments=instruments,
             known_remotes=known_remotes,
             remote_authorized_clients=remote_authorized_clients,
+            compressor_settings=compressor_settings,
         )
 
     def save(self, path: Path = DEFAULT_CONFIG_PATH) -> None:

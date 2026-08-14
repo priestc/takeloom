@@ -18,7 +18,6 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
 
-from ..audio.filters import COMPRESSOR_PRESETS
 from ..backend import BackendError, StartRecordingRequest
 from ..config import StudioConfig
 from ..inspiration import average_duration, derive_filter_label
@@ -349,8 +348,6 @@ class RecordFrame(ttk.Frame):
         self.backing_meter.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 12))
         row += 1
 
-        row = self._build_audio_filters(left, row)
-
         self.selection_var = tk.StringVar(value="No track selected")
         ttk.Label(left, textvariable=self.selection_var).grid(row=row, column=0, columnspan=2, sticky="w")
         row += 1
@@ -376,117 +373,6 @@ class RecordFrame(ttk.Frame):
             self.video_check_button.grid_remove()
         elif not self.config_obj.instruments or not self._project_names:
             self.video_check_button.state(["disabled"])
-
-    # --- audio filters (compressor now, more later) ---
-
-    def _build_audio_filters(self, left: ttk.Frame, row: int) -> int:
-        # Attack/release aren't exposed here (yet) — carried through unchanged
-        # from whatever's in studio_config.json so a hand-edited value isn't
-        # clobbered by this section's Threshold/Ratio/Makeup controls.
-        self._compressor_attack_ms = self.config_obj.compressor_attack_ms
-        self._compressor_release_ms = self.config_obj.compressor_release_ms
-
-        ttk.Label(left, text="Audio Filters", font=("TkDefaultFont", 11, "bold")).grid(
-            row=row, column=0, columnspan=2, sticky="w", pady=(0, 2)
-        )
-        row += 1
-
-        self.compressor_var = tk.BooleanVar(value=self.config_obj.compressor_enabled)
-        ttk.Checkbutton(
-            left, text="Compressor", variable=self.compressor_var, command=self._on_compressor_change,
-        ).grid(row=row, column=0, columnspan=2, sticky="w")
-        row += 1
-
-        preset_row = ttk.Frame(left)
-        preset_row.grid(row=row, column=0, columnspan=2, sticky="w", padx=(16, 0), pady=(2, 0))
-        row += 1
-        ttk.Label(preset_row, text="Preset").pack(side="left")
-        self.compressor_preset_var = tk.StringVar(value="")
-        self.compressor_preset_combo = ttk.Combobox(
-            preset_row, textvariable=self.compressor_preset_var,
-            values=list(COMPRESSOR_PRESETS.keys()), state="readonly", width=18,
-        )
-        self.compressor_preset_combo.pack(side="left", padx=(4, 0))
-        self.compressor_preset_combo.bind("<<ComboboxSelected>>", self._on_compressor_preset_selected)
-
-        params_row = ttk.Frame(left)
-        params_row.grid(row=row, column=0, columnspan=2, sticky="w", padx=(16, 0), pady=(2, 8))
-        row += 1
-
-        self.compressor_threshold_var = tk.DoubleVar(value=self.config_obj.compressor_threshold_db)
-        self.compressor_ratio_var = tk.DoubleVar(value=self.config_obj.compressor_ratio)
-        self.compressor_makeup_var = tk.DoubleVar(value=self.config_obj.compressor_makeup_db)
-
-        ttk.Label(params_row, text="Threshold (dB)").grid(row=0, column=0, sticky="w")
-        self.compressor_threshold_spin = ttk.Spinbox(
-            params_row, from_=-60, to=0, increment=1, width=6,
-            textvariable=self.compressor_threshold_var, command=self._on_compressor_change,
-        )
-        self.compressor_threshold_spin.grid(row=0, column=1, sticky="w", padx=(4, 12))
-        self.compressor_threshold_spin.bind("<Return>", lambda _e: self._on_compressor_change())
-        self.compressor_threshold_spin.bind("<FocusOut>", lambda _e: self._on_compressor_change())
-
-        ttk.Label(params_row, text="Ratio").grid(row=0, column=2, sticky="w")
-        self.compressor_ratio_spin = ttk.Spinbox(
-            params_row, from_=1, to=20, increment=0.5, width=6,
-            textvariable=self.compressor_ratio_var, command=self._on_compressor_change,
-        )
-        self.compressor_ratio_spin.grid(row=0, column=3, sticky="w", padx=(4, 0))
-        self.compressor_ratio_spin.bind("<Return>", lambda _e: self._on_compressor_change())
-        self.compressor_ratio_spin.bind("<FocusOut>", lambda _e: self._on_compressor_change())
-
-        ttk.Label(params_row, text="Makeup Gain (dB)").grid(row=1, column=0, sticky="w", pady=(4, 0))
-        self.compressor_makeup_spin = ttk.Spinbox(
-            params_row, from_=0, to=24, increment=0.5, width=6,
-            textvariable=self.compressor_makeup_var, command=self._on_compressor_change,
-        )
-        self.compressor_makeup_spin.grid(row=1, column=1, sticky="w", padx=(4, 12), pady=(4, 0))
-        self.compressor_makeup_spin.bind("<Return>", lambda _e: self._on_compressor_change())
-        self.compressor_makeup_spin.bind("<FocusOut>", lambda _e: self._on_compressor_change())
-
-        self._set_compressor_controls_enabled(self.config_obj.compressor_enabled)
-        return row
-
-    def _set_compressor_controls_enabled(self, enabled: bool) -> None:
-        state = "normal" if enabled else "disabled"
-        self.compressor_threshold_spin.configure(state=state)
-        self.compressor_ratio_spin.configure(state=state)
-        self.compressor_makeup_spin.configure(state=state)
-
-    def _on_compressor_preset_selected(self, _event: object = None) -> None:
-        preset = COMPRESSOR_PRESETS.get(self.compressor_preset_var.get())
-        if preset is None:
-            return
-        # Picking a preset both fills in the numbers and turns the compressor
-        # on — selecting one only to have it silently stay disabled would be
-        # a confusing dead click.
-        self.compressor_var.set(preset.enabled)
-        self.compressor_threshold_var.set(preset.threshold_db)
-        self.compressor_ratio_var.set(preset.ratio)
-        self.compressor_makeup_var.set(preset.makeup_gain_db)
-        self._compressor_attack_ms = preset.attack_ms
-        self._compressor_release_ms = preset.release_ms
-        self._on_compressor_change()
-
-    def _on_compressor_change(self) -> None:
-        enabled = self.compressor_var.get()
-        self._set_compressor_controls_enabled(enabled)
-        try:
-            threshold_db = self.compressor_threshold_var.get()
-            ratio = self.compressor_ratio_var.get()
-            makeup_gain_db = self.compressor_makeup_var.get()
-        except tk.TclError:
-            return  # a spinbox is mid-edit with invalid/empty text; ignore until it settles
-        settings = {
-            "enabled": enabled,
-            "threshold_db": threshold_db,
-            "ratio": ratio,
-            "attack_ms": self._compressor_attack_ms,
-            "release_ms": self._compressor_release_ms,
-            "makeup_gain_db": makeup_gain_db,
-        }
-        backend = self.app_state.backend
-        self._run_backend(lambda: backend.set_compressor_settings(settings))
 
     # --- right column: Setlist ---
 

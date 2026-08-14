@@ -174,19 +174,31 @@ class AudioEngine:
         # Capture mono input from the instrument's channel
         ch = self.monitor_channel
         mono = indata[:, ch:ch+1].copy()
-        mono = self.compressor.process(mono)
 
-        # Record input to disk
+        # Record RAW input to disk — never through the compressor. Only
+        # what's actually monitored/played back (below) reflects it; a
+        # take file on disk always stays exactly what came off the input,
+        # so backend.py's play_take/Mixer.add_source can apply whatever
+        # that take's own instrument-label compressor settings currently
+        # are at listen time, rather than whatever was baked in the day it
+        # was recorded.
         if self.session_recorder:
             self.session_recorder.write(mono)
             self._session_frames += len(mono)
         if self.recorder:
             self.recorder.write(mono)
 
-        # Update peak level for VU meter
+        # Update peak level for VU meter — reflects the raw input actually
+        # being captured, same reasoning as recording it raw above.
         self._peak_level = float(np.max(np.abs(mono)))
         if self._instrument_sink:
             self._instrument_sink(mono)
+
+        # Everything from here on is what gets *heard* (headphones, the
+        # produced video's mix, the live stream) — this is where the
+        # compressor (this instrument's own label — see backend.py's
+        # AudioEngine construction sites) actually applies.
+        compressed_mono = self.compressor.process(mono)
 
         # Playback output: mix backing track + input monitoring
         mix_position = self.mixer.position  # captured before read() advances it — see stream_mix below
@@ -199,7 +211,7 @@ class AudioEngine:
         # produced video's "Mix" audio track and always needs the
         # instrument in it, even when Recording Monitoring keeps it out of
         # the live headphone feed sent to outdata below.
-        monitor_mono = mono * self.instrument_volume
+        monitor_mono = compressed_mono * self.instrument_volume
         if self.output_channels == 2:
             full_mix = mix.copy()
             full_mix[:, 0] += monitor_mono[:, 0]

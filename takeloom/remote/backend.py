@@ -149,7 +149,7 @@ class RemoteBackend(Backend):
             "studio's own disk, not this one. Use play_take instead."
         )
 
-    def play_take(self, project_name: str, filename: str) -> None:
+    def play_take(self, project_name: str, filename: str, label: str) -> None:
         # Server resolves/downloads the file on its own end (see backend.
         # py's ensure_take_local) and streams it back in chunks as
         # "take_file" events on this same connection (see _on_raw_event)
@@ -171,8 +171,15 @@ class RemoteBackend(Backend):
         work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_remote_takes")
         local_path = work_dir / filename
         local_path.write_bytes(data)
+        # Compression happens client-side, same as LocalBackend.play_take
+        # (see backend.py's _compressed_playback_path) — get_config()
+        # already carries the full compressor_settings dict over from the
+        # server, so there's no reason for a dedicated RPC just for this.
+        from ..backend import _compressed_playback_path
+        settings = self.get_config().compressor_for_label(label)
+        play_path = _compressed_playback_path(local_path, settings)
         from ..video.capture import open_in_default_player
-        open_in_default_player(local_path)
+        open_in_default_player(play_path)
 
     # --- inspiration ---
 
@@ -231,11 +238,8 @@ class RemoteBackend(Backend):
 
     # --- audio filters ---
 
-    def get_compressor_settings(self) -> dict:
-        return self._client.call("get_compressor_settings", {})["settings"]
-
-    def set_compressor_settings(self, settings: dict) -> None:
-        self._client.call("set_compressor_settings", {"settings": settings})
+    def set_compressor_settings(self, label: str, settings: dict) -> None:
+        self._client.call("set_compressor_settings", {"label": label, "settings": settings})
 
     # --- live monitoring mode ---
 
