@@ -138,6 +138,8 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
     if op == "set_compressor_settings":
         backend.set_compressor_settings(args["label"], args["settings"])
         return {}
+    if op == "benchmark_audio_modifiers":
+        return backend.benchmark_audio_modifiers()
     if op == "get_monitoring_mode":
         return {"mode": backend.get_monitoring_mode()}
     if op == "set_monitoring_mode":

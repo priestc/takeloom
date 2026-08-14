@@ -241,6 +241,12 @@ class RemoteBackend(Backend):
     def set_compressor_settings(self, label: str, settings: dict) -> None:
         self._client.call("set_compressor_settings", {"label": label, "settings": settings})
 
+    def benchmark_audio_modifiers(self) -> dict:
+        # Always runs on the studio machine, not this client — that's the
+        # machine whose CPU actually matters for AudioEngine's real-time
+        # callback (see backend.py's benchmark_audio_modifiers docstring).
+        return self._client.call("benchmark_audio_modifiers", {}, timeout=LONG_TIMEOUT)
+
     # --- live monitoring mode ---
 
     def get_monitoring_mode(self) -> str:

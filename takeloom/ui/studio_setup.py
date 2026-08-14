@@ -641,7 +641,9 @@ class StudioSetupFrame(ttk.Frame):
                  "both sharing \"electric-guitar\" share one set of settings here too, the same way they "
                  "share one take-number sequence. Recorded takes are always stored raw; this only shapes "
                  "what's actually heard, live while recording or on playback (Sessions/Completed Takes' "
-                 "Play button).",
+                 "Play button). \"Benchmark modifiers\" times whatever's currently saved (click Save "
+                 "first if you've just changed something below) against this studio's real audio block "
+                 "size, on whichever machine would actually run it.",
             foreground="#666666", wraplength=760, justify="left",
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(2, 6))
         row += 1
@@ -657,7 +659,48 @@ class StudioSetupFrame(ttk.Frame):
             settings = self.config_obj.compressor_for_label(label)
             self._compressor_rows.append(_CompressorRow(table, i, label, settings))
 
+        bench_row = ttk.Frame(self.content)
+        bench_row.grid(row=row, column=0, columnspan=2, sticky="w", pady=(8, 10))
+        row += 1
+        self.benchmark_button = ttk.Button(
+            bench_row, text="Benchmark modifiers", command=self._on_benchmark_modifiers,
+        )
+        self.benchmark_button.pack(side="left")
+        self.benchmark_var = tk.StringVar(value="")
+        ttk.Label(bench_row, textvariable=self.benchmark_var, foreground="#666666").pack(
+            side="left", padx=(8, 0)
+        )
+
         return row
+
+    def _on_benchmark_modifiers(self) -> None:
+        self.benchmark_button.state(["disabled"])
+        self.benchmark_var.set("Benchmarking...")
+        backend = self.app_state.backend
+
+        def worker() -> None:
+            try:
+                result = backend.benchmark_audio_modifiers()
+                error = None
+            except BackendError as e:
+                result, error = None, str(e)
+            self.after(0, lambda: self._on_benchmark_result(result, error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_benchmark_result(self, result: dict | None, error: str | None) -> None:
+        if not self.winfo_exists():
+            return
+        self.benchmark_button.state(["!disabled"])
+        if error or result is None:
+            self.benchmark_var.set("")
+            messagebox.showerror("Benchmark failed", error or "No result returned.")
+            return
+        verdict = "within budget" if result["within_budget"] else "OVER BUDGET"
+        self.benchmark_var.set(
+            f"All {result['labels_measured']} labels: {result['total_ms']:.3f} ms "
+            f"(block budget {result['budget_ms']:.3f} ms) — {verdict}"
+        )
 
     def _current_input_label_names(self) -> list[str]:
         return [name for row in self._input_rows if (name := row.label_var.get().strip())]

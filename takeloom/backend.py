@@ -527,6 +527,20 @@ class Backend(ABC):
         only takes effect the next time that track is loaded."""
         ...
 
+    @abstractmethod
+    def benchmark_audio_modifiers(self) -> dict:
+        """Run audio.benchmark.run_audio_modifier_benchmark() against
+        this machine's own current config (sample_rate/buffer_size, and
+        every instrument label's compressor_settings) and return its
+        result as a plain dict (dataclasses.asdict(ModifierBenchmarkResult)
+        plus a "within_budget" bool, since that property doesn't survive
+        asdict on its own). Always runs on whichever machine would
+        actually run AudioEngine for real — i.e. this method, not the
+        rig itself, is what a Remote connection forwards to the studio
+        machine, the same way every other real-time-audio-relevant call
+        does."""
+        ...
+
     # --- live monitoring mode (Record page headphone mix) ---
 
     @abstractmethod
@@ -1977,6 +1991,11 @@ class LocalBackend(Backend):
             engine, inst = self._get_active_engine_and_inst()
             if engine is not None and inst is not None and inst.label == label:
                 engine.set_compressor_settings(new_settings)
+
+    def benchmark_audio_modifiers(self) -> dict:
+        from .audio.benchmark import run_audio_modifier_benchmark
+        result = run_audio_modifier_benchmark(self.get_config())
+        return {**asdict(result), "within_budget": result.within_budget}
 
     # --- live monitoring mode (Record page headphone mix) ---
 
