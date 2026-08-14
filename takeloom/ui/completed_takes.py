@@ -2,14 +2,21 @@
 — not scoped to one session or project, unlike the Sessions tab (see
 backend.py's list_completed_takes for exactly what's gathered and why).
 
-Takes are grouped by song: one header row per track name, with each
-instrument's take listed underneath it — takes["track_name"] is already
-the group key list_completed_takes sorts by, so grouping here is just a
-consecutive-run split, not a re-sort. Built from plain widgets in a
-scrollable canvas rather than a ttk.Treeview: a Treeview can only color a
-whole row via tags, not one cell's text on its own, and the point of a
-label's badge (see instrument_colors.py) is specifically to color just
-the label text, not everything next to it.
+Takes are grouped by song: one header row per track name — a collapse/
+expand triangle, the title, then every instrument that has a take on it
+as a row of colored badges (instrument_colors.py) right there on the
+header, plus a "Play all" button that mixes every one of that song's
+takes together (backend.py's play_song_takes) — and, once expanded, one
+line per take below it with its own date and Play button. takes["track_
+name"] is already the group key list_completed_takes sorts by, so
+grouping here is just a consecutive-run split, not a re-sort.
+
+Built from plain widgets in a scrollable canvas rather than a
+ttk.Treeview: a Treeview can only color a whole row via tags, not one
+cell's text on its own, and the point of a label's badge is specifically
+to color just the label text, not everything next to it — same reasoning
+extends to needing an inline row of badges on the header itself, which a
+Treeview's own tree/heading columns can't produce either.
 
 A title filter narrows by track name (whole song groups shown/hidden
 together); "Filter by this project" further narrows to only songs
@@ -74,6 +81,7 @@ class CompletedTakesFrame(ttk.Frame):
         self._play_project: str = ""  # any project name — only used to resolve the (shared) vault path
         self._current_project: str = ""
         self._current_track_names: set[str] = set()
+        self._expanded: set[str] = set()  # track_names currently showing their per-take detail lines
 
         ttk.Label(self, text="Loading...").pack(anchor="w")
         self._load()
@@ -213,20 +221,52 @@ class CompletedTakesFrame(ttk.Frame):
         # groupby's usual "only groups consecutive runs" caveat doesn't
         # apply here — every take for a given song is already adjacent.
         for track_name, group in groupby(filtered, key=lambda t: t["track_name"]):
-            takes_for_song = list(group)
-            plural = "" if len(takes_for_song) == 1 else "s"
-            ttk.Label(
-                self.content, text=f"{track_name}  ({len(takes_for_song)} take{plural})",
-                font=("TkDefaultFont", 11, "bold"),
-            ).pack(anchor="w", pady=(10, 2))
-            for take in takes_for_song:
-                self._build_take_row(take)
+            self._build_song_header(track_name, list(group))
 
         self._bind_mousewheel(self._canvas)
 
+    def _build_song_header(self, track_name: str, takes_for_song: list[dict]) -> None:
+        expanded = track_name in self._expanded
+        header = ttk.Frame(self.content)
+        header.pack(fill="x", pady=(10, 1))
+
+        toggle = tk.Label(
+            header, text=("\N{BLACK DOWN-POINTING TRIANGLE}" if expanded else "\N{BLACK RIGHT-POINTING TRIANGLE}"),
+            font=("TkDefaultFont", 9), cursor="hand2",
+        )
+        toggle.pack(side="left", padx=(0, 6))
+        title = ttk.Label(header, text=track_name, font=("TkDefaultFont", 11, "bold"), cursor="hand2")
+        title.pack(side="left", padx=(0, 8))
+        for widget in (toggle, title):
+            widget.bind("<Button-1>", lambda _e, name=track_name: self._toggle_expanded(name))
+
+        # Every instrument that has a take on this song, right on the
+        # header — a fast "who's covered this one" glance without having
+        # to expand it, same color per label as everywhere else (see
+        # instrument_colors.py).
+        for take in takes_for_song:
+            make_label_badge(header, take["instrument"], font_size=8, padx=4, pady=0).pack(side="left", padx=(0, 4))
+
+        status_var = tk.StringVar(value="")
+        ttk.Button(
+            header, text="▶ Play all", command=lambda: self._on_play_song(track_name, takes_for_song, status_var),
+        ).pack(side="left", padx=(10, 4))
+        ttk.Label(header, textvariable=status_var, foreground="#666666").pack(side="left")
+
+        if expanded:
+            for take in takes_for_song:
+                self._build_take_row(take)
+
+    def _toggle_expanded(self, track_name: str) -> None:
+        if track_name in self._expanded:
+            self._expanded.discard(track_name)
+        else:
+            self._expanded.add(track_name)
+        self._apply_filter()
+
     def _build_take_row(self, take: dict) -> None:
         row = ttk.Frame(self.content)
-        row.pack(fill="x", padx=(16, 0), pady=1)
+        row.pack(fill="x", padx=(28, 0), pady=1)
         make_label_badge(row, take["instrument"]).pack(side="left", padx=(0, 8))
         ttk.Label(row, text=f"take {take['take_number']}", width=10).pack(side="left")
         ttk.Label(row, text=_format_time_ago(take.get("recorded_at")), foreground="#666666", width=10).pack(
@@ -256,9 +296,21 @@ class CompletedTakesFrame(ttk.Frame):
             lambda _result, error: self._on_play_result(status_var, error),
         )
 
+    def _on_play_song(self, track_name: str, takes_for_song: list[dict], status_var: tk.StringVar) -> None:
+        if not self._play_project:
+            status_var.set("")
+            messagebox.showerror("Could not play song", "No project available to locate the vault.")
+            return
+        status_var.set("Mixing...")
+        backend = self.app_state.backend
+        self._run_backend(
+            lambda: backend.play_song_takes(self._play_project, takes_for_song),
+            lambda _result, error: self._on_play_result(status_var, error),
+        )
+
     def _on_play_result(self, status_var: tk.StringVar, error: str | None) -> None:
         if not self.winfo_exists():
             return
         status_var.set("")
         if error:
-            messagebox.showerror("Could not play take", error)
+            messagebox.showerror("Could not play", error)

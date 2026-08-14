@@ -32,7 +32,7 @@ from .audio.filters import CompressorSettings
 from .audio.scarlett2_direct_monitor import FOCUSRITE_DEVICE_NAME, set_channel_gain
 from .config import DEFAULT_CONFIG_PATH, INSTRUMENT_LABELS, Instrument, StudioConfig
 from .project import Project, Setlist, TakeInfo, TrackEntry
-from .utils import ensure_dir, timestamp_now, wall_timestamp
+from .utils import ensure_dir, sanitize_filename, timestamp_now, wall_timestamp
 
 
 class BackendError(Exception):
@@ -385,6 +385,22 @@ class Backend(ABC):
         before opening *that*, leaving the original file untouched. Plays
         the original directly, no temp copy, if that label's compressor
         is disabled."""
+        ...
+
+    @abstractmethod
+    def play_song_takes(self, project_name: str, takes: list[dict]) -> None:
+        """Like play_take, but for every take in `takes` (each a
+        Completed Takes row dict — needs at least "filename",
+        "instrument", and "track_name") at once, mixed together — one
+        song's every instrument overlaid on top of each other, each
+        passed through its own label's compressor settings first (see
+        play_take's docstring for the single-take version of the same
+        reasoning), and the mixed result opened in the OS's default
+        player. Best-effort per take: one that isn't available (locally,
+        or via the backup server) is skipped rather than failing the
+        whole mix, so a song missing one instrument's take still plays
+        the rest. Raises BackendError only if `takes` is empty or *none*
+        of them could be made available."""
         ...
 
     @abstractmethod
@@ -1183,6 +1199,46 @@ def _compressed_playback_path(path: Path, settings: CompressorSettings) -> Path:
     return out_path
 
 
+def _mixed_playback_path(song_name: str, files_and_labels: list[tuple[Path, str]], config: StudioConfig) -> Path:
+    """Mix every (take_path, instrument_label) in `files_and_labels`
+    together — one song's every instrument overlaid on top of each
+    other, each first passed through its *own* label's compressor
+    settings (see _compressed_playback_path for the single-take version
+    of the same reasoning) — and write the result to one scratch temp
+    file, returned. Shorter takes are zero-padded to the longest one's
+    length before summing (same reasoning as audio.mixer.Mixer's own
+    _sum_sources), and the sum is clipped to prevent overflow. Used by
+    play_song_takes for a quick "everyone's take on this song, played
+    together" preview without needing a real session.
+
+    Raises BackendError if `files_and_labels` is empty."""
+    if not files_and_labels:
+        raise BackendError("No takes to mix.")
+    import numpy as np
+    from .audio.filters import apply_compressor
+    from .audio.formats import read_audio, write_flac
+
+    sample_rate = config.sample_rate
+    processed = []
+    for path, label in files_and_labels:
+        data, sr = read_audio(path, sample_rate)
+        processed.append(apply_compressor(data, sr, config.compressor_for_label(label)))
+
+    max_len = max(len(d) for d in processed)
+    channels = max(d.shape[1] for d in processed)
+    mix = np.zeros((max_len, channels), dtype=np.float32)
+    for data in processed:
+        if data.shape[1] == 1 and channels == 2:
+            data = np.column_stack([data[:, 0], data[:, 0]])
+        mix[:len(data), :data.shape[1]] += data
+    np.clip(mix, -1.0, 1.0, out=mix)
+
+    work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_playback")
+    out_path = work_dir / f"{sanitize_filename(song_name) or 'mix'}_mix.flac"
+    write_flac(out_path, mix, sample_rate)
+    return out_path
+
+
 class LocalBackend(Backend):
     """Direct local implementation — talks to this machine's config, disk,
     and audio/video hardware. Historical RecordFrame behavior, unchanged."""
@@ -1862,6 +1918,22 @@ class LocalBackend(Backend):
         play_path = _compressed_playback_path(path, settings)
         from .video.capture import open_in_default_player
         open_in_default_player(play_path)
+
+    def play_song_takes(self, project_name: str, takes: list[dict]) -> None:
+        if not takes:
+            raise BackendError("No takes to play.")
+        files_and_labels: list[tuple[Path, str]] = []
+        for take in takes:
+            try:
+                local_path = Path(self.ensure_take_local(project_name, take["filename"]))
+            except BackendError:
+                continue  # best-effort — see docstring; the rest of the song still plays
+            files_and_labels.append((local_path, take["instrument"]))
+        if not files_and_labels:
+            raise BackendError("None of this song's takes are available right now.")
+        mixed_path = _mixed_playback_path(takes[0]["track_name"], files_and_labels, self.get_config())
+        from .video.capture import open_in_default_player
+        open_in_default_player(mixed_path)
 
     def list_completed_takes(self) -> list[dict]:
         config = self.get_config()

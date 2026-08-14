@@ -149,18 +149,22 @@ class RemoteBackend(Backend):
             "studio's own disk, not this one. Use play_take instead."
         )
 
-    def play_take(self, project_name: str, filename: str, label: str) -> None:
-        # Server resolves/downloads the file on its own end (see backend.
-        # py's ensure_take_local) and streams it back in chunks as
-        # "take_file" events on this same connection (see _on_raw_event)
-        # rather than one giant RPC response — same reasoning as
-        # RemoteServer.broadcast_file's own docstring. The "fetch_take_
-        # file" op's server-side handler (remote/server.py) sends every
-        # chunk *before* its RPC response, and this connection's single
-        # reader thread processes lines strictly in order, so by the time
-        # this call() returns, every chunk has already been received and
-        # appended to self._take_file_buffer by _on_raw_event — no extra
-        # wait/Event needed here.
+    def _fetch_take_file(self, project_name: str, filename: str) -> Path:
+        """Download one take file to this machine's own disk — the
+        Remote-capable equivalent of LocalBackend.ensure_take_local,
+        shared by play_take and play_song_takes. Server resolves/
+        downloads the file on its own end (see backend.py's ensure_
+        take_local) and streams it back in chunks as "take_file" events
+        on this same connection (see _on_raw_event) rather than one
+        giant RPC response — same reasoning as RemoteServer.
+        broadcast_file's own docstring. The "fetch_take_file" op's
+        server-side handler (remote/server.py) sends every chunk
+        *before* its RPC response, and this connection's single reader
+        thread processes lines strictly in order, so by the time this
+        call() returns, every chunk has already been received and
+        appended to self._take_file_buffer by _on_raw_event — no extra
+        wait/Event needed here. Raises BackendError if nothing came
+        back (the file isn't available anywhere on the studio end)."""
         self._take_file_buffer = bytearray()
         self._client.call(
             "fetch_take_file", {"project_name": project_name, "filename": filename}, timeout=DOWNLOAD_TIMEOUT,
@@ -171,6 +175,10 @@ class RemoteBackend(Backend):
         work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_remote_takes")
         local_path = work_dir / filename
         local_path.write_bytes(data)
+        return local_path
+
+    def play_take(self, project_name: str, filename: str, label: str) -> None:
+        local_path = self._fetch_take_file(project_name, filename)
         # Compression happens client-side, same as LocalBackend.play_take
         # (see backend.py's _compressed_playback_path) — get_config()
         # already carries the full compressor_settings dict over from the
@@ -180,6 +188,23 @@ class RemoteBackend(Backend):
         play_path = _compressed_playback_path(local_path, settings)
         from ..video.capture import open_in_default_player
         open_in_default_player(play_path)
+
+    def play_song_takes(self, project_name: str, takes: list[dict]) -> None:
+        if not takes:
+            raise BackendError("No takes to play.")
+        files_and_labels: list[tuple[Path, str]] = []
+        for take in takes:
+            try:
+                local_path = self._fetch_take_file(project_name, take["filename"])
+            except BackendError:
+                continue  # best-effort — see Backend.play_song_takes' docstring
+            files_and_labels.append((local_path, take["instrument"]))
+        if not files_and_labels:
+            raise BackendError("None of this song's takes are available right now.")
+        from ..backend import _mixed_playback_path
+        mixed_path = _mixed_playback_path(takes[0]["track_name"], files_and_labels, self.get_config())
+        from ..video.capture import open_in_default_player
+        open_in_default_player(mixed_path)
 
     # --- inspiration ---
 
