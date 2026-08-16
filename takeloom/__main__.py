@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import select
 import termios
+import threading
 import time
 import tty
 from pathlib import Path
@@ -392,11 +393,25 @@ def server_command(disable_color: bool) -> None:
     # can't race a not-yet-settled detection into using a stale value —
     # see RecordingDeckDriver.detected_instrument for how the result
     # actually reaches the deck's touchscreen.
+    #
+    # Dispatched on its own thread rather than called directly: backend
+    # events (including this one) can fire from *inside* a caller that's
+    # still holding Backend._record_lock (e.g. _end_session emits phase=
+    # "idle" before releasing it) — calling straight back into another
+    # _record_lock-taking method from that same thread would deadlock
+    # permanently on Python's plain, non-reentrant threading.Lock. This
+    # bit us for real: a session's Stream Deck "stop" press wedged its
+    # own key-event thread forever this way, which also meant that
+    # session's post-processing (started right after the same lock is
+    # released) never ran at all.
     def _start_headless_autodetect() -> None:
-        try:
-            backend.start_auto_detect_instrument()
-        except BackendError as e:
-            log(f"StreamDeck: could not start instrument auto-detect — {e}", err=True)
+        def worker() -> None:
+            try:
+                backend.start_auto_detect_instrument()
+            except BackendError as e:
+                log(f"StreamDeck: could not start instrument auto-detect — {e}", err=True)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _on_recording_status(event: str, data: dict) -> None:
         if event == "recording_status" and data.get("phase") == "idle":
