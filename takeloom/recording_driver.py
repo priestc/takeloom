@@ -54,6 +54,26 @@ class RecordingDeckDriver:
         self.phase = "idle"  # "idle" | "waiting" | "recording"
         self.video_check_phase = "idle"  # "idle" | "recording"
         self.track_name: str | None = None  # currently loaded/playing backing track — see _on_backend_event
+        # What Backend.start_auto_detect_instrument last reported — shown
+        # on the Stream Deck's touchscreen (see StreamDeckController.
+        # _update_touchscreen) for as long as it's still current, whether
+        # idle or mid-session: it deliberately keeps showing through an
+        # entire take, not just at the moment of detection, so glancing at
+        # the deck at any point — including mid-recording — confirms what
+        # the take is actually being filed under. That's what would have
+        # caught a real bug once already (a headless session silently
+        # recording under a stale last-picked instrument with no way to
+        # see what was actually about to be used). "Detecting…" while a
+        # scan is in progress, the label (e.g. "ELECTRIC-BASS") once one's
+        # found — only reset once a *new* scan actually starts for the
+        # next take, not merely because a session opened or closed.
+        # Nothing here *starts* auto-detect on its own — the Tk UI (record.
+        # py) and headless `takeloom server` (__main__.py's server_command)
+        # each decide for themselves when a fresh scan makes sense (e.g.
+        # after a take finishes) and call Backend.start_auto_detect_
+        # instrument() directly; this only ever reacts to whatever result
+        # arrives, so it works identically no matter which one is driving.
+        self.detected_instrument: str | None = None
         self._events_subscribed = False
 
     # --- connect / disconnect ---
@@ -89,7 +109,7 @@ class RecordingDeckDriver:
         if not self.streamdeck.connect(key_callback or self.handle_key, device_id=device_id):
             return False
         self.streamdeck.use_recording_layout()
-        self.streamdeck.update_recording_page(self.phase, self.video_check_phase, self.track_name)
+        self.streamdeck.update_recording_page(self.phase, self.video_check_phase, self.track_name, self.detected_instrument)
         self._refresh_monitoring_mode()
         return True
 
@@ -110,8 +130,9 @@ class RecordingDeckDriver:
         self.phase = "idle"
         self.video_check_phase = "idle"
         self.track_name = None
+        self.detected_instrument = None
         self._subscribe_backend_events()
-        self.streamdeck.update_recording_page(self.phase, self.video_check_phase, self.track_name)
+        self.streamdeck.update_recording_page(self.phase, self.video_check_phase, self.track_name, self.detected_instrument)
         self._refresh_monitoring_mode()
 
     def _refresh_monitoring_mode(self) -> None:
@@ -198,7 +219,9 @@ class RecordingDeckDriver:
                 self.phase = data["phase"]
                 if self.phase == "idle":
                     self.track_name = None
-                self.streamdeck.update_recording_page(self.phase, self.video_check_phase, self.track_name)
+                self.streamdeck.update_recording_page(
+                    self.phase, self.video_check_phase, self.track_name, self.detected_instrument,
+                )
                 # update_recording_page blanks every key the idle layout
                 # doesn't use whenever phase crosses the idle boundary —
                 # including the monitor toggle (idx 3), which only exists
@@ -220,7 +243,9 @@ class RecordingDeckDriver:
                 self._log(data["status"])
             if "phase" in data:
                 self.video_check_phase = data["phase"]
-                self.streamdeck.update_recording_page(self.phase, self.video_check_phase, self.track_name)
+                self.streamdeck.update_recording_page(
+                    self.phase, self.video_check_phase, self.track_name, self.detected_instrument,
+                )
             if self.video_check_phase == "idle" and "result_path" in data and self._on_video_check_result:
                 self._on_video_check_result(Path(data["result_path"]), bool(data.get("has_video")))
         elif event == "monitoring_mode_changed":
@@ -229,3 +254,24 @@ class RecordingDeckDriver:
             # keeps the physical key in sync regardless of who changed it.
             if "mode" in data:
                 self.streamdeck.update_monitoring_mode(data["mode"])
+        elif event == "auto_detect_status":
+            # Purely reactive — see detected_instrument's own comment for
+            # why nothing here ever calls start_auto_detect_instrument
+            # itself. "listening"'s own `status` text (skipped-instrument
+            # notes etc.) still goes to the log, same as before this
+            # touchscreen display existed.
+            phase = data.get("phase")
+            if phase == "listening":
+                if "status" in data:
+                    self._log(data["status"])
+                self.detected_instrument = "Detecting…"
+            elif phase == "detected":
+                label = data.get("label") or ""
+                full_name = data.get("full_name") or ""
+                self.detected_instrument = label.upper() if label else full_name
+                self._log(f"StreamDeck: detected '{full_name}' ({label or 'no label'}).")
+            elif phase == "stopped":
+                self.detected_instrument = None
+            self.streamdeck.update_recording_page(
+                self.phase, self.video_check_phase, self.track_name, self.detected_instrument,
+            )

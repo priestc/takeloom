@@ -516,6 +516,7 @@ class StreamDeckController:
 
     def update_recording_page(
         self, phase: str, video_check_phase: str = "idle", track_name: str | None = None,
+        instrument_text: str | None = None,
     ) -> None:
         """Refresh the session toggle and dim/light Next/Restart/volume for
         the current phase, swapping the whole button layout the moment
@@ -526,18 +527,22 @@ class StreamDeckController:
         a Remote client; there's no Stream Deck button for it — holds the
         audio/camera hardware, since the two are mutually exclusive at the
         backend level. `phase` is one of "idle"/"waiting"/"recording";
-        `video_check_phase` is "idle"/"recording". `track_name`, on a dial
-        deck, is shown on the touchscreen above the dial labels — same
-        touchscreen area update_inspiration() uses for the same purpose,
-        just fed from RecordingDeckDriver's own idea of "currently loaded/
-        playing backing track" instead of the inspiration filter's. Shared
-        verbatim by the Tk UI, headless server, and CLI drivers (and
-        mirrored on-screen by the Tk UI's emulator via the same
-        recording_toggle_visual()/button_visual() helpers — the emulator
-        has no touchscreen of its own, so track_name only ever reaches the
-        physical deck). The monitor-mode toggle key (index 3) is refreshed
-        separately — see update_monitoring_mode() — and only exists in the
-        active layout."""
+        `video_check_phase` is "idle"/"recording". `track_name` and
+        `instrument_text`, on a dial deck, are shown on the touchscreen
+        above the dial labels (see _update_touchscreen) — same touchscreen
+        area update_inspiration() uses `track_name` for, just fed from
+        RecordingDeckDriver's own idea of "currently loaded/playing backing
+        track" instead of the inspiration filter's, and (for instrument_
+        text) "what auto-detect last found, or is currently listening for"
+        (see RecordingDeckDriver.detected_instrument) — shown whether idle
+        or mid-session, so it stays visible confirmation of what a take is
+        actually being filed under the whole time, not just before it
+        starts. Shared verbatim by the Tk UI, headless server, and CLI
+        drivers (and mirrored on-screen — buttons only, no touchscreen of
+        its own — by the Tk UI's emulator via the same recording_toggle_
+        visual()/button_visual() helpers). The monitor-mode toggle key
+        (index 3) is refreshed separately — see update_monitoring_mode() —
+        and only exists in the active layout."""
         if not self.connected:
             return
         is_idle = phase == "idle"
@@ -545,9 +550,15 @@ class StreamDeckController:
             self._idle_layout = is_idle
             if is_idle:
                 self._apply_layout(list(RECORDING_IDLE_BUTTONS), skip_indices=frozenset())
-                return
-            self._apply_layout(self._active_recording_buttons(), skip_indices=frozenset({0, RECORDING_MONITOR_TOGGLE_KEY_INDEX}))
+            else:
+                self._apply_layout(
+                    self._active_recording_buttons(),
+                    skip_indices=frozenset({0, RECORDING_MONITOR_TOGGLE_KEY_INDEX}),
+                )
         if is_idle:
+            if self._has_dials:
+                with self._lock:
+                    self._update_touchscreen(track_name, instrument_text)
             return
         record_icon, record_label, record_color = recording_toggle_visual(phase, video_check_phase)
         with self._lock:
@@ -559,7 +570,7 @@ class StreamDeckController:
                 icon, label, color = button_visual(btn, phase)
                 self._deck.set_key_image(idx, self._make_key_image(icon, label, color))
             if self._has_dials:
-                self._update_touchscreen(track_name)
+                self._update_touchscreen(track_name, instrument_text)
 
     def update_monitoring_mode(self, mode: str) -> None:
         """Redraw the monitor-mode toggle key (index 3) to reflect the
@@ -636,13 +647,31 @@ class StreamDeckController:
         _paint_key_face(ImageDraw.Draw(img), img.size, icon, label)
         return PILHelper.to_native_format(self._deck, img)
 
-    def _update_touchscreen(self, track_name: str | None = None) -> None:
+    def _update_touchscreen(self, track_name: str | None = None, instrument_text: str | None = None) -> None:
+        """instrument_text — what auto-detect currently believes is being
+        played/recorded (see RecordingDeckDriver.detected_instrument) —
+        takes the prominent top slot whenever there is one, since it's
+        exactly what caught a real mislabeled-take bug once already
+        (recording under a stale last-picked instrument with no way to
+        see what was actually about to be used): a performer glancing at
+        the deck before or during a take should see it before track_name,
+        not have to hunt for it. track_name drops to a smaller line under
+        it in that case, or takes the prominent slot alone (as before)
+        when there's no instrument_text to show — e.g. mid-inspiration-
+        playback, via update_inspiration(), which never passes one."""
         try:
             img = PILHelper.create_touchscreen_image(self._deck, background="black")
             draw = ImageDraw.Draw(img)
             w, h = img.size  # 800×100
             section_w = w // 4
-            if track_name:
+            if instrument_text:
+                draw.text((w // 2, int(h * 0.24)), instrument_text, anchor="mm",
+                          font=_load_font(20), fill="white")
+                if track_name:
+                    draw.text((w // 2, int(h * 0.52)), track_name, anchor="mm",
+                              font=_load_font(13), fill=(190, 190, 190))
+                label_y = int(h * 0.84)
+            elif track_name:
                 draw.text((w // 2, h // 3), track_name, anchor="mm",
                           font=_load_font(20), fill="white")
                 label_y = h * 3 // 4

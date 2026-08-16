@@ -378,6 +378,32 @@ def server_command(disable_color: bool) -> None:
     if backend.start_monitoring():
         log(f"Live-monitoring '{backend.get_config().last_selected_instrument}'.")
 
+    # Best-effort: (re)start instrument auto-detect whenever idle, so
+    # _resolve_headless_request below (which just trusts config.last_
+    # selected_instrument — there's no track picker here to confirm it
+    # against) is always acting on a freshly-detected instrument rather
+    # than whatever happened to be last selected, possibly from a
+    # completely unrelated earlier session — this is what actually caused
+    # a real take to get filed under the wrong instrument once already,
+    # entirely silently, since there was nothing in this headless context
+    # showing what it was about to record as. Backend.start_recording
+    # itself refuses to start while a scan is still in progress ("Another
+    # recording is already in progress"), so a StreamDeck "r"/"s" press
+    # can't race a not-yet-settled detection into using a stale value —
+    # see RecordingDeckDriver.detected_instrument for how the result
+    # actually reaches the deck's touchscreen.
+    def _start_headless_autodetect() -> None:
+        try:
+            backend.start_auto_detect_instrument()
+        except BackendError as e:
+            log(f"StreamDeck: could not start instrument auto-detect — {e}", err=True)
+
+    def _on_recording_status(event: str, data: dict) -> None:
+        if event == "recording_status" and data.get("phase") == "idle":
+            _start_headless_autodetect()
+
+    backend.on_event(_on_recording_status)
+
     # Optional attached StreamDeck: fully drives a session with no UI client
     # needed at all, via the same RecordingDeckDriver the Tk UI uses. With
     # no track picker of its own, this context always targets the last-used
@@ -417,6 +443,8 @@ def server_command(disable_color: bool) -> None:
         log("StreamDeck connected.")
     elif driver.streamdeck.last_error:
         log(f"StreamDeck: found a device but could not connect — {driver.streamdeck.last_error}", err=True)
+
+    _start_headless_autodetect()
 
     log("Press Ctrl+C to stop.\n")
 
