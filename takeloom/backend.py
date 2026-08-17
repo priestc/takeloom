@@ -528,6 +528,17 @@ class Backend(ABC):
         is silence rather than an error."""
         return (0.0, 0.0)
 
+    def get_playback_position(self) -> tuple[float, float]:
+        """(position_seconds, duration_seconds) of whatever backing track
+        is currently loaded in the active engine's mixer — for the Stream
+        Deck touchscreen's playback progress bar (see recording_driver.py's
+        polling ticker). Same "not every backend can report this cheaply"
+        reasoning as get_levels() — RemoteBackend doesn't override this,
+        so a Stream Deck driven by a Remote-connected Tk UI just shows no
+        progress bar rather than polling it over the network every
+        second; (0.0, 0.0) either way means "nothing to show"."""
+        return (0.0, 0.0)
+
     @abstractmethod
     def adjust_backing_volume(self, delta: int) -> None: ...
 
@@ -2012,6 +2023,12 @@ class LocalBackend(Backend):
         if engine is None:
             return (0.0, 0.0)
         return (engine.peak_level, engine.backing_peak_level)
+
+    def get_playback_position(self) -> tuple[float, float]:
+        engine = self._get_active_engine()
+        if engine is None:
+            return (0.0, 0.0)
+        return (engine.mixer.position_seconds, engine.mixer.duration_seconds)
 
     def adjust_backing_volume(self, delta: int) -> None:
         with self._record_lock:

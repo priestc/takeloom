@@ -5,6 +5,8 @@ from __future__ import annotations
 import threading
 from typing import Callable
 
+from .instrument_colors import color_for_label, hex_to_rgb
+
 try:
     from StreamDeck.DeviceManager import DeviceManager
     from StreamDeck.ImageHelpers import PILHelper
@@ -222,6 +224,57 @@ def _load_font(size: int):
     return ImageFont.load_default()
 
 
+def _format_mmss(seconds: float) -> str:
+    total = max(0, int(seconds))
+    return f"{total // 60}:{total % 60:02d}"
+
+
+def _draw_instrument_badge(draw: "ImageDraw.ImageDraw", canvas_w: int, cy: int, text: str) -> None:
+    """A small colored "pill" for `text` (an instrument label, or a
+    status placeholder like "Detecting…") centered horizontally at cy —
+    the touchscreen equivalent of instrument_colors.py's tk.Label
+    badges used everywhere else this same label shows up, so it reads as
+    the same color at a glance whether you're looking at the deck or the
+    Completed Takes tab. color_for_label falls back to a flat gray for
+    anything that isn't actually one of INSTRUMENT_LABELS (a status
+    placeholder, or a bare full_name when no label was set) rather than
+    guessing — see that function's own docstring."""
+    font = _load_font(13)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    pad_x, pad_y = 10, 5
+    box_w, box_h = text_w + pad_x * 2, text_h + pad_y * 2
+    x0 = (canvas_w - box_w) // 2
+    y0 = cy - box_h // 2
+    color = hex_to_rgb(color_for_label(text.lower()))
+    draw.rounded_rectangle([x0, y0, x0 + box_w, y0 + box_h], radius=box_h // 3, fill=color)
+    draw.text((canvas_w // 2, cy), text, anchor="mm", font=font, fill="white")
+
+
+def _draw_progress_bar(draw: "ImageDraw.ImageDraw", canvas_w: int, cy: int, position: float, duration: float) -> None:
+    """Elapsed time / a filled bar / time remaining, all on one line —
+    "how long since the song started, and how long until it ends", in
+    one bar, at cy. Only called when duration > 0 (see _update_touchscreen)
+    — a 0/0 bar would be meaningless."""
+    font = _load_font(12)
+    elapsed_text = _format_mmss(position)
+    remaining_text = "-" + _format_mmss(max(0.0, duration - position))
+    margin = 56  # room for the time labels at each end, outside the bar itself
+    bar_left, bar_right = margin, canvas_w - margin
+    bar_half_h = 4
+    draw.rounded_rectangle(
+        [bar_left, cy - bar_half_h, bar_right, cy + bar_half_h], radius=bar_half_h, fill=(70, 70, 70),
+    )
+    frac = max(0.0, min(1.0, position / duration)) if duration > 0 else 0.0
+    filled_right = bar_left + int((bar_right - bar_left) * frac)
+    if filled_right > bar_left:
+        draw.rounded_rectangle(
+            [bar_left, cy - bar_half_h, filled_right, cy + bar_half_h], radius=bar_half_h, fill=(0, 200, 120),
+        )
+    draw.text((8, cy), elapsed_text, anchor="lm", font=font, fill=(200, 200, 200))
+    draw.text((canvas_w - 8, cy), remaining_text, anchor="rm", font=font, fill=(200, 200, 200))
+
+
 def _draw_icon(draw: "ImageDraw.ImageDraw", icon: str, cx: int, cy: int, size: int) -> None:
     """Draw a white icon centered at (cx, cy) within a size×size bounding box."""
     r = size // 2
@@ -371,6 +424,18 @@ class StreamDeckController:
         self._idle_layout = True  # tracks which of RECORDING_IDLE_BUTTONS/_active_recording_buttons() is live
         self._dial_map: dict[int, tuple[str, str, str]] = dict(_SESSION_DIAL_MAP)
         self._lock = threading.Lock()
+        # Touchscreen content, cached here rather than passed fresh on
+        # every redraw — update_playback_position() (RecordingDeckDriver's
+        # once-a-second polling ticker, see that module) only ever changes
+        # position_seconds/duration_seconds, and shouldn't need to also
+        # know/re-pass whatever track_name/instrument_text last was just
+        # to redraw the whole touchscreen image (a Stream Deck touchscreen
+        # has no partial-region update, so every change repaints it whole
+        # regardless). See _update_touchscreen.
+        self._touchscreen_track_name: str | None = None
+        self._touchscreen_instrument_text: str | None = None
+        self._touchscreen_position: float = 0.0
+        self._touchscreen_duration: float = 0.0
         # Only set when a device was actually found but failed to open/
         # configure — "no device plugged in" (the common case for anyone
         # without a Stream Deck) deliberately leaves this unset, so callers
@@ -545,6 +610,16 @@ class StreamDeckController:
         and only exists in the active layout."""
         if not self.connected:
             return
+        if track_name != self._touchscreen_track_name:
+            # A different (or no) track just got loaded — the previous
+            # one's progress bar position/duration no longer mean
+            # anything, so let update_playback_position's next tick start
+            # clean instead of briefly showing the old song's progress
+            # under the new song's title.
+            self._touchscreen_position = 0.0
+            self._touchscreen_duration = 0.0
+        self._touchscreen_track_name = track_name
+        self._touchscreen_instrument_text = instrument_text
         is_idle = phase == "idle"
         if is_idle != self._idle_layout:
             self._idle_layout = is_idle
@@ -558,7 +633,7 @@ class StreamDeckController:
         if is_idle:
             if self._has_dials:
                 with self._lock:
-                    self._update_touchscreen(track_name, instrument_text)
+                    self._update_touchscreen()
             return
         record_icon, record_label, record_color = recording_toggle_visual(phase, video_check_phase)
         with self._lock:
@@ -570,7 +645,22 @@ class StreamDeckController:
                 icon, label, color = button_visual(btn, phase)
                 self._deck.set_key_image(idx, self._make_key_image(icon, label, color))
             if self._has_dials:
-                self._update_touchscreen(track_name, instrument_text)
+                self._update_touchscreen()
+
+    def update_playback_position(self, position_seconds: float, duration_seconds: float) -> None:
+        """Refresh just the touchscreen's progress bar — called roughly
+        once a second by RecordingDeckDriver's polling ticker while a
+        track is actually playing (see Backend.get_playback_position).
+        Keeps whatever track_name/instrument_text update_recording_page
+        last set; only position/duration change here. No-op if there's no
+        dial deck connected, same guard update_recording_page itself
+        applies before ever calling this indirectly."""
+        if not self.connected or not self._has_dials:
+            return
+        self._touchscreen_position = position_seconds
+        self._touchscreen_duration = duration_seconds
+        with self._lock:
+            self._update_touchscreen()
 
     def update_monitoring_mode(self, mode: str) -> None:
         """Redraw the monitor-mode toggle key (index 3) to reflect the
@@ -616,6 +706,10 @@ class StreamDeckController:
         """Refresh buttons and touchscreen for the current inspiration mode state."""
         if not self.connected:
             return
+        self._touchscreen_track_name = track_name
+        self._touchscreen_instrument_text = None  # no such concept while just browsing inspiration
+        self._touchscreen_position = 0.0
+        self._touchscreen_duration = 0.0
         with self._lock:
             icon = "pause" if is_playing else "play"
             label = "Pause" if is_playing else "Play"
@@ -627,7 +721,7 @@ class StreamDeckController:
                     continue
                 self._deck.set_key_image(idx, self._make_key_image(icon, label, active_color))
             if self._has_dials:
-                self._update_touchscreen(track_name)
+                self._update_touchscreen()
 
     def disconnect(self) -> None:
         if self._deck:
@@ -647,36 +741,47 @@ class StreamDeckController:
         _paint_key_face(ImageDraw.Draw(img), img.size, icon, label)
         return PILHelper.to_native_format(self._deck, img)
 
-    def _update_touchscreen(self, track_name: str | None = None, instrument_text: str | None = None) -> None:
-        """instrument_text — what auto-detect currently believes is being
-        played/recorded (see RecordingDeckDriver.detected_instrument) —
-        takes the prominent top slot whenever there is one, since it's
-        exactly what caught a real mislabeled-take bug once already
-        (recording under a stale last-picked instrument with no way to
-        see what was actually about to be used): a performer glancing at
-        the deck before or during a take should see it before track_name,
-        not have to hunt for it. track_name drops to a smaller line under
-        it in that case, or takes the prominent slot alone (as before)
-        when there's no instrument_text to show — e.g. mid-inspiration-
-        playback, via update_inspiration(), which never passes one."""
+    def _update_touchscreen(self) -> None:
+        """Redraws the whole touchscreen from cached self._touchscreen_*
+        state (see update_recording_page/update_playback_position/
+        update_inspiration, the only three setters) — a Stream Deck
+        touchscreen has no partial-region update, so every change repaints
+        it whole regardless of which single field actually changed.
+
+        Fixed row positions regardless of which pieces are actually
+        present (a row with nothing to show is just left blank) — simpler
+        and visually stable than a layout that reflows depending on what's
+        currently known, at the cost of some blank space while idle:
+
+        - song title (track_name): the most prominent thing on screen —
+          it's what a performer is actually here to look at while playing.
+        - instrument label: a small colored badge (see instrument_colors.py
+          — same colors as the Sessions/Completed Takes/Studio Setup
+          badges) rather than plain text, and deliberately smaller/less
+          prominent than the title now — see RecordingDeckDriver.
+          detected_instrument for what it's showing and why it's still
+          worth a glance, just not the star of the screen the way it was
+          when this touchscreen first got auto-detect wired into it.
+        - playback progress bar: elapsed time / a filled bar / time
+          remaining, for whatever's currently loaded — blank when nothing
+          is (duration_seconds is 0), e.g. before a take starts playing.
+        - dial labels: unchanged, always shown.
+        """
         try:
             img = PILHelper.create_touchscreen_image(self._deck, background="black")
             draw = ImageDraw.Draw(img)
             w, h = img.size  # 800×100
             section_w = w // 4
-            if instrument_text:
-                draw.text((w // 2, int(h * 0.24)), instrument_text, anchor="mm",
-                          font=_load_font(20), fill="white")
-                if track_name:
-                    draw.text((w // 2, int(h * 0.52)), track_name, anchor="mm",
-                              font=_load_font(13), fill=(190, 190, 190))
-                label_y = int(h * 0.84)
-            elif track_name:
-                draw.text((w // 2, h // 3), track_name, anchor="mm",
-                          font=_load_font(20), fill="white")
-                label_y = h * 3 // 4
-            else:
-                label_y = h // 2
+
+            if self._touchscreen_track_name:
+                draw.text((w // 2, int(h * 0.20)), self._touchscreen_track_name, anchor="mm",
+                          font=_load_font(22), fill="white")
+            if self._touchscreen_instrument_text:
+                _draw_instrument_badge(draw, w, int(h * 0.44), self._touchscreen_instrument_text)
+            if self._touchscreen_duration > 0:
+                _draw_progress_bar(draw, w, int(h * 0.66), self._touchscreen_position, self._touchscreen_duration)
+
+            label_y = int(h * 0.88)
             for dial_idx, (_ccw, _cw, label) in self._dial_map.items():
                 x = section_w * dial_idx + section_w // 2
                 draw.text((x, label_y), label, anchor="mm",

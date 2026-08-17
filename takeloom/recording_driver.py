@@ -31,11 +31,15 @@ other cross-thread backend call.
 
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 from typing import Callable
 
 from .backend import Backend, BackendError, StartRecordingRequest
 from .streamdeck_controller import StreamDeckController
+
+_TICKER_INTERVAL_SECONDS = 1.0
 
 
 class RecordingDeckDriver:
@@ -75,6 +79,30 @@ class RecordingDeckDriver:
         # arrives, so it works identically no matter which one is driving.
         self.detected_instrument: str | None = None
         self._events_subscribed = False
+
+        # Polls Backend.get_playback_position() roughly once a second
+        # while a session is actually open, feeding the touchscreen's
+        # progress bar (see StreamDeckController.update_playback_position)
+        # — the only piece of the touchscreen that changes continuously
+        # rather than at discrete event points, so it can't be driven by
+        # _on_backend_event the way everything else here is. Runs for the
+        # driver's whole lifetime (not just between connect()/disconnect())
+        # since it's a daemon thread and update_playback_position already
+        # no-ops instantly whenever there's no dial deck actually
+        # connected — simpler than coordinating start/stop against every
+        # place connect()/disconnect()/rebind_backend() get called.
+        threading.Thread(target=self._run_ticker, daemon=True).start()
+
+    def _run_ticker(self) -> None:
+        while True:
+            time.sleep(_TICKER_INTERVAL_SECONDS)
+            if self.phase not in ("waiting", "recording") or not self.streamdeck.connected:
+                continue
+            try:
+                position, duration = self._backend.get_playback_position()
+            except BackendError:
+                continue
+            self.streamdeck.update_playback_position(position, duration)
 
     # --- connect / disconnect ---
 
