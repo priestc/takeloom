@@ -89,8 +89,25 @@ SILENCE_THRESHOLD = 0.01
 
 # How much captured audio to accumulate before running one classification
 # pass — long enough to average out a single transient/pick attack, short
-# enough that the display still feels "live".
-_ANALYSIS_WINDOW_SECONDS = 1.0
+# enough that the display still feels "live". Lengthened from the original
+# 1.0s (see InstrumentClassifier's own docstring for why) so a confirmed
+# window is a more confident sample of real playing, not just barely
+# enough to average out one attack.
+_ANALYSIS_WINDOW_SECONDS = 1.5
+
+# A burst of loud signal has to sustain at least this long before
+# InstrumentClassifier trusts it as real playing rather than a transient
+# click/pop (e.g. a 1/4" cable being plugged in hot) — see process_block.
+# Comfortably longer than any pop (a few ms at most) without being long
+# enough to feel like a delay before a real note gets picked up.
+_ONSET_CONFIRM_SECONDS = 0.15
+
+# A silence gap has to last at least this long to count as a genuine pause
+# (the player stopped, possibly to swap instruments) rather than just the
+# ordinary quiet between two notes — see process_block. Below this, an
+# already-confirmed onset keeps counting as confirmed; at or above it, the
+# next burst of signal has to re-prove itself sustained again too.
+_RECONFIRM_SILENCE_SECONDS = 1.5
 
 
 def effective_frequency_range(instrument) -> tuple[float, float]:
@@ -247,6 +264,24 @@ class InstrumentClassifier:
     set_instrument_sink hook); on_detected(name, confidence) fires from a
     background thread whenever the best-guess instrument changes.
 
+    A brief loud transient — a 1/4" cable pop when an instrument gets
+    plugged in hot, a footstep, a stray knock — never reaches process_block
+    as part of the real classification window at all: a burst of signal
+    has to sustain for _ONSET_CONFIRM_SECONDS before it's trusted as real
+    playing rather than a click, and one that doesn't (goes back to
+    silence first) is discarded outright. This matters because a sharp
+    transient is broadband — spread across every frequency, including
+    whatever band happens to score well for the *wrong* instrument — and,
+    being a voltage spike rather than a played note, can carry far more
+    spectral energy than the actual note that follows it despite lasting a
+    tiny fraction as long; left in the window uncorrected, it can dominate
+    _energy_in_band's scoring and misclassify the whole window (confirmed
+    for real: a bass plugged in hot got misidentified as electric guitar
+    from exactly this). Once an onset has been confirmed, ordinary gaps
+    between notes don't reset anything — only a gap of at least
+    _RECONFIRM_SILENCE_SECONDS (a real pause, not just decay between
+    notes) means the next burst has to prove itself sustained again too.
+
     "Changes" is relative to _last_emitted, which only reset() clears —
     so the *same* instrument being confirmed again in a row never re-
     fires on_detected on its own, deliberately: repeat notes on the one
@@ -269,8 +304,22 @@ class InstrumentClassifier:
         self._ranges = [(inst.full_name, effective_frequency_range(inst)) for inst in instruments]
         self._on_detected = on_detected
         self._window_samples = int(sample_rate * _ANALYSIS_WINDOW_SECONDS)
+        self._onset_confirm_samples = int(sample_rate * _ONSET_CONFIRM_SECONDS)
+        self._reconfirm_silence_samples = int(sample_rate * _RECONFIRM_SILENCE_SECONDS)
         self._buffer: list[np.ndarray] = []
         self._buffered_samples = 0
+        # A burst of signal not yet trusted as real playing — see class
+        # docstring. Promoted into self._buffer (and cleared) once it
+        # sustains past _onset_confirm_samples; discarded (not promoted)
+        # if silence returns first.
+        self._pending: list[np.ndarray] = []
+        self._pending_samples = 0
+        # Whether a sustained onset has already been confirmed since the
+        # last reset()/genuine silence gap — once True, ordinary silent
+        # blocks between notes no longer force new signal back through
+        # the pending/onset-confirmation gate; see process_block.
+        self._onset_confirmed = False
+        self._silence_run_samples = 0
         self._last_emitted: str | None = None
 
     def reset(self) -> None:
@@ -279,6 +328,10 @@ class InstrumentClassifier:
         whether it's the same instrument as before — see class docstring."""
         self._buffer = []
         self._buffered_samples = 0
+        self._pending = []
+        self._pending_samples = 0
+        self._onset_confirmed = False
+        self._silence_run_samples = 0
         self._last_emitted = None
 
     def process_block(self, mono: np.ndarray) -> None:
@@ -290,10 +343,45 @@ class InstrumentClassifier:
         if not self._ranges:
             return
         block = mono[:, 0] if mono.ndim > 1 else mono
-        if float(np.max(np.abs(block))) < SILENCE_THRESHOLD:
+        is_silent = float(np.max(np.abs(block))) < SILENCE_THRESHOLD
+
+        if is_silent:
+            self._silence_run_samples += len(block)
+            if self._silence_run_samples >= self._reconfirm_silence_samples:
+                # A real pause, not just the ordinary quiet between two
+                # notes — the next burst of signal needs to re-prove
+                # itself sustained too, same as right after reset().
+                self._onset_confirmed = False
+                self._pending = []
+                self._pending_samples = 0
+            elif not self._onset_confirmed:
+                # Nothing confirmed yet this window, and the burst that
+                # was accumulating in _pending just went back to silence
+                # without ever sustaining — a click/pop, not real
+                # playing. Discard it rather than let it later count
+                # toward the real classification window.
+                self._pending = []
+                self._pending_samples = 0
             return
-        self._buffer.append(block.copy())
-        self._buffered_samples += len(block)
+        self._silence_run_samples = 0
+
+        if not self._onset_confirmed:
+            self._pending.append(block.copy())
+            self._pending_samples += len(block)
+            if self._pending_samples < self._onset_confirm_samples:
+                return
+            # Sustained long enough to trust — the whole pending burst
+            # (from its very start) becomes the beginning of the real
+            # classification window.
+            self._onset_confirmed = True
+            self._buffer.extend(self._pending)
+            self._buffered_samples += self._pending_samples
+            self._pending = []
+            self._pending_samples = 0
+        else:
+            self._buffer.append(block.copy())
+            self._buffered_samples += len(block)
+
         if self._buffered_samples < self._window_samples:
             return
         snapshot = self._buffer
