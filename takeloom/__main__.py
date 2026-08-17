@@ -303,7 +303,7 @@ def server_command(disable_color: bool) -> None:
     REMOTE_SERVER_PORT (not configurable — see that module for why), and
     only accepts connections from the local network.
     """
-    from .backend import LocalBackend, StartRecordingRequest
+    from .backend import BackendError, LocalBackend, StartRecordingRequest
     from .device_check import check_configured_devices
     from .recording_driver import RecordingDeckDriver
     from .remote.protocol import REMOTE_SERVER_PORT
@@ -413,9 +413,31 @@ def server_command(disable_color: bool) -> None:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    # "recording_status" carries "phase": "idle" on far more than just "a
+    # session just ended" — process_session()'s own completion summary and
+    # vault.sync_and_maybe_prune()'s progress messages (see backend.py's
+    # _process_session) are *also* routed through "recording_status" with
+    # phase "idle" tagged on every single one, since post-processing has
+    # nothing better to report through. Triggering a fresh auto-detect scan
+    # on every one of those (instead of only on a genuine idle transition)
+    # meant a session finishing produced a burst of redundant, overlapping
+    # start_auto_detect_instrument() calls, all but the first failing with
+    # "Another recording is already in progress" — confirmed for real, in
+    # a server console full of those errors right as a session's post-
+    # processing was still logging its own progress. Tracking the last
+    # phase actually seen (mirrors StreamDeckController.update_recording_
+    # page's own "only act on a real transition" guard) fixes that: only
+    # a genuine move *into* idle re-triggers anything.
+    _last_phase = "idle"
+
     def _on_recording_status(event: str, data: dict) -> None:
-        if event == "recording_status" and data.get("phase") == "idle":
+        nonlocal _last_phase
+        if event != "recording_status" or "phase" not in data:
+            return
+        phase = data["phase"]
+        if phase == "idle" and _last_phase != "idle":
             _start_headless_autodetect()
+        _last_phase = phase
 
     backend.on_event(_on_recording_status)
 

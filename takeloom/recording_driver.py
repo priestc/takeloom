@@ -241,6 +241,19 @@ class RecordingDeckDriver:
 
     def _on_backend_event(self, event: str, data: dict) -> None:
         if event == "recording_status":
+            if "status" in data:
+                # Includes post-processing progress — backend.py's
+                # _process_session's own completion summary and vault.
+                # sync_and_maybe_prune's sync messages are routed through
+                # "recording_status" same as everything else here, tagged
+                # phase "idle" since post-processing has no better phase
+                # to report through. Without surfacing the text itself
+                # too, headless `takeloom server` had no indication
+                # whatsoever that splicing/syncing was still working in
+                # the background after a session ended — same reasoning
+                # video_check_status's handling below already applies to
+                # its own status text.
+                self._log(data["status"])
             if "track_name" in data:
                 self.track_name = data["track_name"]
             if "phase" in data:
