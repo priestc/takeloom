@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 import sys
 import threading
 from pathlib import Path
 from typing import Callable, TYPE_CHECKING
 
+from ..ffmpeg_bin import FFMPEG, FFPROBE
+
 if TYPE_CHECKING:
     from ..streaming import StreamTarget
 
 
 def ffmpeg_available() -> bool:
-    return shutil.which("ffmpeg") is not None
+    return FFMPEG is not None
 
 
 def _input_args(device: str, framerate: int) -> list[str]:
@@ -31,7 +32,7 @@ def _build_capture_cmd(
     device: str, output_path: Path, framerate: int, stream_preview: bool,
     stream_target: "StreamTarget | None" = None,
 ) -> list[str]:
-    cmd = ["ffmpeg", "-y", *_input_args(device, framerate)]
+    cmd = [FFMPEG, "-y", *_input_args(device, framerate)]
     if stream_target is not None:
         # Input 1: the live mix audio arriving over LiveAudioFeeder's FIFO,
         # as raw interleaved float32 PCM — see takeloom/streaming.py.
@@ -211,7 +212,7 @@ def probe_video_size(path: Path) -> tuple[int, int]:
     """Return (width, height) of a video file's first video stream."""
     result = subprocess.run(
         [
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            FFPROBE, "-v", "error", "-select_streams", "v:0",
             "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0",
             str(path),
         ],
@@ -292,7 +293,7 @@ def mux_video_audio(
     video_delay_s = max(0.0, video_offset_ms / 1000.0)
     audio_delay_s = max(0.0, -video_offset_ms / 1000.0)
 
-    cmd = ["ffmpeg", "-y"]
+    cmd = [FFMPEG, "-y"]
     if video_delay_s:
         cmd += ["-itsoffset", f"{video_delay_s:.6f}"]
     cmd += ["-i", str(video_path)]
@@ -364,7 +365,7 @@ def clip_session_video(
 
     video_start_s = max(0.0, mix_start_s - video_offset_ms / 1000.0)
     cmd = [
-        "ffmpeg", "-y",
+        FFMPEG, "-y",
         "-ss", f"{video_start_s:.6f}", "-i", str(raw_video),
         "-ss", f"{max(0.0, mix_start_s):.6f}", "-i", str(mix_flac),
         "-i", str(instrument_flac),

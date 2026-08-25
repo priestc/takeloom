@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+from takeloom.ffmpeg_bin import FFMPEG
+
 
 def ffmpeg_available() -> bool:
-    return shutil.which("ffmpeg") is not None
+    return FFMPEG is not None
 
 
 def list_cameras() -> list[tuple[str, str]]:
@@ -33,7 +34,7 @@ def _list_cameras_avfoundation() -> list[tuple[str, str]]:
     if not ffmpeg_available():
         return []
     result = subprocess.run(
-        ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+        [FFMPEG, "-f", "avfoundation", "-list_devices", "true", "-i", ""],
         capture_output=True, text=True,
     )
     devices = []
@@ -60,7 +61,7 @@ def _list_cameras_dshow() -> list[tuple[str, str]]:
     if not ffmpeg_available():
         return []
     result = subprocess.run(
-        ["ffmpeg", "-f", "dshow", "-list_devices", "true", "-i", "dummy"],
+        [FFMPEG, "-f", "dshow", "-list_devices", "true", "-i", "dummy"],
         capture_output=True, text=True,
     )
     devices = []

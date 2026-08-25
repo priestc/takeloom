@@ -7,6 +7,8 @@ import numpy as np
 import soundfile as sf
 from pathlib import Path
 
+from takeloom.ffmpeg_bin import FFMPEG, FFPROBE
+
 # Anything soundfile can't read natively goes through ffmpeg/ffprobe instead:
 # compressed audio containers, and video containers (a video backing track's
 # audio stream is extracted from it the same way).
@@ -42,7 +44,7 @@ def _decode_with_ffmpeg(path: Path, target_sr: int | None = None) -> tuple[np.nd
     """Decode any audio file to raw PCM float32 via ffmpeg subprocess."""
     sr = target_sr or 48000
     cmd = [
-        "ffmpeg", "-i", str(path),
+        FFMPEG, "-i", str(path),
         "-f", "f32le",
         "-acodec", "pcm_f32le",
         "-ar", str(sr),
@@ -67,7 +69,7 @@ def get_duration(path: Path) -> float:
     suffix = path.suffix.lower()
     if suffix in _FFMPEG_EXTS:
         cmd = [
-            "ffprobe", "-i", str(path),
+            FFPROBE, "-i", str(path),
             "-show_entries", "format=duration",
             "-v", "quiet", "-of", "csv=p=0"
         ]
