@@ -8,14 +8,14 @@ import threading
 from pathlib import Path
 from typing import Callable, TYPE_CHECKING
 
-from ..ffmpeg_bin import FFMPEG, FFPROBE
+from ..ffmpeg_bin import CAMERA_FFMPEG, FFMPEG, FFPROBE
 
 if TYPE_CHECKING:
     from ..streaming import StreamTarget
 
 
 def ffmpeg_available() -> bool:
-    return FFMPEG is not None
+    return CAMERA_FFMPEG is not None
 
 
 def _input_args(device: str, framerate: int) -> list[str]:
@@ -32,7 +32,7 @@ def _build_capture_cmd(
     device: str, output_path: Path, framerate: int, stream_preview: bool,
     stream_target: "StreamTarget | None" = None,
 ) -> list[str]:
-    cmd = [FFMPEG, "-y", *_input_args(device, framerate)]
+    cmd = [CAMERA_FFMPEG, "-y", *_input_args(device, framerate)]
     if stream_target is not None:
         # Input 1: the live mix audio arriving over LiveAudioFeeder's FIFO,
         # as raw interleaved float32 PCM — see takeloom/streaming.py.

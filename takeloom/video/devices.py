@@ -7,11 +7,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from takeloom.ffmpeg_bin import FFMPEG
+from takeloom.ffmpeg_bin import CAMERA_FFMPEG
 
 
 def ffmpeg_available() -> bool:
-    return FFMPEG is not None
+    return CAMERA_FFMPEG is not None
 
 
 def list_cameras() -> list[tuple[str, str]]:
@@ -34,7 +34,7 @@ def _list_cameras_avfoundation() -> list[tuple[str, str]]:
     if not ffmpeg_available():
         return []
     result = subprocess.run(
-        [FFMPEG, "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+        [CAMERA_FFMPEG, "-f", "avfoundation", "-list_devices", "true", "-i", ""],
         capture_output=True, text=True,
     )
     devices = []
@@ -61,7 +61,7 @@ def _list_cameras_dshow() -> list[tuple[str, str]]:
     if not ffmpeg_available():
         return []
     result = subprocess.run(
-        [FFMPEG, "-f", "dshow", "-list_devices", "true", "-i", "dummy"],
+        [CAMERA_FFMPEG, "-f", "dshow", "-list_devices", "true", "-i", "dummy"],
         capture_output=True, text=True,
     )
     devices = []
