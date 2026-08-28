@@ -2462,20 +2462,93 @@ class LocalBackend(Backend):
         belongs to whatever song got drawn — recorded into the shared
         vault-wide index instead, see vault.record_inspiration_take).
         A non-filter track passes through unchanged (and isn't cached —
-        nothing to cache)."""
+        nothing to cache).
+
+        The draw itself may already be cached — either from an earlier
+        visit to this slot this session, or pre-warmed at session open by
+        _prefetch_setlist_locked (which resolves every slot up front so no
+        draw ever has to hit the inspiration server mid-take).
+        Either way, `index` is marked completed here, on the cache-hit
+        path too: prefetch deliberately doesn't touch completed_track_
+        indices (that would make _advance_locked skip every slot before
+        the session even starts), so this is the one place a slot counts
+        as drawn-for-real."""
         if not track.is_inspiration_filter:
             return track
-        cached = session.resolved_filter_picks.get(index)
-        if cached is not None:
-            return cached
-        # This queries the inspiration server (up to a 15s timeout) — say
-        # so, so a Stream Deck / headless operator isn't left watching an
-        # unchanged screen wondering whether the press registered.
-        self._emit("recording_status", {"status": f"Finding a track for the '{track.name}' filter…"})
-        resolved = self._resolve_filter_slot(config, track, session.inst.full_name)
-        session.resolved_filter_picks[index] = resolved
+        resolved = session.resolved_filter_picks.get(index)
+        if resolved is None:
+            # This queries the inspiration server (up to a 15s timeout) —
+            # say so, so a Stream Deck / headless operator isn't left
+            # watching an unchanged screen wondering whether the press
+            # registered. (With prefetch working, only reached if the
+            # up-front resolve for this slot had failed.)
+            self._emit("recording_status", {"status": f"Finding a track for the '{track.name}' filter…"})
+            resolved = self._resolve_filter_slot(config, track, session.inst.full_name)
+            session.resolved_filter_picks[index] = resolved
         session.completed_track_indices.add(index)
         return resolved
+
+    def _prefetch_setlist_locked(
+        self, project: Project, inst: Instrument, config: StudioConfig,
+    ) -> dict[int, TrackEntry]:
+        """Do all the network/heavy-disk work for a session's whole setlist
+        up front, at session open — *before* the audio/camera capture is
+        even started — so advancing between takes never has to do any of it
+        while capture is live (that was audible as choppy monitoring, and
+        also front-loaded dead air into a streamed/recorded session):
+
+        - resolve every inspiration filter slot now (one draw each), and
+        - download every not-yet-local backing track now, so no mid-session
+          multi-MB download + FLAC/opus write.
+
+        Only slots/tracks that still need a take for `inst`'s label are
+        touched. Best-effort per track: a slot that can't be resolved, or a
+        download that fails, is reported and skipped — it just isn't in the
+        returned dict / stays absent on disk, and surfaces its error again
+        (loudly, via _resolve_filter_slot_for_session / _load_track_locked)
+        if and when that track is actually reached, exactly as before, just
+        not mid-take.
+
+        Returns {setlist index -> resolved TrackEntry} for the filter slots
+        it managed to resolve, to seed _ActiveSession.resolved_filter_picks
+        so _resolve_filter_slot_for_session finds them already drawn. Called
+        with self._record_lock held."""
+        from .inspiration import InspirationError, download_inspiration_track
+        label = inst.label
+        pending = [
+            (i, t) for i, t in enumerate(project.setlist.tracks)
+            if t.get_take_for_instrument(label) is None
+        ]
+        resolved_picks: dict[int, TrackEntry] = {}
+        if not pending:
+            return resolved_picks
+        self._emit("recording_status", {
+            "status": f"Preparing session — resolving and downloading {len(pending)} track(s) up front…",
+        })
+        for n, (index, slot) in enumerate(pending, start=1):
+            track = slot
+            if slot.is_inspiration_filter:
+                try:
+                    track = self._resolve_filter_slot(config, slot, inst.full_name)
+                except BackendError as e:
+                    self._emit("recording_status", {
+                        "status": f"Prep {n}/{len(pending)}: couldn't resolve filter '{slot.name}' — {e}",
+                    })
+                    continue
+                resolved_picks[index] = track
+            backing_path = project.backing_tracks_dir / track.backing_track
+            if track.inspiration_track_id and not backing_path.exists():
+                self._emit("recording_status", {
+                    "status": f"Preparing session — downloading {n}/{len(pending)}: '{track.name}'…",
+                })
+                try:
+                    download_inspiration_track(track, backing_path, config)
+                except InspirationError as e:
+                    self._emit("recording_status", {
+                        "status": f"Prep {n}/{len(pending)}: download failed for '{track.name}' — {e}",
+                    })
+        self._emit("recording_status", {"status": "Session ready — everything's downloaded."})
+        return resolved_picks
 
     def _start_playback_locked(self, session: "_ActiveSession") -> None:
         """Start the loaded track's backing from 0:00 — the moment a take
@@ -3698,6 +3771,13 @@ class LocalBackend(Backend):
         if input_info is None:
             raise BackendError(f"Input label '{inst.input_label}' not found in config.")
 
+        # All the setlist's network/heavy-disk work (filter-slot draws +
+        # backing-track downloads) up front, before any capture hardware is
+        # touched — so nothing mid-session hits the inspiration server or
+        # writes a big file while audio/video is live. See _prefetch_
+        # setlist_locked; best-effort, never blocks the session start.
+        prefetched_picks = self._prefetch_setlist_locked(project, inst, config)
+
         try:
             import sounddevice as sd
         except Exception as e:
@@ -3859,6 +3939,7 @@ class LocalBackend(Backend):
             session_mix_flac=session_mix_flac, video_start_wall_time=video_start_wall_time,
             mix_start_frame=mix_start_frame, stream_feeder=stream_feeder,
             youtube_broadcast_id=youtube_broadcast_id,
+            resolved_filter_picks=prefetched_picks,
         )
         self._log_session_event("session_start", f"instrument={inst.full_name}")
 
