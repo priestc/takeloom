@@ -18,6 +18,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
 
+from ..audio.pitch import TunerSmoother
 from ..backend import BackendError, StartRecordingRequest
 from ..config import StudioConfig
 from ..inspiration import average_duration, derive_filter_label
@@ -28,6 +29,7 @@ from .add_to_setlist_dialog import AddToSetlistDialog
 from .app_state import AppState
 from .filter_slot_dialogs import EditFilterDialog, ShowTracksDialog
 from .level_meter import LevelMeter
+from .tuner_meter import TunerMeter
 from .new_project_dialog import NewProjectDialog
 from .setlist_row import SetlistRow
 from .streamdeck_emulator import StreamDeckEmulator
@@ -81,11 +83,25 @@ class RecordFrame(ttk.Frame):
         self._phase = "idle"
         self._video_check_phase = "idle"  # "idle" | "recording"
         # Name of whichever instrument backend.py's start_auto_detect_
-        # instrument locked onto — "" until it has (see _start_auto_
-        # detect/_handle_auto_detect_status). This is what a session
-        # actually starts with; there's no manual instrument picker
-        # anymore.
+        # instrument locked onto — "" until it has (see _begin_identify/
+        # _handle_auto_detect_status). This is what a session actually
+        # starts with; there's no manual instrument picker anymore.
         self._detected_instrument = ""
+        # Sub-state of an "idle" _phase — see the "instrument identify
+        # cycle" section below for the full "idle" -> "identifying" ->
+        # "ready" -> (Play opens a session) flow.
+        self._identify_state = "idle"
+        # Which idle button ("Start Local"=False, "Start Streaming"=True)
+        # kicked off the current _identify_state != "idle" cycle — read
+        # back by _confirm_start() once Play is pressed.
+        self._pending_streaming = False
+        # Tk equivalent of RecordingDeckDriver.tuner_note/tuner_cents/
+        # _tuner_smoother — see the tuner_meter widget built in
+        # _build_left and _handle_tuner_status below. Only meaningful
+        # (and only ever set) while self._identify_state != "idle".
+        self._tuner_note: str | None = None
+        self._tuner_cents = 0.0
+        self._tuner_smoother = TunerSmoother()
         self._monitoring_mode = "production"  # "production" | "recording" — refreshed in _on_loaded
         self._preview_sub = None
         self._preview_imgtk = None
@@ -162,6 +178,9 @@ class RecordFrame(ttk.Frame):
                     pass
         self._stop_preview()
         self._detected_instrument = ""
+        self._identify_state = "idle"
+        self._pending_streaming = False
+        self._tuner_note = None
         if hasattr(self, "detected_instrument_var"):
             self.detected_instrument_var.set("")
             self.auto_detect_status_var.set("")
@@ -214,7 +233,6 @@ class RecordFrame(ttk.Frame):
 
         self._start_preview()
         self._on_project_change()
-        self._start_auto_detect()
 
     # --- loading overlay (shown while a project's setlist + inspiration-
     # filter previews are being fetched — see _on_project_change/_on_setlist_
@@ -262,18 +280,20 @@ class RecordFrame(ttk.Frame):
         )
         row += 1
 
-        # No more manual Instrument dropdown — this frame kicks off
-        # backend.py's start_auto_detect_instrument() on load (and again
-        # each time a session ends), which listens across every
-        # configured instrument's own channel at once and locks onto
+        # No more manual Instrument dropdown — pressing Start Local/Start
+        # Streaming (on the on-screen Stream Deck emulator below) kicks off
+        # backend.py's start_auto_detect_instrument(), which listens across
+        # every configured instrument's own channel at once and locks onto
         # whichever one the classifier commits to; that becomes "the
-        # instrument" the next recording uses, same role the dropdown
-        # used to play. This label doubles as that flow's live status
-        # ("Listening...") and, once a session is open, the same "here's
-        # what we think you're playing" realtime display it always was
-        # (see "instrument_detected" handling below) — the two don't
+        # instrument" the session Play then opens uses, same role the
+        # dropdown used to play. This label doubles as that flow's live
+        # status ("Listening...") and, once a session is open, the same
+        # "here's what we think you're playing" realtime display it always
+        # was (see "instrument_detected" handling below) — the two don't
         # conflict since auto-detect only ever runs before a session
-        # starts. See _handle_auto_detect_status/_start_auto_detect.
+        # starts. Redetect here is a convenience duplicate of the deck's
+        # own Re-identify tile (_redo_identify) — same action, two entry
+        # points. See _handle_auto_detect_status/_begin_identify.
         detect_row = ttk.Frame(left)
         detect_row.grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 2))
         self.detected_instrument_var = tk.StringVar(value="")
@@ -281,15 +301,25 @@ class RecordFrame(ttk.Frame):
             detect_row, textvariable=self.detected_instrument_var,
             font=("TkDefaultFont", 28, "bold"), foreground="#2a6db0",
         ).pack(side="left")
-        self.redetect_button = ttk.Button(detect_row, text="Redetect", command=self._on_redetect_instrument)
+        self.redetect_button = ttk.Button(detect_row, text="Redetect", command=self._redo_identify)
         self.redetect_button.pack(side="left", padx=(12, 0))
-        self.redetect_button.state(["disabled"])  # enabled once something's actually been detected
+        self.redetect_button.state(["disabled"])  # enabled once identifying/ready — see _set_controls_enabled
         row += 1
 
         self.auto_detect_status_var = tk.StringVar(value="")
         ttk.Label(left, textvariable=self.auto_detect_status_var, foreground="#666666", wraplength=360).grid(
             row=row, column=0, columnspan=2, sticky="w", pady=(0, 12)
         )
+        row += 1
+
+        # Tk equivalent of streamdeck_controller.py's touchscreen tuner
+        # needle — only shown while self._identify_state == "identifying"
+        # (see _begin_identify/_redo_identify, which grid() it, and
+        # _handle_auto_detect_status's "detected" branch, which grid_
+        # remove()s it again once a scan locks onto an instrument).
+        self.tuner_meter = TunerMeter(left)
+        self.tuner_meter.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        self.tuner_meter.grid_remove()
         row += 1
 
         default_project = self.config_obj.last_selected_project
@@ -360,7 +390,7 @@ class RecordFrame(ttk.Frame):
 
         self.streamdeck_emulator = StreamDeckEmulator(left, on_key=self._on_emulator_key)
         self.streamdeck_emulator.grid(row=row, column=0, columnspan=2, pady=(8, 0))
-        self.streamdeck_emulator.update_recording_page(self._phase, self._video_check_phase)
+        self.streamdeck_emulator.update_recording_page(self._phase, self._video_check_phase, self._identify_state)
         self.streamdeck_emulator.update_monitoring_mode(self._monitoring_mode)
         row += 1
 
@@ -713,21 +743,36 @@ class RecordFrame(ttk.Frame):
         config = self.config_obj
         self._run_backend(lambda: backend.save_config(config))
 
-    # --- instrument auto-detect (replaces the old manual dropdown) ---
+    # --- instrument identify cycle (replaces the old manual dropdown) ---
+    #
+    # Mirrors RecordingDeckDriver's own identify_state machine (see
+    # recording_driver.py's _begin_identify/_redo_identify/_confirm_start)
+    # so the on-screen Stream Deck emulator behaves identically to the
+    # physical one, just with this frame's own Tk-specific UI (spinner,
+    # button disabling, error dialogs) layered on top instead of going
+    # through the shared driver — same reason _on_emulator_key already
+    # special-cased "r"/"s" before this feature existed. `self._identify_
+    # state` is "idle" (Start Local/Start Streaming shown) | "identifying"
+    # (a scan is listening; only Re-identify shown) | "ready" (auto-detect
+    # committed to an instrument; Play + Re-identify shown).
 
-    def _start_auto_detect(self) -> None:
-        """Kick off backend.py's start_auto_detect_instrument() — called
-        once when this frame first loads and again every time a session
-        ends (see _handle_backend_event's phase=="idle" handling), so the
-        next recording always starts from a fresh listen rather than
-        silently reusing whatever was detected last time. A no-op error
-        (e.g. a session happens to already be active, or nothing's
-        available right now) just leaves the status line reporting it —
-        Redetect lets the user retry by hand."""
-        if self._detected_instrument:
-            return  # already locked onto something; Redetect is how to reset that
+    def _begin_identify(self, streaming: bool) -> None:
+        """Start Local/Start Streaming was just pressed — remember which
+        (read back by _confirm_start once Play is pressed) and kick off a
+        fresh auto-detect scan. `self._phase` stays "idle" throughout;
+        only Play actually opens a session."""
+        self._pending_streaming = streaming
+        self._identify_state = "identifying"
+        self._detected_instrument = ""
         self.detected_instrument_var.set("")
         self.auto_detect_status_var.set("Listening...")
+        self.redetect_button.state(["disabled"])
+        self._tuner_note = None
+        self._tuner_smoother.reset()
+        self.tuner_meter.clear()
+        self.tuner_meter.grid()
+        self.streamdeck_emulator.update_recording_page(self._phase, self._video_check_phase, self._identify_state)
+        self._update_start_button_state()
         backend = self.app_state.backend
         self._run_backend(
             lambda: backend.start_auto_detect_instrument(),
@@ -740,22 +785,42 @@ class RecordFrame(ttk.Frame):
         if error:
             self.auto_detect_status_var.set(error)
 
-    def _on_redetect_instrument(self) -> None:
+    def _redo_identify(self) -> None:
+        """Re-identify — available throughout "identifying"/"ready" so a
+        stalled or wrong detection can be restarted without backing all
+        the way out to Start Local/Start Streaming (which would also lose
+        the streaming/local choice already made)."""
+        self._identify_state = "identifying"
         self._detected_instrument = ""
         self.detected_instrument_var.set("")
-        self._update_start_button_state()
-        self._refresh_setlist()
+        self.auto_detect_status_var.set("Listening...")
         self.redetect_button.state(["disabled"])
+        self._tuner_note = None
+        self._tuner_smoother.reset()
+        self.tuner_meter.clear()
+        self.streamdeck_emulator.update_recording_page(self._phase, self._video_check_phase, self._identify_state)
+        self._update_start_button_state()
         backend = self.app_state.backend
         # Fire-and-forget the stop (a no-op if nothing's actually still
-        # running, e.g. detection already finished) then start a fresh
+        # running, e.g. detection already committed) then start a fresh
         # scan — chained so the second call doesn't race the first's
         # mutual-exclusion teardown.
         self._run_backend(
             lambda: (backend.stop_auto_detect_instrument(), backend.start_auto_detect_instrument()),
             lambda _result, error: self._on_auto_detect_start_result(error),
         )
-        self.auto_detect_status_var.set("Listening...")
+
+    def _confirm_start(self) -> None:
+        """Play, pressed once auto-detect has committed to an instrument —
+        the moment the identify cycle actually ends and a session opens.
+        Deliberately doesn't reset self._identify_state itself:
+        _handle_backend_event's "recording_status" handling does that once
+        _phase actually leaves "idle", so a start failure (see
+        _on_start_result) leaves identify_state — and the emulator's
+        still-displayed "ready" layout — untouched, ready for the user to
+        just press Play again rather than losing the detected instrument
+        and having to redo the whole identify cycle."""
+        self._start_recording(streaming=self._pending_streaming)
 
     def _handle_auto_detect_status(self, data: dict) -> None:
         phase = data.get("phase")
@@ -769,11 +834,43 @@ class RecordFrame(ttk.Frame):
             full_name = data.get("full_name", "")
             detail = " — ".join(part for part in (label, full_name) if part)
             self.auto_detect_status_var.set(f"Detected ({detail})" if detail else "Detected.")
+            if self._identify_state == "identifying":
+                self._identify_state = "ready"
+                # Every channel's stream just got torn down (see Backend.
+                # start_auto_detect_instrument), so no more tuner_status
+                # events are coming until the next scan — but deliberately
+                # leave the meter showing its last reading rather than
+                # hiding it: it should stay up right through "ready" until
+                # Play actually opens a session (_confirm_start) or Re-
+                # identify starts over (_redo_identify), not disappear the
+                # instant detection locks in before there's been a chance
+                # to actually look at it and finish tuning.
             self.redetect_button.state(["!disabled" if self._phase == "idle" else "disabled"])
             self._refresh_setlist()
             self._update_start_button_state()
         elif phase == "stopped":
             self.auto_detect_status_var.set("")
+        self.streamdeck_emulator.update_recording_page(self._phase, self._video_check_phase, self._identify_state)
+
+    def _handle_tuner_status(self, data: dict) -> None:
+        # Meaningful throughout the whole identify cycle, not just
+        # "identifying" — once auto-detect commits, Backend keeps the
+        # needle live via _attach_tuner_sink (tapping the ambient monitor
+        # it opens on the just-detected channel), so readings keep
+        # arriving all through "ready" too, right up until Play actually
+        # opens a session (see backend.py's on_channel_detected/
+        # _attach_tuner_sink). Only "idle" — no identify cycle in
+        # progress at all — means a reading has nothing left to show it
+        # on (e.g. one straggling in from a scan already superseded by a
+        # session opening some other way).
+        if self._identify_state == "idle":
+            return
+        note = data.get("note")
+        if note is None:
+            return
+        self._tuner_note = note
+        self._tuner_cents = self._tuner_smoother.update(note, float(data.get("cents", 0.0)))
+        self.tuner_meter.set_reading(self._tuner_note, self._tuner_cents)
 
     def _select_row(self, index: int) -> None:
         if not self._setlist or index >= len(self._setlist.tracks):
@@ -962,7 +1059,9 @@ class RecordFrame(ttk.Frame):
         self.project_combo.configure(state=combo_state)
         self._setlist_interactive = enabled
         self.refresh_devices_button.state(["!disabled"] if enabled else ["disabled"])
-        self.redetect_button.state(["!disabled" if (enabled and self._detected_instrument) else "disabled"])
+        self.redetect_button.state(
+            ["!disabled" if (enabled and self._identify_state in ("identifying", "ready")) else "disabled"]
+        )
 
     # --- refresh devices (camera/audio plugged in after the UI was launched) ---
 
@@ -1068,22 +1167,30 @@ class RecordFrame(ttk.Frame):
 
     def _on_emulator_key(self, key: str) -> None:
         """Dispatch a click on the on-screen Stream Deck emulator. "r"
-        (Start Local/Unpause/Stop) and "s" (Start Streaming, only
-        meaningful while idle — see RECORDING_IDLE_BUTTONS) reuse this
-        frame's own request-building and loading-state handling verbatim —
-        same as a mouse click on the old ttk button did — since they're the
-        keys with real Tk-side UI state to manage. Every other key (Next/
-        Restart/Monitor/volume) has no Tk equivalent of its own and goes
-        straight through the shared driver, exactly like a physical Stream
-        Deck press does (see _on_streamdeck_key)."""
+        (Start Local/Unpause/Stop), "s" (Start Streaming), "i" (Re-
+        identify), and "p" (Play) reuse this frame's own request-building
+        and loading-state handling verbatim — same as a mouse click on the
+        old ttk button did — since they're the keys with real Tk-side UI
+        state to manage (see the "instrument identify cycle" section
+        above). Every other key (Next/Restart/Monitor/volume) has no Tk
+        equivalent of its own and goes straight through the shared driver,
+        exactly like a physical Stream Deck press does (see
+        _on_streamdeck_key)."""
         if key in ("r", "s"):
             self._on_toggle_recording(streaming=(key == "s"))
+        elif key == "i":
+            if self._phase == "idle" and self._identify_state in ("identifying", "ready"):
+                self._redo_identify()
+        elif key == "p":
+            if self._phase == "idle" and self._identify_state == "ready":
+                self._confirm_start()
         else:
             self._streamdeck_driver.handle_key(key)
 
     def _on_toggle_recording(self, streaming: bool = False) -> None:
         if self._phase == "idle":
-            self._start_recording(streaming=streaming)
+            if self._identify_state == "idle":
+                self._begin_identify(streaming=streaming)
         elif self._phase == "waiting":
             self._unpause_recording()
         elif self._phase == "recording":
@@ -1235,20 +1342,34 @@ class RecordFrame(ttk.Frame):
             if "phase" in data:
                 self._phase = data["phase"]
                 self._update_recording_active()
-                self.streamdeck_emulator.update_recording_page(self._phase, self._video_check_phase)
-                self.streamdeck_emulator.set_key_enabled(0, True)
-                self._set_controls_enabled(self._phase == "idle")
                 if self._phase == "idle":
                     self._refresh_setlist_from_server()
-                    # Reset and re-listen for the *next* recording — a
-                    # session just ended, and the performer may well pick
-                    # up something else for the next one. See _start_
-                    # auto_detect's own no-op guard for why this is safe
-                    # to call unconditionally rather than only after an
-                    # actual take (it also fires after a session that
-                    # never got a take at all).
+                    # Reset for the *next* recording — a session just
+                    # ended, and the performer may well pick up something
+                    # else for the next one. Detection itself only
+                    # (re)starts once Start Local/Start Streaming is
+                    # pressed again — see _begin_identify.
                     self._detected_instrument = ""
-                    self._start_auto_detect()
+                    self.detected_instrument_var.set("")
+                    self.auto_detect_status_var.set("")
+                    self._identify_state = "idle"
+                    self.redetect_button.state(["disabled"])
+                    self._tuner_note = None
+                    self.tuner_meter.grid_remove()
+                else:
+                    # A session just actually opened — whether via Play
+                    # finishing the identify cycle (the normal path;
+                    # _confirm_start deliberately leaves this alone so a
+                    # start failure doesn't lose "ready") or some other way
+                    # entirely (e.g. a different Remote client called
+                    # start_recording directly while this frame's own
+                    # identify cycle was still in flight).
+                    self._identify_state = "idle"
+                    self._tuner_note = None
+                    self.tuner_meter.grid_remove()
+                self.streamdeck_emulator.update_recording_page(self._phase, self._video_check_phase, self._identify_state)
+                self.streamdeck_emulator.set_key_enabled(0, True)
+                self._set_controls_enabled(self._phase == "idle")
                 self._update_start_button_state()
         elif event == "instrument_detected":
             # Fired continuously during an active session by a separate,
@@ -1271,13 +1392,15 @@ class RecordFrame(ttk.Frame):
                 self.auto_detect_status_var.set(f"Live check: sounds like {data['instrument']}{detail}")
         elif event == "auto_detect_status":
             self._handle_auto_detect_status(data)
+        elif event == "tuner_status":
+            self._handle_tuner_status(data)
         elif event == "video_check_status":
             if "status" in data:
                 self.status_var.set(data["status"])
             if "phase" in data:
                 self._video_check_phase = data["phase"]
                 self._update_recording_active()
-                self.streamdeck_emulator.update_recording_page(self._phase, self._video_check_phase)
+                self.streamdeck_emulator.update_recording_page(self._phase, self._video_check_phase, self._identify_state)
                 self.video_check_button.configure(text=self._VIDEO_CHECK_BUTTON_TEXT[self._video_check_phase])
                 self.video_check_button.state(["!disabled"])
                 self._set_controls_enabled(self._video_check_phase == "idle")

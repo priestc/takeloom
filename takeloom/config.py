@@ -75,6 +75,14 @@ class Instrument:
     # classifier; no Studio Setup UI for them yet.
     freq_min_hz: float = 0.0
     freq_max_hz: float = 0.0
+    # String/target notes for the Record tab's tuner (see audio/pitch.py,
+    # audio/instrument_classifier.py's TunerTracker), low to high, e.g.
+    # ["E2","A2","D3","G3","B3","E4"] for standard-tuned guitar. Empty
+    # (the default) falls back to pitch.py's DEFAULT_TUNING_BY_LABEL for
+    # this instrument's label, same "unset -> label default" convention
+    # freq_min_hz/freq_max_hz already use — set via Studio Setup's
+    # Instruments table.
+    tuning: list[str] = field(default_factory=list)
 
 
 @dataclass

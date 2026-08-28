@@ -45,6 +45,14 @@ detect-test's "Currently Detected" stats panel (min/max frequency heard,
 and a rough polyphony count from distinct spectral peaks). Unrelated to
 which instrument (if any) has been identified; see analyze_spectrum for
 the peak-picking heuristic and its honest limitations.
+
+Also home to TunerTracker — a third, independent per-channel listener
+start_auto_detect_instrument runs alongside InstrumentClassifier while
+the deck's "identifying" phase is listening (see recording_driver.py),
+feeding the Record tab's tuner needle. Like NoteCapture, it assumes a
+single monophonic note (one plucked string) and uses estimate_pitch
+rather than analyze_spectrum's multi-peak picking — a tuner needs a
+clean, precise single-fundamental read, not polyphony awareness.
 """
 
 from __future__ import annotations
@@ -443,6 +451,13 @@ _MAX_HARMONIC_NUMBER = 8
 # is meant to read as "live", not wait for a confident instrument guess.
 _STATS_WINDOW_SECONDS = 0.5
 
+# How much captured audio TunerTracker accumulates per autocorrelation
+# pass — short enough that a needle still reads as "live" (matches
+# NoteCapture's own 0.25s per-chunk estimate size), long enough to hold
+# several full periods even at a low bass string's fundamental (~E1,
+# 41Hz — 0.25s is ~10 cycles).
+_TUNER_WINDOW_SECONDS = 0.25
+
 
 def _fundamental_peaks(peak_freqs: list[float]) -> list[float]:
     """Collapse a list of spectral peaks (ascending) down to just the
@@ -614,3 +629,49 @@ class NoteCapture:
             if (pitch := estimate_pitch(samples[start:start + chunk_size], self._sample_rate)) is not None
         ]
         self._on_captured(float(np.median(estimates)) if estimates else None)
+
+
+class TunerTracker:
+    """Feed captured mono blocks in via process_block(); on_pitch(hz)
+    fires from a background thread roughly every _TUNER_WINDOW_SECONDS of
+    non-silent audio — a continuous, "keep reporting for as long as
+    there's something to hear" sibling of NoteCapture's one-shot capture,
+    for the Record tab's live tuner needle rather than Studio Setup's
+    Train flow. Like NoteCapture (and unlike InstrumentClassifier/
+    SpectralStatsTracker), assumes a single monophonic note — one
+    plucked/bowed string at a time, which is how tuning actually works —
+    so it uses estimate_pitch's autocorrelation rather than analyze_
+    spectrum's multi-peak FFT picking. on_pitch is only ever called with
+    an actual Hz value, never None — a window with nothing confidently
+    periodic in it just doesn't report anything that round, same as a
+    real hardware tuner's needle simply not moving between notes."""
+
+    def __init__(
+        self, sample_rate: int, on_pitch: Callable[[float], None], fmin: float = 30.0, fmax: float = 1200.0,
+    ) -> None:
+        self._sample_rate = sample_rate
+        self._on_pitch = on_pitch
+        self._fmin = fmin
+        self._fmax = fmax
+        self._window_samples = int(sample_rate * _TUNER_WINDOW_SECONDS)
+        self._buffer: list[np.ndarray] = []
+        self._buffered_samples = 0
+
+    def process_block(self, mono: np.ndarray) -> None:
+        block = mono[:, 0] if mono.ndim > 1 else mono
+        if float(np.max(np.abs(block))) < SILENCE_THRESHOLD:
+            return
+        self._buffer.append(block.copy())
+        self._buffered_samples += len(block)
+        if self._buffered_samples < self._window_samples:
+            return
+        snapshot = self._buffer
+        self._buffer = []
+        self._buffered_samples = 0
+        threading.Thread(target=self._analyze, args=(snapshot,), daemon=True).start()
+
+    def _analyze(self, blocks: list[np.ndarray]) -> None:
+        samples = np.concatenate(blocks).astype(np.float64)
+        pitch = estimate_pitch(samples, self._sample_rate, self._fmin, self._fmax)
+        if pitch is not None:
+            self._on_pitch(pitch)

@@ -16,7 +16,9 @@ train/stop_instrument_test), are deliberately pulled out of this tab for
 now — not removed from the backend, just not wired up here. Train is
 coming back later; until then Min/Max Hz just round-trip whatever's
 already in config unchanged (see _InstrumentRow), with no UI to view or
-edit them.
+edit them. Tuning (the Record tab's tuner needle target notes — see
+audio/pitch.py) *is* editable here, as a free-text "E2 A2 D3 G3 B3 E4"-
+style field, unlike Min/Max Hz.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from ..audio.filters import COMPRESSOR_PRESETS, CompressorSettings
+from ..audio.pitch import TUNING_PRESETS_BY_LABEL, format_tuning, parse_tuning
 from ..backend import BackendError
 from ..config import INSTRUMENT_LABELS, Instrument, InputLabel, StudioConfig
 from .app_state import AppState
@@ -116,7 +119,15 @@ class _InstrumentRow:
     (see the module docstring's note on Detect/Train being pulled out),
     but freq_min_var/freq_max_var still round-trip whatever's already in
     config unchanged (set from the loaded Instrument, read back by
-    to_instrument()) rather than silently dropping it on save."""
+    to_instrument()) rather than silently dropping it on save. Tuning
+    *is* rendered, as an editable combobox (tuning_var) — typing a custom
+    tuning still works (parse_tuning tolerates a typo by just dropping
+    that one token, same tolerance _parse_hz already extends to a
+    garbled Min/Max Hz entry), but its dropdown also offers common named
+    presets for whichever instrument label is currently selected (see
+    audio/pitch.py's TUNING_PRESETS_BY_LABEL and _refresh_tuning_presets/
+    _on_tuning_preset_picked below) — empty (no presets, e.g. drums/
+    piano/organ) just leaves it a plain text field."""
 
     def __init__(
         self,
@@ -130,6 +141,7 @@ class _InstrumentRow:
         musician: str = "",
         freq_min_hz: float = 0.0,
         freq_max_hz: float = 0.0,
+        tuning: list[str] | None = None,
     ) -> None:
         self._on_remove = on_remove
 
@@ -139,16 +151,44 @@ class _InstrumentRow:
         self.musician_var = tk.StringVar(value=musician)
         self.freq_min_var = tk.StringVar(value=(f"{freq_min_hz:g}" if freq_min_hz else ""))
         self.freq_max_var = tk.StringVar(value=(f"{freq_max_hz:g}" if freq_max_hz else ""))
+        self.tuning_var = tk.StringVar(value=format_tuning(tuning or []))
+        # display name -> notes for whichever label is currently selected
+        # — refreshed by _refresh_tuning_presets, read by _on_tuning_
+        # preset_picked once the user actually picks one from the
+        # dropdown popup (typing a custom value never touches this).
+        self._tuning_presets: dict[str, list[str]] = {}
+
+        tuning_combo = ttk.Combobox(table, textvariable=self.tuning_var, width=22)
+        tuning_combo.bind("<<ComboboxSelected>>", self._on_tuning_preset_picked)
 
         self.widgets = [
             ttk.Entry(table, textvariable=self.full_name_var, width=20),
             ttk.Combobox(table, textvariable=self.label_var, values=INSTRUMENT_LABELS, state="readonly", width=16),
             ttk.Combobox(table, textvariable=self.input_label_var, values=input_label_names, state="readonly", width=12),
             ttk.Entry(table, textvariable=self.musician_var, width=10),
+            tuning_combo,
             ttk.Button(table, text="Remove", command=lambda: self._on_remove(self)),
         ]
         for col, widget in enumerate(self.widgets):
             widget.grid(row=row, column=col, sticky="w", padx=(0, 4), pady=2)
+
+        self._refresh_tuning_presets()
+        # Not the label combobox's own <<ComboboxSelected>> — a trace
+        # catches every way label_var can change (picking a different
+        # label being the only one right now, but this way nothing new
+        # that sets it programmatically later would silently stop
+        # refreshing the tuning dropdown too).
+        self.label_var.trace_add("write", self._refresh_tuning_presets)
+
+    def _refresh_tuning_presets(self, *_args) -> None:
+        presets = TUNING_PRESETS_BY_LABEL.get(self.label_var.get().strip(), [])
+        self._tuning_presets = dict(presets)
+        self.widgets[4]["values"] = list(self._tuning_presets.keys())
+
+    def _on_tuning_preset_picked(self, _event: object = None) -> None:
+        notes = self._tuning_presets.get(self.tuning_var.get())
+        if notes is not None:
+            self.tuning_var.set(format_tuning(notes))
 
     def set_row(self, row: int) -> None:
         for widget in self.widgets:
@@ -170,6 +210,7 @@ class _InstrumentRow:
             musician=self.musician_var.get().strip(),
             freq_min_hz=self._parse_hz(self.freq_min_var),
             freq_max_hz=self._parse_hz(self.freq_max_var),
+            tuning=parse_tuning(self.tuning_var.get()),
         )
 
     @staticmethod
@@ -599,7 +640,9 @@ class StudioSetupFrame(ttk.Frame):
             text="Label is the instrument's type (e.g. \"electric-guitar\") — different instruments "
                  "sharing a label (a Stratocaster and a Telecaster, say) count as satisfying the same "
                  "song's need for a take, so recording one with either won't have the setlist offer "
-                 "it again for the other.",
+                 "it again for the other. Tuning is the Record tab's tuner target notes, low to high "
+                 "(e.g. \"E2 A2 D3 G3 B3 E4\" for standard guitar) — leave blank to use a sensible "
+                 "default for the instrument's label.",
             foreground="#666666", wraplength=760, justify="left",
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(2, 6))
         row += 1
@@ -608,14 +651,14 @@ class StudioSetupFrame(ttk.Frame):
         self.table.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         row += 1
 
-        for col, text in enumerate(["Full name", "Label", "Input", "Musician", ""]):
+        for col, text in enumerate(["Full name", "Label", "Input", "Musician", "Tuning", ""]):
             ttk.Label(self.table, text=text).grid(row=0, column=col, sticky="w", padx=(0, 6))
 
         for inst in self.config_obj.instruments:
             self._add_instrument_row(
                 input_label_names, input_label=inst.input_label,
                 full_name=inst.full_name, label=inst.label, musician=inst.musician,
-                freq_min_hz=inst.freq_min_hz, freq_max_hz=inst.freq_max_hz,
+                freq_min_hz=inst.freq_min_hz, freq_max_hz=inst.freq_max_hz, tuning=inst.tuning,
             )
         if not self.config_obj.instruments:
             self._add_instrument_row(input_label_names)
@@ -709,7 +752,7 @@ class StudioSetupFrame(ttk.Frame):
     def _add_instrument_row(
         self, input_label_names: list[str], input_label: str = "",
         full_name: str = "", label: str = "", musician: str = "",
-        freq_min_hz: float = 0.0, freq_max_hz: float = 0.0,
+        freq_min_hz: float = 0.0, freq_max_hz: float = 0.0, tuning: list[str] | None = None,
     ) -> None:
         if self.table is None:
             return
@@ -717,7 +760,7 @@ class StudioSetupFrame(ttk.Frame):
         row = _InstrumentRow(
             self.table, row_index, input_label_names, self._remove_instrument_row,
             input_label=input_label, full_name=full_name, label=label, musician=musician,
-            freq_min_hz=freq_min_hz, freq_max_hz=freq_max_hz,
+            freq_min_hz=freq_min_hz, freq_max_hz=freq_max_hz, tuning=tuning,
         )
         self._instrument_rows.append(row)
         self._bind_mousewheel(self._canvas)
