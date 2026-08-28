@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 from typing import Callable
 
@@ -154,17 +155,37 @@ _RECORDING_REDRAW: tuple = (10, "dice", "Redraw", "d", None, (150, 90, 220), (15
 # filter (index 10 is out of range for an 8-key deck).
 _RECORDING_REDRAW_DIAL: tuple = (4, "dice", "Redraw", "d", None, (150, 90, 220), (150, 90, 220))
 
-# The idle-only layout: two explicit "how do you want to start" choices
-# instead of a single Start button plus a separate settings-tab checkbox,
-# so streaming-vs-not is decided at the moment a session actually starts.
-# Both key indices are reused by the active layout below once a session
-# opens (0 becomes the Start/Unpause/Stop toggle, 1 becomes Restart) —
-# update_recording_page swaps the whole button set the moment phase
-# crosses the idle boundary in either direction, so the two never
-# coexist on the deck.
+# The idle-family layouts — three sub-states, all only ever shown while
+# Backend's own recording phase is "idle" (see update_recording_page's
+# `identify_state` argument for how RecordingDeckDriver picks between
+# them):
+#
+# - "idle": two explicit "how do you want to start" choices instead of a
+#   single Start button plus a separate settings-tab checkbox, so
+#   streaming-vs-not is decided at the moment a session actually starts.
+# - "identifying": entered the instant either idle button is pressed —
+#   auto-detect is listening in the background (RecordingDeckDriver kicks
+#   it off right then, not automatically on every idle transition the way
+#   headless server mode briefly did) and there's nothing to press yet but
+#   Re-identify, in case the scan needs restarting.
+# - "ready": auto-detect has committed to an instrument — Play (what was
+#   remembered as "Start Local" or "Start Streaming" back in "idle")
+#   finally opens the session; Re-identify stays available in case the
+#   wrong instrument got picked.
+#
+# Key indices 0-2 are reused by the active layout below once a session
+# actually opens (0 becomes the Start/Unpause/Stop toggle, 1 becomes
+# Restart, 2 becomes Next) — update_recording_page swaps the whole button
+# set the moment phase crosses the idle boundary in either direction, or
+# identify_state changes while still idle, so none of these ever coexist
+# on the deck.
 _RECORDING_START_LOCAL: tuple = (0, "record", "Start Local", "r", None, (0, 200, 0), (0, 200, 0))
 _RECORDING_START_STREAMING: tuple = (1, "record", "Start Streaming", "s", None, (230, 0, 120), (230, 0, 120))
+_RECORDING_REIDENTIFY: tuple = (2, "refresh", "Re-identify", "i", None, (90, 90, 210), (90, 90, 210))
+_RECORDING_PLAY: tuple = (0, "play", "Play", "p", None, (0, 200, 0), (0, 200, 0))
 RECORDING_IDLE_BUTTONS: list[tuple] = [_RECORDING_START_LOCAL, _RECORDING_START_STREAMING]
+RECORDING_IDENTIFYING_BUTTONS: list[tuple] = [_RECORDING_REIDENTIFY]
+RECORDING_IDENTIFIED_BUTTONS: list[tuple] = [_RECORDING_PLAY, _RECORDING_REIDENTIFY]
 
 # Colors for the monitor-mode toggle — see update_monitoring_mode(). Live
 # Monitor reuses Restart's "hot/active" orange (it's the same zero-latency
@@ -275,6 +296,83 @@ def _draw_progress_bar(draw: "ImageDraw.ImageDraw", canvas_w: int, cy: int, posi
     draw.text((canvas_w - 8, cy), remaining_text, anchor="rm", font=font, fill=(200, 200, 200))
 
 
+# Cents within this of dead-center reads as "in tune" (green needle/zone)
+# — roughly a real hardware tuner's own tolerance. Beyond _TUNER_WARN_
+# CENTS the zone/needle goes red rather than amber — meaningfully off,
+# not just "a little flat". Cents beyond _TUNER_DISPLAY_RANGE_CENTS
+# either way just pin the needle at the scale's edge rather than trying
+# to show exactly how far off — nobody needs a precise number when a
+# string is a semitone-plus flat, just "a lot, that way".
+_TUNER_IN_TUNE_CENTS = 5.0
+_TUNER_WARN_CENTS = 25.0
+_TUNER_DISPLAY_RANGE_CENTS = 50.0
+_TUNER_GREEN = (0, 210, 130)
+_TUNER_AMBER = (230, 160, 0)
+_TUNER_RED = (215, 70, 60)
+
+
+def _tuner_needle_color(cents: float) -> tuple:
+    if abs(cents) <= _TUNER_IN_TUNE_CENTS:
+        return _TUNER_GREEN
+    if abs(cents) <= _TUNER_WARN_CENTS:
+        return _TUNER_AMBER
+    return _TUNER_RED
+
+
+def _draw_tuner_needle(draw: "ImageDraw.ImageDraw", canvas_w: int, cy: int, note: str, cents: float) -> None:
+    """The live tuner: `note` (e.g. "E2", already resolved against the
+    playing instrument's configured string tuning — see audio/pitch.py's
+    nearest_target) at the left, and a horizontal ±_TUNER_DISPLAY_RANGE_
+    CENTS scale — a dark background track (so the needle reads against
+    something, not bare black touchscreen), red/amber/green zone bands
+    inside it (same at-a-glance idea as _draw_progress_bar's fill color,
+    just for pitch instead of playback position), a clearly-marked center
+    (dead in tune) and both ends (±_TUNER_DISPLAY_RANGE_CENTS), and a
+    needle marking how sharp/flat `cents` currently is. `cents` is
+    expected to already be smoothed by the caller (see RecordingDeckDriver
+    .tuner_cents/audio/pitch.py's TunerSmoother) — this just draws
+    whatever it's given."""
+    font_note = _load_font(22)
+    color = _tuner_needle_color(cents)
+
+    draw.text((16, cy), note, anchor="lm", font=font_note, fill=color)
+
+    scale_left, scale_right = 90, canvas_w - 16
+    scale_mid = (scale_left + scale_right) // 2
+    half_width = scale_right - scale_mid
+
+    def x_at(cents_value: float) -> int:
+        frac = max(-1.0, min(1.0, cents_value / _TUNER_DISPLAY_RANGE_CENTS))
+        return scale_mid + int(frac * half_width)
+
+    track_half_h = 12
+    draw.rounded_rectangle(
+        [scale_left, cy - track_half_h, scale_right, cy + track_half_h], radius=6, fill=(32, 32, 32),
+    )
+
+    band_half_h = 8
+    green_l, green_r = x_at(-_TUNER_IN_TUNE_CENTS), x_at(_TUNER_IN_TUNE_CENTS)
+    warn_l, warn_r = x_at(-_TUNER_WARN_CENTS), x_at(_TUNER_WARN_CENTS)
+    draw.rectangle([scale_left, cy - band_half_h, warn_l, cy + band_half_h], fill=(70, 35, 30))
+    draw.rectangle([warn_l, cy - band_half_h, green_l, cy + band_half_h], fill=(70, 55, 15))
+    draw.rectangle([green_l, cy - band_half_h, green_r, cy + band_half_h], fill=(15, 65, 40))
+    draw.rectangle([green_r, cy - band_half_h, warn_r, cy + band_half_h], fill=(70, 55, 15))
+    draw.rectangle([warn_r, cy - band_half_h, scale_right, cy + band_half_h], fill=(70, 35, 30))
+
+    # End markers (the ±_TUNER_DISPLAY_RANGE_CENTS boundary) and the
+    # center mark (dead in tune) — the center drawn taller/brighter so
+    # it's unmistakably the "aim for here" reference, not just another
+    # tick.
+    draw.line([scale_left, cy - track_half_h, scale_left, cy + track_half_h], fill=(140, 140, 140), width=2)
+    draw.line([scale_right, cy - track_half_h, scale_right, cy + track_half_h], fill=(140, 140, 140), width=2)
+    draw.line(
+        [scale_mid, cy - track_half_h - 5, scale_mid, cy + track_half_h + 5], fill=(235, 235, 235), width=3,
+    )
+
+    needle_x = x_at(cents)
+    draw.line([needle_x, cy - track_half_h - 7, needle_x, cy + track_half_h + 7], fill=color, width=4)
+
+
 def _draw_icon(draw: "ImageDraw.ImageDraw", icon: str, cx: int, cy: int, size: int) -> None:
     """Draw a white icon centered at (cx, cy) within a size×size bounding box."""
     r = size // 2
@@ -340,6 +438,16 @@ def _draw_icon(draw: "ImageDraw.ImageDraw", icon: str, cx: int, cy: int, size: i
         if icon == "vol_up":
             mx = (sx1 + sx2) // 2
             draw.line([mx, sy - q // 2, mx, sy + q // 2], fill=f, width=lw)
+
+    elif icon == "refresh":    # circular re-scan arrow, arrowhead at the gap
+        start_deg, end_deg = 40, 320
+        draw.arc([cx - r, cy - r, cx + r, cy + r], start=start_deg, end=end_deg, fill=f, width=lw)
+        head = max(3, size // 6)
+        hx = cx + r * math.cos(math.radians(start_deg))
+        hy = cy - r * math.sin(math.radians(start_deg))
+        draw.polygon(
+            [(hx, hy), (hx - head, hy - head // 2), (hx - head // 3, hy + head)], fill=f,
+        )
 
     elif icon in ("takes_dn", "takes_up"):
         # Three stacked horizontal bars (like track lanes in a DAW)
@@ -421,9 +529,22 @@ class StreamDeckController:
         self._device_key: str | None = None
         self._has_dials = False
         self._buttons: list[tuple] = []
-        self._idle_layout = True  # tracks which of RECORDING_IDLE_BUTTONS/_active_recording_buttons() is live
+        # Tracks which button table is currently painted: "idle"
+        # (RECORDING_IDLE_BUTTONS), "identifying" (RECORDING_IDENTIFYING_
+        # BUTTONS), "ready" (RECORDING_IDENTIFIED_BUTTONS), or "active"
+        # (_active_recording_buttons()) — see update_recording_page.
+        self._layout_state = "idle"
         self._dial_map: dict[int, tuple[str, str, str]] = dict(_SESSION_DIAL_MAP)
         self._lock = threading.Lock()
+        # (icon, label, color) last painted on each key — every real key
+        # draw goes through _paint_key() to keep this current, so
+        # acknowledge_press() can flash a key on contact and then put its
+        # actual face back. See _on_key_change.
+        self._key_faces: dict[int, tuple] = {}
+        # Bumped by every notify() call; a pending _revert_touchscreen only
+        # fires if it's still the latest, so two overlapping messages don't
+        # cut each other short.
+        self._notify_gen = 0
         # Touchscreen content, cached here rather than passed fresh on
         # every redraw — update_playback_position() (RecordingDeckDriver's
         # once-a-second polling ticker, see that module) only ever changes
@@ -436,6 +557,18 @@ class StreamDeckController:
         self._touchscreen_instrument_text: str | None = None
         self._touchscreen_position: float = 0.0
         self._touchscreen_duration: float = 0.0
+        # The tuner needle (see _draw_tuner_needle) — set only while
+        # RecordingDeckDriver's identify_state is "identifying" and a
+        # confident pitch has actually come in (see its own tuner_note/
+        # tuner_cents); None the rest of the time, in which case the
+        # progress bar takes this same touchscreen row instead (the two
+        # never have anything to show at once in practice — there's no
+        # track loaded yet during "identifying" — but showing whichever
+        # one actually has something is simpler than reasoning about
+        # phase here too). See update_recording_page's tuner_note/
+        # tuner_cents parameters.
+        self._touchscreen_tuner_note: str | None = None
+        self._touchscreen_tuner_cents: float = 0.0
         # Only set when a device was actually found but failed to open/
         # configure — "no device plugged in" (the common case for anyone
         # without a Stream Deck) deliberately leaves this unset, so callers
@@ -540,7 +673,7 @@ class StreamDeckController:
         deck are dropped rather than drawn out of range (e.g. the 6-key
         Mini)."""
         self._dial_map = dict(_SESSION_DIAL_MAP)
-        self._idle_layout = True
+        self._layout_state = "idle"
         self._apply_layout(list(RECORDING_IDLE_BUTTONS), skip_indices=frozenset())
 
     def _active_recording_buttons(self) -> list[tuple]:
@@ -548,6 +681,78 @@ class StreamDeckController:
         if self._has_dials:
             return [_RECORDING_REDRAW_DIAL if btn[0] == 10 else btn for btn in buttons]
         return buttons + RECORDING_VOLUME_BUTTONS
+
+    def _paint_key(self, idx: int, icon: str | None, label: str | None, color: tuple) -> None:
+        """The single path every real key draw goes through, so
+        self._key_faces always reflects what's actually on each key —
+        acknowledge_press() flashes a key the instant it's touched and
+        needs its true face to put back afterwards. Callers hold
+        self._lock (every current one already does)."""
+        self._key_faces[idx] = (icon, label, color)
+        self._deck.set_key_image(idx, self._make_key_image(icon, label, color))
+
+    def acknowledge_press(self, key_index: int) -> None:
+        """Flash `key_index` bright the instant its press registers, then
+        let it fall back to its real face a fraction of a second later —
+        so the deck visibly reacts even when the press kicks off something
+        slow (a network call, hardware spin-up) that won't repaint the key
+        itself for a while. Runs on the Stream Deck's own key-event
+        thread and returns immediately; a redraw triggered by the press
+        just paints over the flash early, which is fine."""
+        if not self.connected:
+            return
+        face = self._key_faces.get(key_index)
+        if face is None:
+            return
+        icon, label, base_color = face
+        flash = tuple(min(255, c + 110) for c in base_color)
+        try:
+            with self._lock:
+                self._deck.set_key_image(key_index, self._make_key_image(icon, label, flash))
+        except Exception:
+            return
+        threading.Timer(0.18, self._restore_key, args=(key_index,)).start()
+
+    def _restore_key(self, key_index: int) -> None:
+        face = self._key_faces.get(key_index)
+        if face is None or not self.connected:
+            return
+        try:
+            with self._lock:
+                self._deck.set_key_image(key_index, self._make_key_image(*face))
+        except Exception:
+            pass
+
+    def notify(self, text: str, revert_after: float = 3.0) -> None:
+        """Flash a one-line message across the touchscreen (dial decks
+        only — a no-op otherwise, the caller logs the same text
+        regardless), then restore the normal touchscreen after
+        `revert_after` seconds. For telling the performer *why* the deck
+        just went quiet — a slow query, an error — rather than leaving
+        them staring at an unchanged screen."""
+        if not self.connected or not self._has_dials:
+            return
+        self._notify_gen += 1
+        gen = self._notify_gen
+        try:
+            with self._lock:
+                img = PILHelper.create_touchscreen_image(self._deck, background="black")
+                draw = ImageDraw.Draw(img)
+                w, h = img.size
+                draw.text((w // 2, h // 2), text, anchor="mm", font=_load_font(20), fill="white")
+                self._deck.set_touchscreen_image(
+                    PILHelper.to_native_touchscreen_format(self._deck, img),
+                    x_pos=0, y_pos=0, width=w, height=h,
+                )
+        except Exception:
+            return
+        threading.Timer(max(0.5, revert_after), self._revert_touchscreen, args=(gen,)).start()
+
+    def _revert_touchscreen(self, gen: int) -> None:
+        if gen != self._notify_gen or not self.connected or not self._has_dials:
+            return
+        with self._lock:
+            self._update_touchscreen()
 
     def _apply_layout(self, buttons: list[tuple], skip_indices: frozenset) -> None:
         """Swap in a new key layout: blank every key the deck isn't using —
@@ -567,7 +772,7 @@ class StreamDeckController:
             used_indices = {btn[0] for btn in self._buttons}
             for idx in range(key_count):
                 if idx not in used_indices:
-                    self._deck.set_key_image(idx, self._make_key_image(None, None, (0, 0, 0)))
+                    self._paint_key(idx, None, None, (0, 0, 0))
             for btn in self._buttons:
                 idx, icon, _label, _key, _active_state, _active_color, _dim_color = btn
                 if idx in skip_indices or icon is None:
@@ -575,39 +780,53 @@ class StreamDeckController:
                 # Freshly applying the layout with no phase known yet — treat
                 # as "idle" (dimmed) until the first update_recording_page().
                 icon, label, color = button_visual(btn, "idle")
-                self._deck.set_key_image(idx, self._make_key_image(icon, label, color))
+                self._paint_key(idx, icon, label, color)
             if self._has_dials:
                 self._update_touchscreen()
 
     def update_recording_page(
         self, phase: str, video_check_phase: str = "idle", track_name: str | None = None,
-        instrument_text: str | None = None,
+        instrument_text: str | None = None, identify_state: str = "idle",
+        tuner_note: str | None = None, tuner_cents: float = 0.0,
     ) -> None:
         """Refresh the session toggle and dim/light Next/Restart/volume for
         the current phase, swapping the whole button layout the moment
-        phase crosses the idle boundary in either direction — idle shows
-        only the two Start buttons (RECORDING_IDLE_BUTTONS), anything else
-        shows the full in-session layout (_active_recording_buttons()). The
-        toggle is dimmed while a Video Check — triggered from the Tk UI or
-        a Remote client; there's no Stream Deck button for it — holds the
-        audio/camera hardware, since the two are mutually exclusive at the
-        backend level. `phase` is one of "idle"/"waiting"/"recording";
-        `video_check_phase` is "idle"/"recording". `track_name` and
-        `instrument_text`, on a dial deck, are shown on the touchscreen
-        above the dial labels (see _update_touchscreen) — same touchscreen
-        area update_inspiration() uses `track_name` for, just fed from
-        RecordingDeckDriver's own idea of "currently loaded/playing backing
-        track" instead of the inspiration filter's, and (for instrument_
-        text) "what auto-detect last found, or is currently listening for"
-        (see RecordingDeckDriver.detected_instrument) — shown whether idle
-        or mid-session, so it stays visible confirmation of what a take is
-        actually being filed under the whole time, not just before it
-        starts. Shared verbatim by the Tk UI, headless server, and CLI
-        drivers (and mirrored on-screen — buttons only, no touchscreen of
-        its own — by the Tk UI's emulator via the same recording_toggle_
-        visual()/button_visual() helpers). The monitor-mode toggle key
-        (index 3) is refreshed separately — see update_monitoring_mode() —
-        and only exists in the active layout."""
+        phase crosses the idle boundary in either direction, or (while
+        still idle) `identify_state` changes. While `phase` is "idle",
+        `identify_state` picks among the three idle-family layouts (see
+        the RECORDING_IDLE_BUTTONS/RECORDING_IDENTIFYING_BUTTONS/RECORDING_
+        IDENTIFIED_BUTTONS table comment above): "idle" (Start Local/Start
+        Streaming), "identifying" (Re-identify only — auto-detect is
+        listening, kicked off by RecordingDeckDriver the instant one of the
+        idle buttons was pressed), or "ready" (Play + Re-identify — auto-
+        detect has committed to an instrument). Any non-"idle" `phase`
+        shows the full in-session layout (_active_recording_buttons())
+        regardless of identify_state. The toggle is dimmed while a Video
+        Check — triggered from the Tk UI or a Remote client; there's no
+        Stream Deck button for it — holds the audio/camera hardware, since
+        the two are mutually exclusive at the backend level. `phase` is one
+        of "idle"/"waiting"/"recording"; `video_check_phase` is "idle"/
+        "recording". `track_name` and `instrument_text`, on a dial deck,
+        are shown on the touchscreen above the dial labels (see
+        _update_touchscreen) — same touchscreen area update_inspiration()
+        uses `track_name` for, just fed from RecordingDeckDriver's own idea
+        of "currently loaded/playing backing track" instead of the
+        inspiration filter's, and (for instrument_text) "what auto-detect
+        last found, or is currently listening for" (see RecordingDeckDriver.
+        detected_instrument) — shown whether idle or mid-session, so it
+        stays visible confirmation of what a take is actually being filed
+        under the whole time, not just before it starts. `tuner_note`/
+        `tuner_cents` are the live tuner needle (see _draw_tuner_needle) —
+        RecordingDeckDriver only ever passes a real tuner_note while its
+        identify_state is "identifying" and TunerTracker has actually
+        heard something confident; None the rest of the time, in which
+        case the same touchscreen row falls back to the progress bar
+        instead (see _update_touchscreen). Shared verbatim by the Tk UI,
+        headless server, and CLI drivers (and mirrored on-screen — buttons
+        only, no touchscreen of its own — by the Tk UI's emulator via the
+        same recording_toggle_visual()/button_visual() helpers). The
+        monitor-mode toggle key (index 3) is refreshed separately — see
+        update_monitoring_mode() — and only exists in the active layout."""
         if not self.connected:
             return
         if track_name != self._touchscreen_track_name:
@@ -620,11 +839,23 @@ class StreamDeckController:
             self._touchscreen_duration = 0.0
         self._touchscreen_track_name = track_name
         self._touchscreen_instrument_text = instrument_text
+        self._touchscreen_tuner_note = tuner_note
+        self._touchscreen_tuner_cents = tuner_cents
         is_idle = phase == "idle"
-        if is_idle != self._idle_layout:
-            self._idle_layout = is_idle
-            if is_idle:
+        if is_idle and identify_state in ("idle", "identifying", "ready"):
+            desired_state = identify_state
+        elif is_idle:
+            desired_state = "idle"
+        else:
+            desired_state = "active"
+        if desired_state != self._layout_state:
+            self._layout_state = desired_state
+            if desired_state == "idle":
                 self._apply_layout(list(RECORDING_IDLE_BUTTONS), skip_indices=frozenset())
+            elif desired_state == "identifying":
+                self._apply_layout(list(RECORDING_IDENTIFYING_BUTTONS), skip_indices=frozenset())
+            elif desired_state == "ready":
+                self._apply_layout(list(RECORDING_IDENTIFIED_BUTTONS), skip_indices=frozenset())
             else:
                 self._apply_layout(
                     self._active_recording_buttons(),
@@ -637,13 +868,13 @@ class StreamDeckController:
             return
         record_icon, record_label, record_color = recording_toggle_visual(phase, video_check_phase)
         with self._lock:
-            self._deck.set_key_image(0, self._make_key_image(record_icon, record_label, record_color))
+            self._paint_key(0, record_icon, record_label, record_color)
             for btn in self._buttons:
                 idx, icon, _label, _key, _active_state, _active_color, _dim_color = btn
                 if idx in (0, RECORDING_MONITOR_TOGGLE_KEY_INDEX) or icon is None:
                     continue
                 icon, label, color = button_visual(btn, phase)
-                self._deck.set_key_image(idx, self._make_key_image(icon, label, color))
+                self._paint_key(idx, icon, label, color)
             if self._has_dials:
                 self._update_touchscreen()
 
@@ -677,15 +908,17 @@ class StreamDeckController:
             return
         icon, label, color = monitor_toggle_visual(mode)
         with self._lock:
-            self._deck.set_key_image(
-                RECORDING_MONITOR_TOGGLE_KEY_INDEX, self._make_key_image(icon, label, color)
-            )
+            self._paint_key(RECORDING_MONITOR_TOGGLE_KEY_INDEX, icon, label, color)
 
     def _on_key_change(self, deck, key_index: int, pressed: bool) -> None:
         if not pressed:
             return
         for idx, _icon, _label, key_char, *_ in self._buttons:
             if idx == key_index:
+                # Flash the key right here on the HID event thread, before
+                # the callback runs — so the press is acknowledged
+                # instantly even if what it triggers takes a moment.
+                self.acknowledge_press(key_index)
                 self._key_callback(key_char)
                 return
 
@@ -714,12 +947,12 @@ class StreamDeckController:
             icon = "pause" if is_playing else "play"
             label = "Pause" if is_playing else "Play"
             color = (200, 130, 0) if is_playing else (0, 180, 0)
-            self._deck.set_key_image(0, self._make_key_image(icon, label, color))
+            self._paint_key(0, icon, label, color)
             for btn in self._buttons:
                 idx, icon, label, _key, _state, active_color, _dim = btn
                 if idx == 0 or icon is None:
                     continue
-                self._deck.set_key_image(idx, self._make_key_image(icon, label, active_color))
+                self._paint_key(idx, icon, label, active_color)
             if self._has_dials:
                 self._update_touchscreen()
 
@@ -735,6 +968,7 @@ class StreamDeckController:
                 pass
             self._deck = None
             self._device_key = None
+            self._key_faces.clear()
 
     def _make_key_image(self, icon: str | None, label: str | None, color: tuple) -> bytes:
         img = PILHelper.create_image(self._deck, background=color)
@@ -762,10 +996,22 @@ class StreamDeckController:
           detected_instrument for what it's showing and why it's still
           worth a glance, just not the star of the screen the way it was
           when this touchscreen first got auto-detect wired into it.
-        - playback progress bar: elapsed time / a filled bar / time
-          remaining, for whatever's currently loaded — blank when nothing
-          is (duration_seconds is 0), e.g. before a take starts playing.
-        - dial labels: unchanged, always shown.
+        - playback progress bar / tuner needle: whichever one currently
+          has something to show, in the same row — the progress bar for
+          elapsed/remaining time on whatever's currently loaded (blank
+          when duration_seconds is 0, e.g. before a take starts playing),
+          or the tuner needle (see _draw_tuner_needle) while Recording
+          DeckDriver's identify_state is "identifying" and a confident
+          pitch has come in. The two never actually have something to
+          show at the same time in practice (no track is loaded yet
+          during "identifying"), so tuner_note simply takes priority
+          when set rather than the two needing to coordinate on whose
+          turn it is.
+        - dial labels: shown always *except* while the tuner needle is —
+          the volume dials they'd be labeling do nothing until a session
+          is actually open (there's nothing to adjust yet), so during
+          tuning that row is just clutter behind/below the needle; see
+          _draw_tuner_needle.
         """
         try:
             img = PILHelper.create_touchscreen_image(self._deck, background="black")
@@ -778,14 +1024,18 @@ class StreamDeckController:
                           font=_load_font(22), fill="white")
             if self._touchscreen_instrument_text:
                 _draw_instrument_badge(draw, w, int(h * 0.44), self._touchscreen_instrument_text)
-            if self._touchscreen_duration > 0:
+            tuning = self._touchscreen_tuner_note is not None
+            if tuning:
+                _draw_tuner_needle(draw, w, int(h * 0.66), self._touchscreen_tuner_note, self._touchscreen_tuner_cents)
+            elif self._touchscreen_duration > 0:
                 _draw_progress_bar(draw, w, int(h * 0.66), self._touchscreen_position, self._touchscreen_duration)
 
-            label_y = int(h * 0.88)
-            for dial_idx, (_ccw, _cw, label) in self._dial_map.items():
-                x = section_w * dial_idx + section_w // 2
-                draw.text((x, label_y), label, anchor="mm",
-                          font=_load_font(14), fill=(160, 160, 160))
+            if not tuning:
+                label_y = int(h * 0.88)
+                for dial_idx, (_ccw, _cw, label) in self._dial_map.items():
+                    x = section_w * dial_idx + section_w // 2
+                    draw.text((x, label_y), label, anchor="mm",
+                              font=_load_font(14), fill=(160, 160, 160))
             img_bytes = PILHelper.to_native_touchscreen_format(self._deck, img)
             self._deck.set_touchscreen_image(img_bytes, x_pos=0, y_pos=0, width=w, height=h)
         except Exception:

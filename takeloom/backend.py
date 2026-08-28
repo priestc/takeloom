@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Callable
 
 from .audio.filters import CompressorSettings
+from .audio.pitch import effective_tuning, nearest_target
 from .audio.scarlett2_direct_monitor import FOCUSRITE_DEVICE_NAME, set_channel_gain
 from .config import DEFAULT_CONFIG_PATH, INSTRUMENT_LABELS, Instrument, StudioConfig
 from .project import Project, Setlist, TakeInfo, TrackEntry
@@ -786,7 +787,16 @@ class Backend(ABC):
         indefinitely. Raises BackendError immediately if a session, video
         check, latency test, instrument train, or a detect-all run is
         already active — same mutual exclusion as those — or if no
-        instrument's input can currently be opened at all."""
+        instrument's input can currently be opened at all.
+
+        Also emits "tuner_status" events ({input_label, note, cents,
+        frequency_hz}) roughly every quarter-second of non-silent audio
+        on any channel, for the Record tab's live tuner needle — see
+        audio/instrument_classifier.py's TunerTracker and audio/pitch.py's
+        nearest_target. `note`/`cents` are already resolved against
+        whichever instrument(s) share that channel's own tuning (or their
+        label's default), so a client just displays them; no separate
+        lookup needed."""
         ...
 
     @abstractmethod
@@ -2458,6 +2468,10 @@ class LocalBackend(Backend):
         cached = session.resolved_filter_picks.get(index)
         if cached is not None:
             return cached
+        # This queries the inspiration server (up to a 15s timeout) — say
+        # so, so a Stream Deck / headless operator isn't left watching an
+        # unchanged screen wondering whether the press registered.
+        self._emit("recording_status", {"status": f"Finding a track for the '{track.name}' filter…"})
         resolved = self._resolve_filter_slot(config, track, session.inst.full_name)
         session.resolved_filter_picks[index] = resolved
         session.completed_track_indices.add(index)
@@ -3001,10 +3015,45 @@ class LocalBackend(Backend):
             high_capture = NoteCapture(engine.sample_rate, _INSTRUMENT_TRAIN_CAPTURE_SECONDS, on_high_captured)
             engine.set_instrument_sink(high_capture.process_block)
 
+    def _emit_tuner_reading(self, input_label: str, freq_hz: float, tuning: list[str]) -> None:
+        """Resolve freq_hz against `tuning` (see audio/pitch.py's
+        nearest_target) and emit it as a "tuner_status" event — shared by
+        start_auto_detect_instrument's on_channel_tuner (the pre-
+        detection scan) and _attach_tuner_sink below (the post-detection
+        ambient-monitor tap), so the Record tab's tuner needle reads the
+        same regardless of which one is currently supplying the audio."""
+        note, _target_hz, cents = nearest_target(freq_hz, tuning)
+        self._emit("tuner_status", {
+            "input_label": input_label, "note": note, "cents": cents, "frequency_hz": freq_hz,
+        })
+
+    def _attach_tuner_sink(self, engine, input_label: str, tuning: list[str]) -> None:
+        """Feed the tuner from `engine`'s realtime instrument-channel
+        audio (see audio/engine.py's AudioEngine.set_instrument_sink)
+        rather than a dedicated scanning stream — used once start_auto_
+        detect_instrument's own TunerTracker-instrumented scan streams
+        have already torn down (see on_channel_detected there) but the
+        deck's identify_state is still "ready", not yet "idle": ambient
+        monitoring just reopened this exact channel anyway so the
+        performer can hear themselves, so tapping a TunerTracker onto
+        that same already-flowing audio keeps tuning live right up until
+        Play actually opens a session (which tears this engine down via
+        _close_active_monitor(), same as any other ambient-monitor
+        teardown) or Re-identify starts a fresh scan (start_auto_detect_
+        instrument's own _close_active_monitor() call does the same —
+        see that method). Caller must hold self._record_lock."""
+        from .audio.instrument_classifier import TunerTracker
+        tuner = TunerTracker(
+            engine.sample_rate,
+            lambda freq_hz: self._emit_tuner_reading(input_label, freq_hz, tuning),
+        )
+        engine.set_instrument_sink(tuner.process_block)
+
     # --- Detect-all (local-only; RemoteBackend refuses) ---
 
     def _open_channel_classifier_streams(
         self, config: StudioConfig, on_channel_detected, on_channel_active=None, on_channel_stats=None,
+        on_channel_tuner=None,
     ) -> tuple[list, list[str]]:
         """Shared scanning core behind start_detect_all and start_auto_
         detect_instrument: opens one raw sd.InputStream per distinct
@@ -3047,8 +3096,21 @@ class LocalBackend(Backend):
         mean (`peak_hz` is every individual fundamental found, ascending;
         `polyphony` is just its length). Independent of on_channel_
         detected/InstrumentClassifier entirely: describes raw frequency
-        content, not an identified instrument. Also None (skipped, zero
-        cost) for start_auto_detect_instrument.
+        content, not an identified instrument. None (skipped, zero cost)
+        for start_auto_detect_instrument — start_detect_all's own caller
+        is the only one with a UI to show it to (detect-test's stats
+        panel).
+
+        `on_channel_tuner(input_label, frequency_hz)`, if given, fires
+        from its own background thread (same pattern, via TunerTracker
+        rather than SpectralStatsTracker — see that class in audio/
+        instrument_classifier.py) roughly every TunerTracker window of
+        non-silent audio, assuming a single monophonic note (one plucked/
+        bowed string) rather than describing the whole spectrum. Unlike
+        on_channel_stats, start_auto_detect_instrument *does* pass this —
+        it's the only thing driving the Record tab's tuner needle while
+        the deck's "identifying" phase is listening (see recording_
+        driver.py); start_detect_all leaves it None.
 
         Caller must hold self._record_lock and have already called
         self._close_active_monitor(). Returns (streams, skipped_
@@ -3057,7 +3119,9 @@ class LocalBackend(Backend):
         off), left out rather than failing the whole scan. Raises
         BackendError if config has no instruments, or none of their
         inputs can currently be resolved."""
-        from .audio.instrument_classifier import InstrumentClassifier, SILENCE_THRESHOLD, SpectralStatsTracker
+        from .audio.instrument_classifier import (
+            InstrumentClassifier, SILENCE_THRESHOLD, SpectralStatsTracker, TunerTracker,
+        )
         if not config.instruments:
             raise BackendError("No instruments configured.")
 
@@ -3111,6 +3175,15 @@ class LocalBackend(Backend):
                     )
                     for ch in by_channel
                 }
+            tuner_trackers = {}
+            if on_channel_tuner is not None:
+                tuner_trackers = {
+                    ch: TunerTracker(
+                        config.sample_rate,
+                        lambda freq_hz, il=channel_input_label[ch]: on_channel_tuner(il, freq_hz),
+                    )
+                    for ch in by_channel
+                }
             active = {ch: False for ch in by_channel}
             silent_run = {ch: 0 for ch in by_channel}
 
@@ -3123,6 +3196,9 @@ class LocalBackend(Backend):
                     tracker = stats_trackers.get(ch)
                     if tracker is not None:
                         tracker.process_block(block)
+                    tuner = tuner_trackers.get(ch)
+                    if tuner is not None:
+                        tuner.process_block(block)
                     if on_channel_active is None:
                         continue
                     if float(np.max(np.abs(block))) >= SILENCE_THRESHOLD:
@@ -3259,13 +3335,47 @@ class LocalBackend(Backend):
                         config.last_selected_instrument = inst.full_name
                         config.save(self._config_path)
                     self._start_monitoring_locked()
+                    # _open_channel_classifier_streams' own TunerTracker
+                    # instances just got torn down along with every other
+                    # scanning stream above — but identify_state stays
+                    # "ready" (not "idle") for a while yet on every client
+                    # (see recording_driver.py/ui/record.py), during which
+                    # a performer is very much still expected to be
+                    # tuning, not just glancing at a frozen last reading.
+                    # _start_monitoring_locked() just reopened this exact
+                    # instrument's own channel anyway (so it can be heard
+                    # in headphones) — tap a fresh TunerTracker onto that
+                    # same already-flowing audio rather than trying to
+                    # keep the (now-closed) scan streams alive artificially.
+                    monitor = self._active_monitor
+                    if monitor is not None and inst is not None:
+                        self._attach_tuner_sink(monitor.engine, inst.input_label, effective_tuning(inst))
                 self._emit("auto_detect_status", {
                     "phase": "detected", "instrument": name,
                     "full_name": inst.full_name if inst is not None else "",
                     "label": inst.label if inst is not None else "",
                 })
 
-            streams, skipped = self._open_channel_classifier_streams(config, on_channel_detected)
+            def on_channel_tuner(input_label: str, freq_hz: float) -> None:
+                # Union of every instrument sharing this channel's own
+                # tuning (falling back to its label's default — see
+                # audio/pitch.py's effective_tuning) — same "a channel can
+                # be shared by more than one instrument" reality on_
+                # channel_detected's InstrumentClassifier already accounts
+                # for, just without needing to know *which* of them is
+                # actually playing (nothing's been identified yet).
+                tuning: list[str] = []
+                for inst in config.instruments:
+                    if inst.input_label != input_label:
+                        continue
+                    for note in effective_tuning(inst):
+                        if note not in tuning:
+                            tuning.append(note)
+                self._emit_tuner_reading(input_label, freq_hz, tuning)
+
+            streams, skipped = self._open_channel_classifier_streams(
+                config, on_channel_detected, on_channel_tuner=on_channel_tuner,
+            )
             self._active_auto_detect = _ActiveAutoDetect(streams=streams, stop_event=stop_event)
 
         status = "Listening — play your instrument to begin."

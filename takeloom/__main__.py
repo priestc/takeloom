@@ -5,7 +5,6 @@ from __future__ import annotations
 import sys
 import select
 import termios
-import threading
 import time
 import tty
 from pathlib import Path
@@ -316,11 +315,19 @@ def server_command(disable_color: bool) -> None:
         # here (and the ones threaded through RemoteServer/RecordingDeckDriver,
         # whose `log` callback only takes a message) don't carry a separate
         # severity of their own.
+        #
+        # Every line is stamped with a wall-clock time so a long unattended
+        # server log stays legible after the fact — when a take started, how
+        # long post-processing/sync actually took, when a client dropped.
+        # Leading blank lines some callers use as a visual separator are
+        # kept ahead of the stamp so the separation still reads.
         is_error = err or "error" in msg.lower()
+        blanks = len(msg) - len(msg.lstrip("\n"))
+        stamped = f"{msg[:blanks]}[{time.strftime('%H:%M:%S')}] {msg[blanks:]}"
         if disable_color:
-            click.echo(msg, err=err)
+            click.echo(stamped, err=err)
         else:
-            click.secho(msg, fg="red" if is_error else None, err=err)
+            click.secho(stamped, fg="red" if is_error else None, err=err)
 
     backend = LocalBackend()
     listen_port = REMOTE_SERVER_PORT
@@ -379,67 +386,21 @@ def server_command(disable_color: bool) -> None:
     if backend.start_monitoring():
         log(f"Live-monitoring '{backend.get_config().last_selected_instrument}'.")
 
-    # Best-effort: (re)start instrument auto-detect whenever idle, so
-    # _resolve_headless_request below (which just trusts config.last_
-    # selected_instrument — there's no track picker here to confirm it
-    # against) is always acting on a freshly-detected instrument rather
-    # than whatever happened to be last selected, possibly from a
-    # completely unrelated earlier session — this is what actually caused
-    # a real take to get filed under the wrong instrument once already,
-    # entirely silently, since there was nothing in this headless context
-    # showing what it was about to record as. Backend.start_recording
-    # itself refuses to start while a scan is still in progress ("Another
-    # recording is already in progress"), so a StreamDeck "r"/"s" press
-    # can't race a not-yet-settled detection into using a stale value —
-    # see RecordingDeckDriver.detected_instrument for how the result
-    # actually reaches the deck's touchscreen.
-    #
-    # Dispatched on its own thread rather than called directly: backend
-    # events (including this one) can fire from *inside* a caller that's
-    # still holding Backend._record_lock (e.g. _end_session emits phase=
-    # "idle" before releasing it) — calling straight back into another
-    # _record_lock-taking method from that same thread would deadlock
-    # permanently on Python's plain, non-reentrant threading.Lock. This
-    # bit us for real: a session's Stream Deck "stop" press wedged its
-    # own key-event thread forever this way, which also meant that
-    # session's post-processing (started right after the same lock is
-    # released) never ran at all.
-    def _start_headless_autodetect() -> None:
-        def worker() -> None:
-            try:
-                backend.start_auto_detect_instrument()
-            except BackendError as e:
-                log(f"StreamDeck: could not start instrument auto-detect — {e}", err=True)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    # "recording_status" carries "phase": "idle" on far more than just "a
-    # session just ended" — process_session()'s own completion summary and
-    # vault.sync_and_maybe_prune()'s progress messages (see backend.py's
-    # _process_session) are *also* routed through "recording_status" with
-    # phase "idle" tagged on every single one, since post-processing has
-    # nothing better to report through. Triggering a fresh auto-detect scan
-    # on every one of those (instead of only on a genuine idle transition)
-    # meant a session finishing produced a burst of redundant, overlapping
-    # start_auto_detect_instrument() calls, all but the first failing with
-    # "Another recording is already in progress" — confirmed for real, in
-    # a server console full of those errors right as a session's post-
-    # processing was still logging its own progress. Tracking the last
-    # phase actually seen (mirrors StreamDeckController.update_recording_
-    # page's own "only act on a real transition" guard) fixes that: only
-    # a genuine move *into* idle re-triggers anything.
-    _last_phase = "idle"
-
-    def _on_recording_status(event: str, data: dict) -> None:
-        nonlocal _last_phase
-        if event != "recording_status" or "phase" not in data:
-            return
-        phase = data["phase"]
-        if phase == "idle" and _last_phase != "idle":
-            _start_headless_autodetect()
-        _last_phase = phase
-
-    backend.on_event(_on_recording_status)
+    # Instrument auto-detect is no longer kicked off automatically on every
+    # idle transition — that briefly existed here and caused a burst of
+    # redundant, overlapping start_auto_detect_instrument() calls every
+    # time post-processing's own "recording_status" chatter passed through
+    # phase "idle" (all but the first failing with "Another recording is
+    # already in progress", confirmed for real in a server console full of
+    # those errors). It's now driven entirely by RecordingDeckDriver's own
+    # identify_state machine (see recording_driver.py's _begin_identify/
+    # _redo_identify/_confirm_start): a scan only starts once Start Local/
+    # Start Streaming or Re-identify is actually pressed on the deck, and
+    # config.last_selected_instrument (what _resolve_headless_request below
+    # trusts) is only ever updated once that scan actually commits — so by
+    # the time Play opens a session, it's always acting on a freshly-
+    # detected instrument, never a stale one left over from an unrelated
+    # earlier session.
 
     # Optional attached StreamDeck: fully drives a session with no UI client
     # needed at all, via the same RecordingDeckDriver the Tk UI uses. With
@@ -480,8 +441,6 @@ def server_command(disable_color: bool) -> None:
         log("StreamDeck connected.")
     elif driver.streamdeck.last_error:
         log(f"StreamDeck: found a device but could not connect — {driver.streamdeck.last_error}", err=True)
-
-    _start_headless_autodetect()
 
     log("Press Ctrl+C to stop.\n")
 

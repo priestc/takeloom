@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import StudioConfig
+from .net import terse_source_note
 from .project import TrackEntry
 from .utils import format_duration
 
@@ -81,9 +82,10 @@ def _post_track_query(config: StudioConfig, filters: list[dict]) -> list[dict]:
         )
 
     server = config.inspiration_server.rstrip("/")
+    url = f"{server}/library/api/tracks/"
     payload = json.dumps({"filters": filters}).encode()
     req = urllib.request.Request(
-        f"{server}/library/api/tracks/",
+        url,
         data=payload,
         headers={"Authorization": f"Bearer {config.inspiration_api_key}", "Content-Type": "application/json"},
         method="POST",
@@ -98,8 +100,10 @@ def _post_track_query(config: StudioConfig, filters: list[dict]) -> list[dict]:
         # this call forever (no timeout was set at all); over Remote that
         # blocked the whole connection's request queue behind it — see
         # remote/server.py's per-request threading, added for the same
-        # reason.
-        raise InspirationError(f"Error contacting server: {e}") from e
+        # reason. Always name the URL — a bare "url failed" reason (e.g. a
+        # DNS miss) is close to useless without knowing what was being hit
+        # — and flag that the reason itself is as terse as it gets.
+        raise InspirationError(f"Error contacting server at {url}: {e}{terse_source_note(e)}") from e
     return data.get("tracks", [])
 
 
@@ -217,13 +221,13 @@ def download_inspiration_track(
                 # resp.read() just returns b"" at that point rather than
                 # raising, so without this check a truncated download would
                 # silently look like a completed one.
-                raise InspirationError(f"Download incomplete: got {read} of {total} bytes.")
+                raise InspirationError(f"Download incomplete: got {read} of {total} bytes from {url}.")
     except urllib.error.URLError as e:
         # A partial file left behind here would look "already downloaded"
         # to the next caller's exists() check, permanently leaving a
         # truncated/corrupt backing track in place.
         backing_path.unlink(missing_ok=True)
-        raise InspirationError(f"Download failed: {e}") from e
+        raise InspirationError(f"Download failed from {url}: {e}{terse_source_note(e)}") from e
     except Exception:
         backing_path.unlink(missing_ok=True)
         raise

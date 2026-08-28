@@ -31,6 +31,8 @@ import urllib.request
 import webbrowser
 from datetime import datetime
 
+from .net import terse_source_note
+
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
@@ -145,9 +147,9 @@ def _post_form(url: str, fields: dict, timeout: float = 15.0) -> dict:
         with urllib.request.urlopen(url, data=payload, timeout=timeout) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        raise YouTubeAPIError(f"Google rejected the request: {e.read().decode(errors='replace')}") from e
+        raise YouTubeAPIError(f"Google rejected the request to {url}: {e.read().decode(errors='replace')}") from e
     except urllib.error.URLError as e:
-        raise YouTubeAPIError(f"Could not reach Google: {e}") from e
+        raise YouTubeAPIError(f"Could not reach Google at {url}: {e}{terse_source_note(e)}") from e
 
 
 def _exchange_code(client_id: str, client_secret: str, redirect_uri: str, code: str) -> str:
@@ -208,9 +210,13 @@ def _api_request(access_token: str, method: str, path: str, params: dict | None 
             raw = resp.read()
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
-        raise YouTubeAPIError(f"YouTube API error ({e.code}): {e.read().decode(errors='replace')}") from e
+        raise YouTubeAPIError(
+            f"YouTube API error ({e.code}) from {method} {url}: {e.read().decode(errors='replace')}"
+        ) from e
     except urllib.error.URLError as e:
-        raise YouTubeAPIError(f"Could not reach the YouTube API: {e}") from e
+        raise YouTubeAPIError(
+            f"Could not reach the YouTube API at {method} {url}: {e}{terse_source_note(e)}"
+        ) from e
 
 
 def find_stream_id(access_token: str, stream_key: str) -> str:

@@ -59,9 +59,9 @@ def download_youtube_video(
         )
         info = json.loads(info_result.stdout)
     except subprocess.CalledProcessError as e:
-        raise YouTubeDownloadError(f"Could not read video info: {e.stderr.strip() or e}") from e
+        raise YouTubeDownloadError(f"Could not read video info for {url}: {e.stderr.strip() or e}") from e
     except json.JSONDecodeError as e:
-        raise YouTubeDownloadError(f"Could not read video info: {e}") from e
+        raise YouTubeDownloadError(f"Could not read video info for {url}: {e}") from e
 
     title = info.get("title") or info.get("id") or "Untitled"
     duration = float(info.get("duration") or 0)
@@ -93,7 +93,7 @@ def download_youtube_video(
     proc.wait()
     if proc.returncode != 0:
         last_line = next((l for l in reversed(lines) if l.strip()), "yt-dlp failed")
-        raise YouTubeDownloadError(f"Download failed: {last_line}")
+        raise YouTubeDownloadError(f"Download failed for {url}: {last_line}")
 
     dest_path = dest_dir / f"{dest_stem}.{video_format}"
     if not dest_path.exists():
