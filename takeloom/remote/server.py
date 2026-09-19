@@ -46,7 +46,7 @@ def _timestamp() -> str:
 # anything. Logging these would drown out the ops that actually matter —
 # see _handle_request, which only logs ops outside this set.
 _READ_ONLY_OPS = {
-    "hostname", "get_config", "list_audio_devices", "list_cameras",
+    "hostname", "get_config", "list_audio_devices", "list_cameras", "list_midi_devices",
     "list_projects", "get_setlist", "get_filter_slot_previews",
     "search_inspiration_artists", "search_inspiration_by_filter",
     "is_recording", "get_monitoring_mode",

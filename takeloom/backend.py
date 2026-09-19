@@ -96,6 +96,19 @@ class Backend(ABC):
     @abstractmethod
     def list_cameras(self) -> list[tuple[str, str]]: ...
 
+    @abstractmethod
+    def list_midi_devices(self) -> list[str]:
+        """Every currently visible USB MIDI input port name — backs
+        Studio Setup's MIDI Device dropdown for a piano/organ Instrument
+        (see config.Instrument.midi_device/audio/midi_input.py). Unlike
+        list_streamdecks, this *is* forwarded over a Remote connection
+        (same as list_audio_devices/list_cameras) since the MIDI keyboard
+        is real hardware attached to whichever machine actually runs the
+        session (see CLAUDE.md's studio hardware notes), which can be
+        configured from a Remote-connected client the same as any other
+        device. Returns [] on any failure — never raises."""
+        ...
+
     def list_streamdecks(self) -> list[tuple[str, str]]:
         """(serial_number, label) pairs for every physically attached Stream
         Deck. Concrete default (not abstract) since a Stream Deck is
@@ -1075,6 +1088,7 @@ class _ActiveSession:
     engine: object
     project: Project
     inst: object
+    midi_input: object | None
     session_dir: Path
     session_start: float  # timestamp_now() at begin_session()
     musician: str
@@ -1138,6 +1152,7 @@ class _ActiveVideoCheck:
     video_raw: Path | None
     mix_flac: Path | None
     final_video: Path | None
+    midi_input: object | None = None
 
 
 @dataclass
@@ -1151,6 +1166,7 @@ class _ActiveMonitor:
     moment anything else needs the audio hardware."""
     engine: object
     inst: object
+    midi_input: object | None = None
 
 
 @dataclass
@@ -1377,6 +1393,10 @@ class LocalBackend(Backend):
             return list_cameras()
         except Exception:
             return []
+
+    def list_midi_devices(self) -> list[str]:
+        from .audio.midi_input import list_midi_devices
+        return list_midi_devices()
 
     def list_streamdecks(self) -> list[tuple[str, str]]:
         from .streamdeck_controller import list_streamdecks
@@ -2160,6 +2180,107 @@ class LocalBackend(Backend):
         except Exception:
             pass
 
+    def _resolve_midi_route(self, config: StudioConfig, sd, resolve_device) -> tuple[int | None, int]:
+        """Best-effort analog (input_device, input_channels) to pair with
+        a MIDI-driven instrument's duplex audio stream: its captured
+        audio is discarded entirely (AudioEngine ignores `indata`
+        whenever its synth is set — see audio/engine.py's _callback), but
+        PortAudio's combined record+playback Stream still needs *some*
+        valid input device/channel count. Reuses whichever InputLabel is
+        configured first — the studio's real interface, already proven
+        to open elsewhere in this exact config — falling back to the
+        system's own default input device if none is configured at all."""
+        if config.input_labels:
+            in_dev = resolve_device(sd, config.input_labels[0].device, "input")
+            if in_dev is not None:
+                return in_dev, 1
+        return None, 1
+
+    def _build_engine_for_instrument(
+        self, config: StudioConfig, inst: Instrument, *,
+        monitor_instrument: bool, instrument_volume: float,
+    ) -> tuple[object, object | None, object | None]:
+        """Build (but don't start) an AudioEngine for `inst`, branching on
+        whether it's MIDI-driven (see config.Instrument.is_midi) or an
+        ordinary analog input — the device-resolution/validation logic
+        every recording/monitoring/video-check call site used to
+        duplicate inline. Returns (engine, midi_input, input_info):
+
+        - midi_input is an already-started MidiInput feeding the engine's
+          own Synth (see audio/synth.py) for a MIDI instrument, else
+          None. Callers must hold onto it and .close() it whenever they
+          tear the engine down — its USB MIDI port stays open,
+          independent of the engine's own sd.Stream lifecycle, until
+          then (mirrors how a caller already has to hold onto/close a
+          VideoRecorder alongside its engine).
+        - input_info is the resolved InputLabel for an analog instrument,
+          or None for a MIDI one — same as config.resolve_input's own
+          "not applicable" return, so a caller that only cares about the
+          analog case (e.g. _apply_hardware_direct_monitor, which
+          already no-ops on None) can keep branching on it exactly as
+          before.
+
+        Raises BackendError on any device-resolution failure (bad output
+        device, bad/unavailable MIDI device, bad input channel/device for
+        an analog instrument) — every existing call site already either
+        wraps this kind of setup in a try/except or lets BackendError
+        propagate, so this doesn't change any caller's error-handling
+        shape, just where the logic that can raise it lives."""
+        import sounddevice as sd
+        from .audio.devices import resolve_device
+
+        out_dev = resolve_device(sd, config.output_device, "output")
+        if config.output_device and out_dev is None:
+            raise BackendError(f"Output device '{config.output_device}' not found.")
+        out_info = sd.query_devices(out_dev, "output")
+        output_channels = min(config.output_channels, out_info["max_output_channels"])
+
+        midi_input = None
+        input_info = None
+        synth = None
+        if inst.is_midi:
+            from .audio.synth import Synth
+            from .audio.midi_input import MidiInput, MidiUnavailableError
+            synth = Synth(config.sample_rate, voice=inst.synth_voice)
+            in_dev, input_channels = self._resolve_midi_route(config, sd, resolve_device)
+            monitor_channel = 0
+            try:
+                midi_input = MidiInput(
+                    inst.midi_device, on_note_on=synth.note_on, on_note_off=synth.note_off,
+                    on_sustain=synth.set_sustain,
+                )
+            except MidiUnavailableError as e:
+                raise BackendError(str(e)) from e
+            midi_input.start()
+        else:
+            input_info = config.resolve_input(inst.input_label)
+            if input_info is None:
+                raise BackendError(f"Input label '{inst.input_label}' not found in config.")
+            in_dev = resolve_device(sd, input_info.device, "input")
+            if in_dev is None:
+                raise BackendError(f"Input device '{input_info.device}' not found.")
+            in_info = sd.query_devices(in_dev, "input")
+            max_in = in_info["max_input_channels"]
+            if input_info.channel > max_in:
+                raise BackendError(
+                    f"Instrument '{inst.full_name}' needs input channel {input_info.channel} "
+                    f"but device only has {max_in} channels."
+                )
+            input_channels = max(input_info.channel, 1)
+            monitor_channel = input_info.channel - 1
+
+        from .audio.engine import AudioEngine
+        engine = AudioEngine(
+            sample_rate=config.sample_rate, buffer_size=config.buffer_size,
+            input_device=in_dev, output_device=out_dev,
+            input_channels=input_channels, output_channels=max(1, output_channels),
+            monitor_channel=monitor_channel,
+            compressor_settings=config.compressor_for_label(inst.label),
+            monitor_instrument=monitor_instrument, instrument_volume=instrument_volume,
+            synth=synth,
+        )
+        return engine, midi_input, input_info
+
     def start_monitoring(self) -> bool:
         """Best-effort: open a live, listen-only audio stream for
         config.last_selected_instrument, with nothing recorded to disk —
@@ -2197,40 +2318,20 @@ class LocalBackend(Backend):
         inst = config.get_instrument(config.last_selected_instrument)
         if inst is None:
             return False
-        input_info = config.resolve_input(inst.input_label)
-        if input_info is None:
-            return False
+        midi_input = None
         try:
-            import sounddevice as sd
-            from .audio.devices import resolve_device
-            out_dev = resolve_device(sd, config.output_device, "output")
-            in_dev = resolve_device(sd, input_info.device, "input")
-            if in_dev is None or (config.output_device and out_dev is None):
-                return False
-            in_info = sd.query_devices(in_dev, "input")
-            out_info = sd.query_devices(out_dev, "output")
-            if input_info.channel > in_info["max_input_channels"]:
-                return False
-            output_channels = min(config.output_channels, out_info["max_output_channels"])
-
-            from .audio.engine import AudioEngine
-            engine = AudioEngine(
-                sample_rate=config.sample_rate,
-                buffer_size=config.buffer_size,
-                input_device=in_dev,
-                output_device=out_dev,
-                input_channels=max(input_info.channel, 1),
-                output_channels=max(1, output_channels),
-                monitor_channel=input_info.channel - 1,
-                compressor_settings=config.compressor_for_label(inst.label),
+            engine, midi_input, input_info = self._build_engine_for_instrument(
+                config, inst,
                 monitor_instrument=self._monitoring_mode == "production",
                 instrument_volume=self._instrument_volume / 100.0,
             )
             engine.start()
         except Exception:
+            if midi_input is not None:
+                midi_input.close()
             return False
         self._apply_hardware_direct_monitor(input_info, self._monitoring_mode == "recording")
-        self._active_monitor = _ActiveMonitor(engine=engine, inst=inst)
+        self._active_monitor = _ActiveMonitor(engine=engine, inst=inst, midi_input=midi_input)
         return True
 
     def _close_active_monitor(self) -> None:
@@ -2239,6 +2340,8 @@ class LocalBackend(Backend):
         held, same as _apply_hardware_direct_monitor."""
         if self._active_monitor is not None:
             self._active_monitor.engine.stop()
+            if self._active_monitor.midi_input is not None:
+                self._active_monitor.midi_input.close()
             self._active_monitor = None
 
     def restart_monitoring(self) -> bool:
@@ -2617,6 +2720,8 @@ class LocalBackend(Backend):
         session.engine.set_on_song_end(None)
         session.engine.set_stream_sink(None)
         session.engine.stop()
+        if session.midi_input is not None:
+            session.midi_input.close()
         if session.stream_feeder:
             # Before video_recorder.stop() — see the matching comment in
             # _end_session for why this order matters.
@@ -2810,6 +2915,12 @@ class LocalBackend(Backend):
             inst = config.get_instrument(instrument_name)
             if inst is None:
                 raise BackendError(f"Instrument '{instrument_name}' not found.")
+            if inst.is_midi:
+                raise BackendError(
+                    f"'{inst.full_name}' is a MIDI instrument — its audio is generated inside the "
+                    "engine, with no acoustic path from camera to microphone to measure, so the "
+                    "camera latency test doesn't apply to it."
+                )
             input_info = config.resolve_input(inst.input_label)
             if input_info is None:
                 raise BackendError(f"Input label '{inst.input_label}' not found in config.")
@@ -2966,6 +3077,11 @@ class LocalBackend(Backend):
         inst = config.get_instrument(instrument_name)
         if inst is None:
             raise BackendError(f"Instrument '{instrument_name}' not found.")
+        if inst.is_midi:
+            raise BackendError(
+                f"'{inst.full_name}' is a MIDI instrument — its notes already carry an exact pitch, "
+                "so there's no frequency range to train the way an analog instrument's is."
+            )
         input_info = config.resolve_input(inst.input_label)
         if input_info is None:
             raise BackendError(f"Input label '{inst.input_label}' not found in config.")
@@ -3141,6 +3257,14 @@ class LocalBackend(Backend):
         one instrument on it still gets a classifier, but with one
         candidate it trivially always picks that instrument.
 
+        A MIDI-driven instrument (config.Instrument.is_midi) is scanned
+        separately from the analog sd.InputStream logic above — its own
+        MidiInput port (see audio/midi_input.py) treats any incoming note
+        as an immediate, unambiguous detection, no classifier needed —
+        but is returned in the same `streams` list (MidiInput exposes the
+        same .stop()/.close() shape sd.InputStream does) so callers tear
+        everything down uniformly.
+
         `on_channel_detected(name, confidence)` fires from a background
         thread whenever any channel's classifier picks a match; the two
         callers differ only in what that means (start_detect_all reports
@@ -3205,9 +3329,13 @@ class LocalBackend(Backend):
             raise BackendError(f"sounddevice unavailable: {e}") from e
         from .audio.devices import resolve_device
 
+        midi_instruments = [inst for inst in config.instruments if inst.is_midi]
+
         by_device: dict[int, list[tuple[Instrument, int, str]]] = {}
         skipped: list[str] = []
         for inst in config.instruments:
+            if inst.is_midi:
+                continue  # scanned separately below — see midi_instruments
             input_info = config.resolve_input(inst.input_label)
             in_dev = resolve_device(sd, input_info.device, "input") if input_info else None
             if input_info is None or in_dev is None:
@@ -3219,7 +3347,7 @@ class LocalBackend(Backend):
                 continue
             by_device.setdefault(in_dev, []).append((inst, input_info.channel - 1, inst.input_label))
 
-        if not by_device:
+        if not by_device and not midi_instruments:
             raise BackendError("None of the configured instruments' inputs are available right now.")
 
         # Consecutive silent blocks to ride through before reporting a
@@ -3313,6 +3441,43 @@ class LocalBackend(Backend):
                 s.stop()
                 s.close()
             raise BackendError(f"Could not open an input device: {e}") from e
+
+        # MIDI-driven instruments: a note arriving on the configured MIDI
+        # device *is* the detection — no channel/frequency analysis
+        # needed the way an analog signal requires. MidiInput exposes the
+        # same .stop()/.close() shape as the sd.InputStream objects above
+        # (see its own docstring) so it slots into this same `streams`
+        # list, and start_detect_all/start_auto_detect_instrument tear
+        # everything down uniformly without needing to know which is which.
+        from .audio.midi_input import MidiInput, MidiUnavailableError
+        release_seconds = release_blocks * config.buffer_size / config.sample_rate  # same ~0.5s hold as analog
+        for inst in midi_instruments:
+            label = inst.input_label or f"midi:{inst.midi_device}"
+            release_timer: list = [None]
+
+            def _on_note_on(_note: int, _velocity: int, inst=inst, label=label) -> None:
+                if on_channel_detected is not None:
+                    on_channel_detected(inst.full_name, 1.0)
+                if on_channel_active is not None:
+                    on_channel_active(label, True)
+                    old = release_timer[0]
+                    if old is not None:
+                        old.cancel()
+                    timer = threading.Timer(release_seconds, lambda: on_channel_active(label, False))
+                    timer.daemon = True
+                    timer.start()
+                    release_timer[0] = timer
+
+            try:
+                midi_in = MidiInput(inst.midi_device, on_note_on=_on_note_on)
+                midi_in.start()
+            except MidiUnavailableError:
+                skipped.append(inst.full_name)
+                continue
+            streams.append(midi_in)
+
+        if not streams:
+            raise BackendError("None of the configured instruments' inputs are available right now.")
 
         return streams, skipped
 
@@ -3496,10 +3661,6 @@ class LocalBackend(Backend):
             track = project.setlist.tracks[req.track_index]
             track = self._resolve_filter_slot(config, track, inst.full_name)
 
-            input_info = config.resolve_input(inst.input_label)
-            if input_info is None:
-                raise BackendError(f"Input label '{inst.input_label}' not found in config.")
-
             backing_path = project.backing_tracks_dir / track.backing_track
             if track.inspiration_track_id and not backing_path.exists():
                 from .inspiration import InspirationError, download_inspiration_track
@@ -3510,44 +3671,22 @@ class LocalBackend(Backend):
                     raise BackendError(str(e)) from e
 
             try:
-                import sounddevice as sd
+                import sounddevice as sd  # noqa: F401 — just confirms it's importable before real work starts
             except Exception as e:
                 raise BackendError(f"sounddevice unavailable: {e}") from e
 
-            from .audio.devices import resolve_device
-            out_dev = resolve_device(sd, config.output_device, "output")
-            in_dev = resolve_device(sd, input_info.device, "input")
-            if in_dev is None:
-                raise BackendError(f"Input device '{input_info.device}' not found.")
-            if config.output_device and out_dev is None:
-                raise BackendError(f"Output device '{config.output_device}' not found.")
-
-            in_info = sd.query_devices(in_dev, "input")
-            out_info = sd.query_devices(out_dev, "output")
-            max_in = in_info["max_input_channels"]
-            if input_info.channel > max_in:
-                raise BackendError(
-                    f"Instrument '{inst.full_name}' needs input channel {input_info.channel} "
-                    f"but device only has {max_in} channels."
-                )
-            output_channels = min(config.output_channels, out_info["max_output_channels"])
-
-            from .audio.engine import AudioEngine
-            engine = AudioEngine(
-                sample_rate=config.sample_rate,
-                buffer_size=config.buffer_size,
-                input_device=in_dev,
-                output_device=out_dev,
-                input_channels=max(input_info.channel, 1),
-                output_channels=max(1, output_channels),
-                monitor_channel=input_info.channel - 1,
-                compressor_settings=config.compressor_for_label(inst.label),
-                # Video Check is played the same way a real take is, so it
-                # always runs Recording Monitoring (zero-latency hardware
-                # direct monitor for the instrument) regardless of whatever
-                # the Record page's monitoring_mode toggle is currently set
-                # to — see get_monitoring_mode()/set_monitoring_mode().
-                monitor_instrument=False,
+            # Video Check is played the same way a real take is, so it
+            # always runs Recording Monitoring (zero-latency hardware
+            # direct monitor for the instrument) regardless of whatever
+            # the Record page's monitoring_mode toggle is currently set
+            # to — see get_monitoring_mode()/set_monitoring_mode() —
+            # hence monitor_instrument=False unconditionally here.
+            # instrument_volume=1.0 (not the dial's self._instrument_volume)
+            # — same unity-gain default the original inline AudioEngine(...)
+            # construction here left implicit, since Video Check has no
+            # Instrument Volume dial of its own to reflect.
+            engine, midi_input, input_info = self._build_engine_for_instrument(
+                config, inst, monitor_instrument=False, instrument_volume=1.0,
             )
             self._apply_hardware_direct_monitor(input_info, True)
 
@@ -3593,6 +3732,7 @@ class LocalBackend(Backend):
                 video_raw=video_raw if video_recorder else None,
                 mix_flac=mix_flac if video_recorder else None,
                 final_video=final_video if video_recorder else None,
+                midi_input=midi_input,
             )
             self._emit("video_check_status", {
                 "phase": "recording",
@@ -3623,6 +3763,8 @@ class LocalBackend(Backend):
         active.engine.stop_recording()
         active.engine.mixer.set_playing(False)
         active.engine.stop()
+        if active.midi_input is not None:
+            active.midi_input.close()
         self._start_monitoring_locked()
         if active.video_recorder:
             active.video_recorder.stop()
@@ -3767,9 +3909,6 @@ class LocalBackend(Backend):
         inst = config.get_instrument(instrument_name)
         if inst is None:
             raise BackendError(f"Instrument '{instrument_name}' not found.")
-        input_info = config.resolve_input(inst.input_label)
-        if input_info is None:
-            raise BackendError(f"Input label '{inst.input_label}' not found in config.")
 
         # All the setlist's network/heavy-disk work (filter-slot draws +
         # backing-track downloads) up front, before any capture hardware is
@@ -3779,43 +3918,22 @@ class LocalBackend(Backend):
         prefetched_picks = self._prefetch_setlist_locked(project, inst, config)
 
         try:
-            import sounddevice as sd
+            import sounddevice as sd  # noqa: F401 — just confirms it's importable before real work starts
         except Exception as e:
             raise BackendError(f"sounddevice unavailable: {e}") from e
 
-        from .audio.devices import resolve_device
-        out_dev = resolve_device(sd, config.output_device, "output")
-        in_dev = resolve_device(sd, input_info.device, "input")
-        if in_dev is None:
-            raise BackendError(f"Input device '{input_info.device}' not found.")
-        if config.output_device and out_dev is None:
-            raise BackendError(f"Output device '{config.output_device}' not found.")
-
-        in_info = sd.query_devices(in_dev, "input")
-        out_info = sd.query_devices(out_dev, "output")
-        max_in = in_info["max_input_channels"]
-        if input_info.channel > max_in:
-            raise BackendError(
-                f"Instrument '{inst.full_name}' needs input channel {input_info.channel} "
-                f"but device only has {max_in} channels."
-            )
-        output_channels = min(config.output_channels, out_info["max_output_channels"])
-
-        from .audio.engine import AudioEngine
-        engine = AudioEngine(
-            sample_rate=config.sample_rate,
-            buffer_size=config.buffer_size,
-            input_device=in_dev,
-            output_device=out_dev,
-            input_channels=max(input_info.channel, 1),
-            output_channels=max(1, output_channels),
-            monitor_channel=input_info.channel - 1,
-            compressor_settings=config.compressor_for_label(inst.label),
+        engine, midi_input, input_info = self._build_engine_for_instrument(
+            config, inst,
             monitor_instrument=self._monitoring_mode == "production",
             instrument_volume=self._instrument_volume / 100.0,
         )
-        self._apply_hardware_direct_monitor(input_info, self._monitoring_mode == "recording")
-        engine.start()
+        try:
+            self._apply_hardware_direct_monitor(input_info, self._monitoring_mode == "recording")
+            engine.start()
+        except Exception:
+            if midi_input is not None:
+                midi_input.close()
+            raise
 
         # Best-effort, testing-stage feature: continuously guesses which
         # configured instrument is actually playing from the live input's
@@ -3930,7 +4048,7 @@ class LocalBackend(Backend):
 
         engine.set_on_song_end(self._on_song_naturally_ended)
         self._active_session = _ActiveSession(
-            engine=engine, project=project, inst=inst, session_dir=session_dir,
+            engine=engine, project=project, inst=inst, midi_input=midi_input, session_dir=session_dir,
             session_start=timestamp_now(),
             musician=inst.musician or config.studio_musician,
             studio_name=config.studio_name, studio_location=config.studio_location,
@@ -3976,6 +4094,8 @@ class LocalBackend(Backend):
             session.engine.set_stream_sink(None)
             session.engine.set_instrument_sink(None)
             session.engine.stop()  # closes the stream and every recorder on it (session/mix)
+            if session.midi_input is not None:
+                session.midi_input.close()
             self._start_monitoring_locked()
 
             if session.stream_feeder:

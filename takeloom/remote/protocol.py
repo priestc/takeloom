@@ -55,6 +55,8 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
         return {"devices": backend.list_audio_devices()}
     if op == "list_cameras":
         return {"cameras": [list(c) for c in backend.list_cameras()]}
+    if op == "list_midi_devices":
+        return {"devices": backend.list_midi_devices()}
     if op == "refresh_devices":
         backend.refresh_devices()
         return {}

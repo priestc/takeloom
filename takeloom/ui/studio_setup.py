@@ -32,7 +32,7 @@ from tkinter import filedialog, messagebox, ttk
 from ..audio.filters import COMPRESSOR_PRESETS, CompressorSettings
 from ..audio.pitch import TUNING_PRESETS_BY_LABEL, format_tuning, parse_tuning
 from ..backend import BackendError
-from ..config import INSTRUMENT_LABELS, Instrument, InputLabel, StudioConfig
+from ..config import INSTRUMENT_LABELS, MIDI_SYNTH_VOICES, Instrument, InputLabel, StudioConfig
 from .app_state import AppState
 from .instrument_colors import make_label_badge
 
@@ -127,13 +127,22 @@ class _InstrumentRow:
     presets for whichever instrument label is currently selected (see
     audio/pitch.py's TUNING_PRESETS_BY_LABEL and _refresh_tuning_presets/
     _on_tuning_preset_picked below) — empty (no presets, e.g. drums/
-    piano/organ) just leaves it a plain text field."""
+    piano/organ) just leaves it a plain text field.
+
+    MIDI Device + Voice make a row MIDI-driven (config.Instrument.
+    midi_device/synth_voice — see audio/synth.py, audio/midi_input.py):
+    picking a MIDI Device means this instrument's sound is synthesized
+    from a USB MIDI keyboard rather than captured from the Input column,
+    which is then ignored (to_instrument() blanks input_label out
+    entirely whenever midi_device is set, so a stale Input selection
+    left showing in the dropdown never silently wins)."""
 
     def __init__(
         self,
         table: ttk.Frame,
         row: int,
         input_label_names: list[str],
+        midi_device_names: list[str],
         on_remove,
         input_label: str = "",
         full_name: str = "",
@@ -142,6 +151,8 @@ class _InstrumentRow:
         freq_min_hz: float = 0.0,
         freq_max_hz: float = 0.0,
         tuning: list[str] | None = None,
+        midi_device: str = "",
+        synth_voice: str = "",
     ) -> None:
         self._on_remove = on_remove
 
@@ -152,6 +163,14 @@ class _InstrumentRow:
         self.freq_min_var = tk.StringVar(value=(f"{freq_min_hz:g}" if freq_min_hz else ""))
         self.freq_max_var = tk.StringVar(value=(f"{freq_max_hz:g}" if freq_max_hz else ""))
         self.tuning_var = tk.StringVar(value=format_tuning(tuning or []))
+        self.midi_device_var = tk.StringVar(value=midi_device)
+        # Blank rather than defaulting to MIDI_SYNTH_VOICES[0] when this
+        # isn't (yet) a MIDI row — an analog instrument's Voice dropdown
+        # showing "piano" would look like a real setting even though
+        # to_instrument() ignores it entirely whenever midi_device is
+        # empty. Picking a MIDI Device fills in a sensible default voice
+        # instead — see _on_midi_device_changed.
+        self.synth_voice_var = tk.StringVar(value=synth_voice or (MIDI_SYNTH_VOICES[0] if midi_device else ""))
         # display name -> notes for whichever label is currently selected
         # — refreshed by _refresh_tuning_presets, read by _on_tuning_
         # preset_picked once the user actually picks one from the
@@ -161,10 +180,21 @@ class _InstrumentRow:
         tuning_combo = ttk.Combobox(table, textvariable=self.tuning_var, width=22)
         tuning_combo.bind("<<ComboboxSelected>>", self._on_tuning_preset_picked)
 
+        # Editable (not "readonly"), unlike the other comboboxes here — a
+        # freshly plugged-in MIDI device might not be in midi_device_names
+        # yet if Studio Setup was opened before it was plugged in, and
+        # "Reload Devices" only refreshes this dropdown's *values*, not
+        # whatever's already typed/selected into it.
+        midi_combo = ttk.Combobox(table, textvariable=self.midi_device_var, values=midi_device_names, width=18)
+
         self.widgets = [
             ttk.Entry(table, textvariable=self.full_name_var, width=20),
             ttk.Combobox(table, textvariable=self.label_var, values=INSTRUMENT_LABELS, state="readonly", width=16),
             ttk.Combobox(table, textvariable=self.input_label_var, values=input_label_names, state="readonly", width=12),
+            midi_combo,
+            ttk.Combobox(
+                table, textvariable=self.synth_voice_var, values=MIDI_SYNTH_VOICES, state="readonly", width=8,
+            ),
             ttk.Entry(table, textvariable=self.musician_var, width=10),
             tuning_combo,
             ttk.Button(table, text="Remove", command=lambda: self._on_remove(self)),
@@ -179,11 +209,29 @@ class _InstrumentRow:
         # that sets it programmatically later would silently stop
         # refreshing the tuning dropdown too).
         self.label_var.trace_add("write", self._refresh_tuning_presets)
+        self.midi_device_var.trace_add("write", self._on_midi_device_changed)
+
+    def _on_midi_device_changed(self, *_args) -> None:
+        """Fill in a sensible default Voice the moment a MIDI Device is
+        first set on a row that didn't have one yet (see synth_voice_
+        var's own constructor comment for why it starts blank rather
+        than defaulting eagerly) — never overwrites a voice the operator
+        already picked."""
+        if self.midi_device_var.get().strip() and not self.synth_voice_var.get().strip():
+            self.synth_voice_var.set(MIDI_SYNTH_VOICES[0])
+
+    def set_midi_devices(self, midi_device_names: list[str]) -> None:
+        """Refresh the MIDI Device dropdown's choices, e.g. after
+        "Reload Devices" — mirrors _InputRow.set_input_devices, but
+        never forces state="readonly" the way that one does, since a
+        not-yet-visible device name should stay typeable here too (see
+        the constructor's own note on midi_combo)."""
+        self.widgets[3]["values"] = midi_device_names
 
     def _refresh_tuning_presets(self, *_args) -> None:
         presets = TUNING_PRESETS_BY_LABEL.get(self.label_var.get().strip(), [])
         self._tuning_presets = dict(presets)
-        self.widgets[4]["values"] = list(self._tuning_presets.keys())
+        self.widgets[6]["values"] = list(self._tuning_presets.keys())
 
     def _on_tuning_preset_picked(self, _event: object = None) -> None:
         notes = self._tuning_presets.get(self.tuning_var.get())
@@ -200,8 +248,14 @@ class _InstrumentRow:
 
     def to_instrument(self) -> Instrument | None:
         full_name = self.full_name_var.get().strip()
-        input_label = self.input_label_var.get().strip()
-        if not full_name or not input_label:
+        midi_device = self.midi_device_var.get().strip()
+        # A MIDI Device makes this instrument MIDI-driven — input_label is
+        # then blanked out regardless of whatever's still showing in the
+        # Input dropdown, so it's never silently used alongside/instead of
+        # the MIDI device (see config.Instrument.is_midi, which is what
+        # every backend.py code path actually branches on).
+        input_label = "" if midi_device else self.input_label_var.get().strip()
+        if not full_name or not (input_label or midi_device):
             return None
         return Instrument(
             input_label=input_label,
@@ -211,6 +265,8 @@ class _InstrumentRow:
             freq_min_hz=self._parse_hz(self.freq_min_var),
             freq_max_hz=self._parse_hz(self.freq_max_var),
             tuning=parse_tuning(self.tuning_var.get()),
+            midi_device=midi_device,
+            synth_voice=self.synth_voice_var.get().strip() if midi_device else "",
         )
 
     @staticmethod
@@ -324,6 +380,7 @@ class StudioSetupFrame(ttk.Frame):
         self.app_state = app_state
         self.config_obj: StudioConfig | None = None
         self.input_devices: list[dict] = []
+        self.midi_devices: list[str] = []
         self.table: ttk.Frame | None = None
         self._vars: dict[str, tk.StringVar] = {}
         self._input_rows: list[_InputRow] = []
@@ -440,14 +497,17 @@ class StudioSetupFrame(ttk.Frame):
             try:
                 config = backend.get_config()
                 devices = backend.list_audio_devices()
+                midi_devices = backend.list_midi_devices()
                 error = None
             except BackendError as e:
-                config, devices, error = None, [], str(e)
-            self.after(0, lambda: self._on_loaded(config, devices, error))
+                config, devices, midi_devices, error = None, [], [], str(e)
+            self.after(0, lambda: self._on_loaded(config, devices, midi_devices, error))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_loaded(self, config: StudioConfig | None, devices: list[dict], error: str | None) -> None:
+    def _on_loaded(
+        self, config: StudioConfig | None, devices: list[dict], midi_devices: list[str], error: str | None,
+    ) -> None:
         if not self.winfo_exists():
             return  # tab was switched away (and rebuilt/destroyed) before this load finished
         for child in self.content.winfo_children():
@@ -462,6 +522,7 @@ class StudioSetupFrame(ttk.Frame):
             return
         self.config_obj = config
         self.input_devices = [d for d in devices if d["max_input_channels"] > 0]
+        self.midi_devices = midi_devices
         self._build()
         self._bind_mousewheel(self._canvas)
 
@@ -599,23 +660,29 @@ class StudioSetupFrame(ttk.Frame):
         def worker() -> None:
             try:
                 devices = backend.list_audio_devices()
+                midi_devices = backend.list_midi_devices()
                 error = None
             except BackendError as e:
-                devices, error = [], str(e)
-            self.after(0, lambda: self._on_devices_reloaded(devices, error))
+                devices, midi_devices, error = [], [], str(e)
+            self.after(0, lambda: self._on_devices_reloaded(devices, midi_devices, error))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_devices_reloaded(self, devices: list[dict], error: str | None) -> None:
+    def _on_devices_reloaded(self, devices: list[dict], midi_devices: list[str], error: str | None) -> None:
         if not self.winfo_exists():
             return
         if error:
             messagebox.showerror("Reload failed", error)
             return
         self.input_devices = [d for d in devices if d["max_input_channels"] > 0]
+        self.midi_devices = midi_devices
         for row_widget in self._input_rows:
             row_widget.set_input_devices(self.input_devices)
-        self.status_var.set(f"Devices reloaded ({len(self.input_devices)} inputs found).")
+        for inst_row in self._instrument_rows:
+            inst_row.set_midi_devices(self.midi_devices)
+        self.status_var.set(
+            f"Devices reloaded ({len(self.input_devices)} inputs, {len(self.midi_devices)} MIDI found)."
+        )
 
     def _build_instruments(self, row: int) -> int:
         ttk.Separator(self.content, orient="horizontal").grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
@@ -642,7 +709,10 @@ class StudioSetupFrame(ttk.Frame):
                  "song's need for a take, so recording one with either won't have the setlist offer "
                  "it again for the other. Tuning is the Record tab's tuner target notes, low to high "
                  "(e.g. \"E2 A2 D3 G3 B3 E4\" for standard guitar) — leave blank to use a sensible "
-                 "default for the instrument's label.",
+                 "default for the instrument's label. MIDI Device makes an instrument (typically "
+                 "piano/organ) MIDI-driven instead of an analog input: its sound is synthesized from "
+                 "a USB MIDI keyboard's notes right inside the recording engine, so the Input column "
+                 "is ignored whenever MIDI Device is set.",
             foreground="#666666", wraplength=760, justify="left",
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(2, 6))
         row += 1
@@ -651,7 +721,8 @@ class StudioSetupFrame(ttk.Frame):
         self.table.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         row += 1
 
-        for col, text in enumerate(["Full name", "Label", "Input", "Musician", "Tuning", ""]):
+        headers = ["Full name", "Label", "Input", "MIDI Device", "Voice", "Musician", "Tuning", ""]
+        for col, text in enumerate(headers):
             ttk.Label(self.table, text=text).grid(row=0, column=col, sticky="w", padx=(0, 6))
 
         for inst in self.config_obj.instruments:
@@ -659,6 +730,7 @@ class StudioSetupFrame(ttk.Frame):
                 input_label_names, input_label=inst.input_label,
                 full_name=inst.full_name, label=inst.label, musician=inst.musician,
                 freq_min_hz=inst.freq_min_hz, freq_max_hz=inst.freq_max_hz, tuning=inst.tuning,
+                midi_device=inst.midi_device, synth_voice=inst.synth_voice,
             )
         if not self.config_obj.instruments:
             self._add_instrument_row(input_label_names)
@@ -753,14 +825,16 @@ class StudioSetupFrame(ttk.Frame):
         self, input_label_names: list[str], input_label: str = "",
         full_name: str = "", label: str = "", musician: str = "",
         freq_min_hz: float = 0.0, freq_max_hz: float = 0.0, tuning: list[str] | None = None,
+        midi_device: str = "", synth_voice: str = "",
     ) -> None:
         if self.table is None:
             return
         row_index = len(self._instrument_rows) + 1  # row 0 is the header
         row = _InstrumentRow(
-            self.table, row_index, input_label_names, self._remove_instrument_row,
+            self.table, row_index, input_label_names, self.midi_devices, self._remove_instrument_row,
             input_label=input_label, full_name=full_name, label=label, musician=musician,
             freq_min_hz=freq_min_hz, freq_max_hz=freq_max_hz, tuning=tuning,
+            midi_device=midi_device, synth_voice=synth_voice,
         )
         self._instrument_rows.append(row)
         self._bind_mousewheel(self._canvas)

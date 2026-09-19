@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 from .audio.filters import CompressorSettings
+from .audio.synth import SYNTH_VOICES as MIDI_SYNTH_VOICES
 from .utils import atomic_write_text
 
 DEFAULT_CONFIG_PATH = Path.home() / "studio_config.json"
@@ -83,6 +84,31 @@ class Instrument:
     # freq_min_hz/freq_max_hz already use — set via Studio Setup's
     # Instruments table.
     tuning: list[str] = field(default_factory=list)
+    # USB MIDI input device name (matched against audio.midi_input.
+    # list_midi_devices() the same fuzzy way InputLabel.device is
+    # matched against list_audio_devices(), see audio.midi_input.
+    # MidiInput) — non-empty makes this a MIDI-driven instrument:
+    # instead of listening on an analog input_label channel, the audio
+    # engine synthesizes sound from incoming Note On/Off events (see
+    # audio/synth.py) and records/monitors that exactly like any other
+    # instrument's captured signal. input_label is left blank ("") for
+    # a MIDI-driven instrument — see is_midi, which is what every
+    # recording/monitoring/auto-detect code path in backend.py actually
+    # branches on rather than re-checking midi_device directly.
+    midi_device: str = ""
+    # Which built-in synth voice renders midi_device's notes — one of
+    # MIDI_SYNTH_VOICES ("piano"/"organ" for now, see audio/synth.py).
+    # Ignored (and meaningless) unless midi_device is set. "" falls back
+    # to audio.synth.DEFAULT_SYNTH_VOICE, the same "unset -> sensible
+    # default" convention tuning/freq_min_hz/freq_max_hz above use.
+    synth_voice: str = ""
+
+    @property
+    def is_midi(self) -> bool:
+        """True if this instrument's signal is synthesized from a USB
+        MIDI device (see midi_device's own docstring) rather than
+        captured from an analog input_label channel."""
+        return bool(self.midi_device.strip())
 
 
 @dataclass
@@ -218,6 +244,11 @@ class StudioConfig:
                 errors.append(
                     f"Instrument '{inst.full_name or '(unnamed)'}' needs a label "
                     f"(one of {', '.join(INSTRUMENT_LABELS)})."
+                )
+            if inst.is_midi and inst.synth_voice and inst.synth_voice not in MIDI_SYNTH_VOICES:
+                errors.append(
+                    f"Instrument '{inst.full_name or '(unnamed)'}' has an unrecognized MIDI voice "
+                    f"'{inst.synth_voice}' (must be one of {', '.join(MIDI_SYNTH_VOICES)})."
                 )
         return errors
 

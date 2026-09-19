@@ -67,6 +67,9 @@ class RemoteBackend(Backend):
     def list_cameras(self) -> list[tuple[str, str]]:
         return [tuple(c) for c in self._client.call("list_cameras", {})["cameras"]]
 
+    def list_midi_devices(self) -> list[str]:
+        return self._client.call("list_midi_devices", {})["devices"]
+
     def refresh_devices(self) -> None:
         self._client.call("refresh_devices", {})
 

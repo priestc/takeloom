@@ -12,6 +12,7 @@ import sounddevice as sd
 from .recorder import Recorder
 from .mixer import Mixer
 from .filters import Compressor, CompressorSettings
+from .synth import Synth
 
 
 class AudioEngine:
@@ -33,6 +34,7 @@ class AudioEngine:
         compressor_settings: CompressorSettings | None = None,
         monitor_instrument: bool = True,
         instrument_volume: float = 1.0,
+        synth: Synth | None = None,
     ) -> None:
         self.sample_rate = sample_rate
         self.buffer_size = buffer_size
@@ -54,6 +56,18 @@ class AudioEngine:
         # `mono` before this is applied), so cranking this to compensate for
         # a quiet pickup/DI doesn't also inflate the recorded take.
         self.instrument_volume = instrument_volume
+
+        # When set, this engine is for a MIDI-driven instrument (see
+        # config.Instrument.is_midi / backend.py's engine-construction
+        # helper): the callback below renders this synth instead of
+        # reading `indata` at all, so a physical mic/DI input never
+        # needs to exist for input_device to be meaningful — its audio,
+        # if any, is simply never looked at. Everything downstream
+        # (recording, compressor, mixer, live monitoring, streaming)
+        # treats the synth's output exactly like any other instrument's
+        # captured signal, which is what makes a MIDI take end up on
+        # disk/in the session the same way an analog one would.
+        self.synth = synth
 
         self.recorder: Recorder | None = None
         self.session_recorder: Recorder | None = None
@@ -171,9 +185,15 @@ class AudioEngine:
         status: sd.CallbackFlags,
     ) -> None:
         """Audio stream callback — runs in real-time audio thread."""
-        # Capture mono input from the instrument's channel
-        ch = self.monitor_channel
-        mono = indata[:, ch:ch+1].copy()
+        # Capture mono input from the instrument's channel — or, for a
+        # MIDI-driven instrument, synthesize it fresh for this block
+        # instead (indata's actual contents are never touched in that
+        # case; see self.synth's docstring above).
+        if self.synth is not None:
+            mono = self.synth.render(frames)
+        else:
+            ch = self.monitor_channel
+            mono = indata[:, ch:ch+1].copy()
 
         # Record RAW input to disk — never through the compressor. Only
         # what's actually monitored/played back (below) reflects it; a
