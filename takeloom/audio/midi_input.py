@@ -1,10 +1,10 @@
-"""USB MIDI input: turns incoming Note On/Off (and sustain-pedal CC64)
-messages into calls against plain callables — usually a Synth's own
-note_on/note_off/set_sustain (see audio/synth.py and backend.py's MIDI
-branch of instrument-engine construction), but a detection scan
-(start_auto_detect_instrument/start_detect_all) instead passes
-on_note_on alone and ignores note number/velocity entirely: any note at
-all is itself the detection.
+"""USB MIDI input: turns incoming Note On/Off, sustain-pedal (CC64), and
+channel-volume (CC7) messages into calls against plain callables —
+usually a Synth's own note_on/note_off/set_sustain/set_channel_volume
+(see audio/synth.py and backend.py's MIDI branch of instrument-engine
+construction), but a detection scan (start_auto_detect_instrument/
+start_detect_all) instead passes on_note_on alone and ignores note
+number/velocity entirely: any note at all is itself the detection.
 
 Uses python-rtmidi directly (not e.g. `mido`'s higher-level wrapper)
 because a callback-driven port — no polling loop of our own — is what
@@ -25,6 +25,7 @@ _NOTE_OFF = 0x80
 _CONTROL_CHANGE = 0xB0
 _SUSTAIN_CC = 64
 _SUSTAIN_THRESHOLD = 64  # >= this counts as "pedal down" — the common MIDI-spec convention
+_VOLUME_CC = 7  # "Channel Volume" — what a keyboard's own physical volume slider/fader sends
 
 
 class MidiUnavailableError(Exception):
@@ -56,10 +57,11 @@ def list_midi_devices() -> list[str]:
 
 
 class MidiInput:
-    """One open USB MIDI input port, dispatching Note On/Off/sustain to
-    plain callables on rtmidi's own dedicated notification thread — never
-    the realtime audio callback thread, and never anything that blocks on
-    that thread (Synth.note_on/note_off/set_sustain only ever briefly
+    """One open USB MIDI input port, dispatching Note On/Off/sustain/
+    volume to plain callables on rtmidi's own dedicated notification
+    thread — never the realtime audio callback thread, and never
+    anything that blocks on that thread (Synth.note_on/note_off/
+    set_sustain/set_channel_volume only ever briefly
     hold a lock), so a keystroke's audio reaches the engine's very next
     output block with no added buffering of its own."""
 
@@ -69,6 +71,7 @@ class MidiInput:
         on_note_on: Callable[[int, int], None] | None = None,
         on_note_off: Callable[[int], None] | None = None,
         on_sustain: Callable[[bool], None] | None = None,
+        on_volume: Callable[[int], None] | None = None,
     ) -> None:
         try:
             import rtmidi
@@ -80,6 +83,7 @@ class MidiInput:
         self._on_note_on = on_note_on
         self._on_note_off = on_note_off
         self._on_sustain = on_sustain
+        self._on_volume = on_volume
         self._lock = threading.Lock()
         self._closed = False
 
@@ -143,6 +147,9 @@ class MidiInput:
         elif status == _CONTROL_CHANGE and len(message) >= 3 and message[1] == _SUSTAIN_CC:
             if self._on_sustain is not None:
                 self._on_sustain(message[2] >= _SUSTAIN_THRESHOLD)
+        elif status == _CONTROL_CHANGE and len(message) >= 3 and message[1] == _VOLUME_CC:
+            if self._on_volume is not None:
+                self._on_volume(message[2])
 
     def stop(self) -> None:
         """Alias for close() — lets a MidiInput sit in the same list of
