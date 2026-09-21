@@ -1,36 +1,57 @@
-"""Polyphonic software synthesizer for MIDI-driven instruments (piano,
-organ) — see audio/midi_input.py for the note events that drive it and
-audio/engine.py's AudioEngine (its `synth` param) for how its output
-replaces the analog mic/DI signal in the recording pipeline, so a
-MIDI-driven instrument's take is written/monitored/compressed exactly
-like any other instrument's, just generated instead of captured.
+"""Polyphonic synthesizer for MIDI-driven instruments (piano, organ) —
+see audio/midi_input.py for the note events that drive it and audio/
+engine.py's AudioEngine (its `synth` param) for how its output replaces
+the analog mic/DI signal in the recording pipeline, so a MIDI-driven
+instrument's take is written/monitored/compressed exactly like any
+other instrument's, just generated instead of captured.
 
-Deliberately pure numpy — no soundfont/native synth library. This app
-already learned the cost of an extra native/system dependency the hard
-way once (see static_ffmpeg_dylib_fix / CLAUDE.md's ffmpeg bundling
-story) and bundles its own ffmpeg specifically to avoid that class of
-"works today, silently breaks after a library upgrade" failure; pulling
-in something like fluidsynth (a native library + a multi-megabyte
-soundfont file) would reintroduce exactly that risk for comparatively
-little gain. The tradeoff is a simpler, more synthetic timbre than a
-sampled instrument — a small bank of additive harmonics per voice, not
-a real piano/organ recording — in exchange for zero extra install
-footprint and rendering cheap enough to run inline on the realtime
-audio callback thread itself, which is what keeps this "zero latency
-as possible": there's no separate synth process/thread to hop through,
-just numpy math computed fresh for each output block against whatever
-notes have arrived by the start of that block.
+`Synth` (below) is the public façade every other module imports and
+constructs; it never exposes which of two implementations is actually
+doing the rendering:
+
+- `_FluidSynthVoice`: real sampled piano/organ audio via FluidSynth (the
+  `fluidsynth` PyPI package, a ctypes binding to the `libfluidsynth`
+  native library) playing a bundled SoundFont — see soundfont.py for
+  where that file comes from. Dramatically more realistic than pure
+  synthesis, at the cost of a native-library dependency this app
+  otherwise avoids (see ffmpeg_bin.py's own docstring for the class of
+  problem that avoidance is about) — acceptable here specifically
+  because it only ever has to work on the one machine that actually
+  runs sessions (see CLAUDE.md's studio hardware notes), not something
+  distributed to other people's machines.
+- `_AdditiveSynth`: the original pure-numpy small bank of hand-tuned
+  harmonics per voice — synthetic-sounding but zero extra dependency,
+  cheap enough to run inline on the realtime audio callback thread.
+  Used automatically whenever FluidSynth or its SoundFont isn't
+  available (library not installed, no network for the one-time
+  SoundFont download, etc.) — see Synth.__init__ — so a machine without
+  FluidSynth set up still records a MIDI take, just with a more
+  synthetic tone, rather than refusing to record at all.
+
+Either way, rendering happens inline on the realtime audio callback
+thread itself (FluidSynth's own C rendering is easily fast enough —
+sub-millisecond per block, see its own docstring), not through a
+separate synth process/thread, which is what keeps this "zero latency
+as possible": no extra hop, just this block's own buffer_size/
+sample_rate latency, the same as any other instrument going through
+this engine.
 """
 
 from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
 SYNTH_VOICES = ["piano", "organ"]
 DEFAULT_SYNTH_VOICE = "piano"
+
+# General MIDI bank-0 program numbers, within the bundled SoundFont, for
+# each voice — 0 = Acoustic Grand Piano, 16 = Drawbar Organ (the closest
+# GM equivalent to _AdditiveSynth's Hammond-ish organ model).
+_GM_PROGRAM_BY_VOICE = {"piano": 0, "organ": 16}
 
 _MAX_VOICES = 32  # simultaneous notes before the oldest (by note-on order) is stolen
 _FINISHED_THRESHOLD = 1e-4  # peak instantaneous envelope below this = silent enough to drop the voice
@@ -74,8 +95,9 @@ class _Voice:
     env_at_release: float = 1.0  # organ only: attack envelope value captured the instant note_off arrived
 
 
-class Synth:
-    """A small polyphonic synth voiced as either "piano" or "organ".
+class _AdditiveSynth:
+    """The pure-numpy fallback voice — see module docstring. A small
+    polyphonic synth voiced as either "piano" or "organ".
 
     note_on/note_off/set_sustain are meant to be called from a MIDI
     input's own callback thread (see audio/midi_input.py's MidiInput)
@@ -237,3 +259,138 @@ class Synth:
             done = final_env < _FINISHED_THRESHOLD
 
         return sig, done
+
+
+class _FluidSynthVoice:
+    """Real sampled piano/organ via FluidSynth + a bundled SoundFont —
+    see module docstring and soundfont.py for where the file comes from.
+    try_create() is the only way to get one: it returns None (never
+    raises) on any failure — the `fluidsynth` package not installed, no
+    libfluidsynth on this machine, the SoundFont not fetchable — so
+    Synth.__init__ falls back to _AdditiveSynth transparently instead of
+    refusing to construct a MIDI instrument's engine at all.
+
+    Thread safety mirrors _AdditiveSynth's: note_on/note_off/
+    set_sustain/set_voice are meant to be called from a MIDI input's own
+    callback thread (or, for set_voice, the Record page's backend
+    thread) while render() runs on the realtime audio thread — all
+    guarded by the same lock, held only for plain FluidSynth API calls,
+    never anything that blocks."""
+
+    # FluidSynth's own default gain (0.2) is tuned for many simultaneous
+    # MIDI channels at once; this app only ever plays one voice through
+    # one channel, so there's room to turn it up. 1.3 was picked by
+    # measuring an unusually loud case — a six-note, full-velocity chord
+    # (both hands, fortissimo) — which peaks around 0.96 at this gain;
+    # ordinary playing sits well below that. render()'s own clip is
+    # still the final safety net regardless.
+    _GAIN = 1.3
+
+    @classmethod
+    def try_create(cls, sample_rate: int, voice: str) -> "_FluidSynthVoice | None":
+        try:
+            import fluidsynth
+        except ImportError:
+            return None
+        from .soundfont import ensure_soundfont
+        soundfont_path = ensure_soundfont()
+        if soundfont_path is None:
+            return None
+        try:
+            return cls(fluidsynth, sample_rate, voice, soundfont_path)
+        except Exception as e:
+            print(f"takeloom: FluidSynth unavailable ({e}) — using the built-in synth voice instead.")
+            return None
+
+    def __init__(self, fluidsynth_module, sample_rate: int, voice: str, soundfont_path: Path) -> None:
+        self._fs = fluidsynth_module.Synth(gain=self._GAIN, samplerate=float(sample_rate))
+        sfid = self._fs.sfload(str(soundfont_path))
+        if sfid == -1:
+            raise RuntimeError(f"fluidsynth could not load soundfont {soundfont_path}")
+        self._sfid = sfid
+        self._channel = 0  # this app only ever plays one voice at a time — no need for more
+        self._lock = threading.Lock()
+        self.set_voice(voice)
+
+    def set_voice(self, voice: str) -> None:
+        program = _GM_PROGRAM_BY_VOICE.get(voice, _GM_PROGRAM_BY_VOICE[DEFAULT_SYNTH_VOICE])
+        with self._lock:
+            self._fs.program_select(self._channel, self._sfid, 0, program)
+
+    def note_on(self, note: int, velocity: int) -> None:
+        """Same velocity-0-is-a-note-off tolerance as _AdditiveSynth's
+        own note_on — belt and suspenders alongside whatever FluidSynth
+        itself already does internally with a zero velocity."""
+        if velocity <= 0:
+            self.note_off(note)
+            return
+        with self._lock:
+            self._fs.noteon(self._channel, note, velocity)
+
+    def note_off(self, note: int) -> None:
+        with self._lock:
+            self._fs.noteoff(self._channel, note)
+
+    def set_sustain(self, down: bool) -> None:
+        with self._lock:
+            self._fs.cc(self._channel, 64, 127 if down else 0)  # CC64 = sustain pedal
+
+    def all_notes_off(self) -> None:
+        """Unlike _AdditiveSynth's hard, instant cut, FluidSynth's own
+        all_notes_off triggers each voice's normal release/decay tail
+        (and any reverb) rather than silencing them on the spot — a
+        graceful release, not a kill switch. Nothing in this codebase
+        currently calls this method, so the difference has no effect
+        today; noted here so it isn't a surprise if something starts
+        relying on it for an instant cutoff later."""
+        with self._lock:
+            self._fs.all_notes_off(self._channel)
+
+    def render(self, frames: int) -> np.ndarray:
+        """Same (frames, 1) mono float32 shape _AdditiveSynth.render()
+        returns — FluidSynth itself only renders interleaved stereo, so
+        this downmixes by averaging L/R (most GM patches, including the
+        piano/organ ones used here, aren't hard-panned, so this loses
+        essentially nothing) and rescales from get_samples()'s int16
+        range to float32 [-1, 1]."""
+        with self._lock:
+            samples = self._fs.get_samples(frames)  # interleaved stereo int16, length 2*frames
+        stereo = samples.reshape(-1, 2).astype(np.float32) / 32768.0
+        mono = stereo.mean(axis=1, keepdims=True)
+        np.clip(mono, -1.0, 1.0, out=mono)
+        return mono
+
+
+class Synth:
+    """Public façade every other module imports and constructs — see the
+    module docstring for what actually renders behind it (FluidSynth +
+    a bundled SoundFont when available, else the built-in additive
+    synth) and why callers never need to know which. Constructing one
+    picks the implementation once, up front; there's no live switch
+    between them mid-session."""
+
+    def __init__(self, sample_rate: int, voice: str = DEFAULT_SYNTH_VOICE) -> None:
+        self.sample_rate = sample_rate
+        self.voice = voice if voice in SYNTH_VOICES else DEFAULT_SYNTH_VOICE
+        impl = _FluidSynthVoice.try_create(sample_rate, self.voice)
+        self._impl = impl if impl is not None else _AdditiveSynth(sample_rate, self.voice)
+
+    def set_voice(self, voice: str) -> None:
+        if voice in SYNTH_VOICES:
+            self.voice = voice
+            self._impl.set_voice(voice)
+
+    def note_on(self, note: int, velocity: int) -> None:
+        self._impl.note_on(note, velocity)
+
+    def note_off(self, note: int) -> None:
+        self._impl.note_off(note)
+
+    def set_sustain(self, down: bool) -> None:
+        self._impl.set_sustain(down)
+
+    def all_notes_off(self) -> None:
+        self._impl.all_notes_off()
+
+    def render(self, frames: int) -> np.ndarray:
+        return self._impl.render(frames)
