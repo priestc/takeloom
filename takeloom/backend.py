@@ -3288,7 +3288,7 @@ class LocalBackend(Backend):
     def _open_channel_classifier_streams(
         self, config: StudioConfig, on_channel_detected, on_channel_active=None, on_channel_stats=None,
         on_channel_tuner=None,
-    ) -> tuple[list, list[str]]:
+    ) -> tuple[list, list[str], list[str]]:
         """Shared scanning core behind start_detect_all and start_auto_
         detect_instrument: opens one raw sd.InputStream per distinct
         resolved input device — no AudioEngine/recorder/mixer, just
@@ -3356,11 +3356,21 @@ class LocalBackend(Backend):
 
         Caller must hold self._record_lock and have already called
         self._close_active_monitor(). Returns (streams, skipped_
-        instrument_names) — skipped is every instrument whose input
-        couldn't be resolved right now (e.g. its interface is powered
-        off), left out rather than failing the whole scan. Raises
-        BackendError if config has no instruments, or none of their
-        inputs can currently be resolved."""
+        instrument_names, immediately_detected_names) — skipped is every
+        instrument whose input couldn't be resolved right now (e.g. its
+        interface is powered off), left out rather than failing the
+        whole scan; immediately_detected_names is every MIDI-driven
+        instrument whose device *could* be resolved (see the MIDI
+        section below for why that alone counts as detection). The
+        caller must invoke on_channel_detected(name, 1.0) for each of
+        these itself, and only after this call returns and its own
+        record_lock section is done — never from in here, since this
+        runs *inside* the caller's own held lock and on_channel_detected
+        (start_auto_detect_instrument's, specifically) reacquires that
+        same non-reentrant lock; calling it synchronously from in here
+        would deadlock. Raises BackendError if config has no
+        instruments, or none of their inputs can currently be
+        resolved."""
         from .audio.instrument_classifier import (
             InstrumentClassifier, SILENCE_THRESHOLD, SpectralStatsTracker, TunerTracker,
         )
@@ -3487,15 +3497,23 @@ class LocalBackend(Backend):
                 s.close()
             raise BackendError(f"Could not open an input device: {e}") from e
 
-        # MIDI-driven instruments: a note arriving on the configured MIDI
-        # device *is* the detection — no channel/frequency analysis
-        # needed the way an analog signal requires. MidiInput exposes the
-        # same .stop()/.close() shape as the sd.InputStream objects above
-        # (see its own docstring) so it slots into this same `streams`
-        # list, and start_detect_all/start_auto_detect_instrument tear
-        # everything down uniformly without needing to know which is which.
+        # MIDI-driven instruments: unlike an analog signal, there's no
+        # ambiguity here to wait out by requiring an actual note first —
+        # a MIDI keyboard being physically connected (its named device
+        # opens successfully) already says exactly which instrument this
+        # is, the same certainty a played note would give, just sooner.
+        # So the device opening at all *is* the detection (appended to
+        # immediately_detected below); a note afterward (_on_note_on)
+        # only matters for on_channel_active's light and, for detect_all,
+        # a fresh confirmation each time it's actually played. MidiInput
+        # exposes the same .stop()/.close() shape as the sd.InputStream
+        # objects above (see its own docstring) so it slots into this
+        # same `streams` list, and start_detect_all/start_auto_detect_
+        # instrument tear everything down uniformly without needing to
+        # know which is which.
         from .audio.midi_input import MidiInput, MidiUnavailableError
         release_seconds = release_blocks * config.buffer_size / config.sample_rate  # same ~0.5s hold as analog
+        immediately_detected: list[str] = []
         for inst in midi_instruments:
             label = inst.input_label or f"midi:{inst.midi_device}"
             release_timer: list = [None]
@@ -3520,11 +3538,12 @@ class LocalBackend(Backend):
                 skipped.append(inst.full_name)
                 continue
             streams.append(midi_in)
+            immediately_detected.append(inst.full_name)
 
         if not streams:
             raise BackendError("None of the configured instruments' inputs are available right now.")
 
-        return streams, skipped
+        return streams, skipped, immediately_detected
 
     def start_detect_all(self) -> None:
         with self._record_lock:
@@ -3557,7 +3576,7 @@ class LocalBackend(Backend):
                         "min_hz": min_hz, "max_hz": max_hz, "polyphony": polyphony, "peak_hz": peak_hz,
                     })
 
-            streams, skipped = self._open_channel_classifier_streams(
+            streams, skipped, immediate = self._open_channel_classifier_streams(
                 config, on_channel_detected, on_channel_active, on_channel_stats,
             )
             self._active_detect_all = _ActiveDetectAll(streams=streams, stop_event=stop_event)
@@ -3566,6 +3585,17 @@ class LocalBackend(Backend):
         if skipped:
             status += f" Not available right now: {', '.join(skipped)}."
         self._emit("detect_all_status", {"phase": "started", "status": status})
+        # Outside the lock above — see _open_channel_classifier_streams'
+        # own docstring for why calling this from inside it would risk
+        # deadlock. Every connected MIDI instrument reports itself right
+        # away here rather than waiting for a note (see that method's
+        # MIDI section) — this on_channel_detected doesn't touch record_
+        # lock at all, so the ordering matters less than it does for
+        # auto-detect below, but keeping both callers' "call it once
+        # streams/status are settled" shape identical is simpler than
+        # explaining why one of them could safely skip it.
+        for name in immediate:
+            on_channel_detected(name, 1.0)
 
     def stop_detect_all(self) -> None:
         with self._record_lock:
@@ -3666,7 +3696,7 @@ class LocalBackend(Backend):
                             tuning.append(note)
                 self._emit_tuner_reading(input_label, freq_hz, tuning)
 
-            streams, skipped = self._open_channel_classifier_streams(
+            streams, skipped, immediate = self._open_channel_classifier_streams(
                 config, on_channel_detected, on_channel_tuner=on_channel_tuner,
             )
             self._active_auto_detect = _ActiveAutoDetect(streams=streams, stop_event=stop_event)
@@ -3675,6 +3705,16 @@ class LocalBackend(Backend):
         if skipped:
             status += f" Not available right now: {', '.join(skipped)}."
         self._emit("auto_detect_status", {"phase": "listening", "status": status})
+        # Outside the lock above — on_channel_detected reacquires
+        # self._record_lock itself (see its own comment), and self.
+        # _active_auto_detect is now assigned, both of which calling
+        # this any earlier would break. A connected MIDI instrument
+        # reports itself immediately rather than waiting for a note
+        # (see _open_channel_classifier_streams' MIDI section) — first
+        # one here wins the same "first one wins" guard a note-triggered
+        # detection would.
+        for name in immediate:
+            on_channel_detected(name, 1.0)
 
     def stop_auto_detect_instrument(self) -> None:
         with self._record_lock:
