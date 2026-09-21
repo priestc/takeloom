@@ -99,7 +99,7 @@ class Backend(ABC):
     @abstractmethod
     def list_midi_devices(self) -> list[str]:
         """Every currently visible USB MIDI input port name — backs
-        Studio Setup's MIDI Device dropdown for a piano/organ Instrument
+        Studio Setup's Input dropdown for a "midi-keyboard" Instrument
         (see config.Instrument.midi_device/audio/midi_input.py). Unlike
         list_streamdecks, this *is* forwarded over a Remote connection
         (same as list_audio_devices/list_cameras) since the MIDI keyboard

@@ -85,7 +85,7 @@ def format_tuning(tuning: list[str]) -> str:
 # mirrors instrument_classifier.py's _DEFAULT_RANGES_BY_LABEL (used the
 # same way: only when the instrument's own `tuning` is unset). Unfretted/
 # unpitched-in-this-sense labels (drums) or instruments where "tuning" as
-# a small fixed note set doesn't really apply (piano, organ) have none —
+# a small fixed note set doesn't really apply (midi-keyboard) have none —
 # nearest_target falls back to the nearest chromatic note for those.
 DEFAULT_TUNING_BY_LABEL: dict[str, list[str]] = {
     "electric-guitar": ["E2", "A2", "D3", "G3", "B3", "E4"],

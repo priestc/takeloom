@@ -37,8 +37,7 @@ INSTRUMENT_LABELS = [
     "electric-bass",
     "electric-bass-fretless",
     "drums",
-    "piano",
-    "organ",
+    "midi-keyboard",
 ]
 
 

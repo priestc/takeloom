@@ -143,7 +143,7 @@ class _InstrumentRow:
     presets for whichever instrument label is currently selected (see
     audio/pitch.py's TUNING_PRESETS_BY_LABEL and _refresh_tuning_presets/
     _on_tuning_preset_picked below) — empty (no presets, e.g. drums/
-    piano/organ) just leaves it a plain text field.
+    midi-keyboard) just leaves it a plain text field.
 
     The Input dropdown lists both kinds of source together: the studio's
     configured input labels, and every visible USB MIDI device, shown as
@@ -153,8 +153,10 @@ class _InstrumentRow:
     synthesized from that keyboard's notes inside the recording engine
     rather than captured off an analog channel, so it has no InputLabel/
     channel of its own and to_instrument() saves midi_device with
-    input_label blank. Voice (piano/organ) only means anything for such
-    a row, and is likewise saved blank for an analog one."""
+    input_label blank. Voice (piano/organ — see audio/synth.py's
+    SYNTH_VOICES, the synthesized *sound*, distinct from "midi-keyboard"
+    the instrument *label*) only means anything for such a row, and is
+    likewise saved blank for an analog one."""
 
     def __init__(
         self,
@@ -767,9 +769,9 @@ class StudioSetupFrame(ttk.Frame):
                  "(e.g. \"E2 A2 D3 G3 B3 E4\" for standard guitar) — leave blank to use a sensible "
                  "default for the instrument's label. Input lists the studio's input labels plus any "
                  "USB MIDI device (shown as \"MIDI: ...\"); picking a MIDI one makes the instrument "
-                 "(typically piano/organ) MIDI-driven — its sound is synthesized from that keyboard's "
-                 "notes right inside the recording engine instead of captured off an analog channel, "
-                 "and Voice picks which synth sound it plays.",
+                 "MIDI-driven (give it the \"midi-keyboard\" label) — its sound is synthesized from "
+                 "that keyboard's notes right inside the recording engine instead of captured off an "
+                 "analog channel, and Voice picks which synth sound (piano/organ) it plays.",
             foreground="#666666", wraplength=760, justify="left",
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(2, 6))
         row += 1

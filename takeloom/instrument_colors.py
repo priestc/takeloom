@@ -19,13 +19,12 @@ from __future__ import annotations
 # two guitars share green, the two basses share blue), distinct shades
 # so they're still tellable apart from each other.
 LABEL_COLORS: dict[str, str] = {
-    "piano": "#C62828",
-    "organ": "#6A1B9A",
     "acoustic-guitar": "#2E7D32",
     "electric-guitar": "#43A047",
     "electric-bass": "#1565C0",
     "electric-bass-fretless": "#0D47A1",
     "drums": "#E65100",
+    "midi-keyboard": "#C62828",
 }
 # An unrecognized/legacy label (predates today's INSTRUMENT_LABELS
 # vocabulary, or was hand-edited in) — never a real current choice, but

@@ -77,8 +77,15 @@ _DEFAULT_RANGES_BY_LABEL: dict[str, tuple[float, float]] = {
     "electric-bass": (40.0, 400.0),
     "electric-bass-fretless": (40.0, 400.0),
     "drums": (60.0, 5000.0),
-    "piano": (27.0, 4200.0),
-    "organ": (27.0, 4200.0),
+    # Only meaningful for a "midi-keyboard" instrument that somehow isn't
+    # actually MIDI-driven (config.Instrument.is_midi false despite the
+    # label) — a real MIDI one is never scanned by this classifier at all
+    # (see backend.py's _open_channel_classifier_streams, which skips
+    # is_midi instruments entirely and detects a MIDI note directly
+    # instead). Kept here so the assert below stays satisfied and this
+    # dict never silently falls back to _FALLBACK_RANGE for a label that
+    # is otherwise a normal, valid choice.
+    "midi-keyboard": (27.0, 4200.0),
 }
 assert set(_DEFAULT_RANGES_BY_LABEL) == set(INSTRUMENT_LABELS), (
     "_DEFAULT_RANGES_BY_LABEL is out of sync with config.INSTRUMENT_LABELS"
