@@ -55,6 +55,22 @@ VAULT_FIELDS = [
 
 _VAULT_MODE_LABELS = [("local", "Local only"), ("remote", "Remote only"), ("both", "Both")]
 
+# How a USB MIDI device is shown among the ordinary input labels in an
+# instrument row's single Input dropdown (see _InstrumentRow): a MIDI
+# instrument has no InputLabel/channel of its own — its sound is
+# synthesized rather than captured (config.Instrument.is_midi) — but
+# from the operator's point of view "where does this instrument's sound
+# come from" is one question with one answer, so both kinds of source
+# share one picker rather than making a MIDI row's Input column a
+# meaningless leftover. The prefix is what _InstrumentRow.
+# _parse_input_selection maps back to midi_device on save.
+_MIDI_INPUT_PREFIX = "MIDI: "
+
+
+def _midi_input_choice(device_name: str) -> str:
+    """The Input dropdown entry standing for USB MIDI device `device_name`."""
+    return f"{_MIDI_INPUT_PREFIX}{device_name}"
+
 
 class _InputRow(ttk.Frame):
     """One editable input-label row: label text, device choice, channel number."""
@@ -129,13 +145,16 @@ class _InstrumentRow:
     _on_tuning_preset_picked below) — empty (no presets, e.g. drums/
     piano/organ) just leaves it a plain text field.
 
-    MIDI Device + Voice make a row MIDI-driven (config.Instrument.
-    midi_device/synth_voice — see audio/synth.py, audio/midi_input.py):
-    picking a MIDI Device means this instrument's sound is synthesized
-    from a USB MIDI keyboard rather than captured from the Input column,
-    which is then ignored (to_instrument() blanks input_label out
-    entirely whenever midi_device is set, so a stale Input selection
-    left showing in the dropdown never silently wins)."""
+    The Input dropdown lists both kinds of source together: the studio's
+    configured input labels, and every visible USB MIDI device, shown as
+    "MIDI: <device>" (see _MIDI_INPUT_PREFIX). Picking a MIDI entry is
+    what makes the row MIDI-driven (config.Instrument.midi_device/
+    synth_voice — see audio/synth.py, audio/midi_input.py): its sound is
+    synthesized from that keyboard's notes inside the recording engine
+    rather than captured off an analog channel, so it has no InputLabel/
+    channel of its own and to_instrument() saves midi_device with
+    input_label blank. Voice (piano/organ) only means anything for such
+    a row, and is likewise saved blank for an analog one."""
 
     def __init__(
         self,
@@ -155,21 +174,26 @@ class _InstrumentRow:
         synth_voice: str = "",
     ) -> None:
         self._on_remove = on_remove
+        # Kept current by set_input_choices() — _parse_input_selection
+        # checks it first so an analog input label that happens to be
+        # named like a MIDI entry still resolves as the analog one.
+        self._input_label_names = list(input_label_names)
 
-        self.input_label_var = tk.StringVar(value=input_label or (input_label_names[0] if input_label_names else ""))
+        selection = _midi_input_choice(midi_device) if midi_device else input_label
+        choices = self._input_choices(input_label_names, midi_device_names, selection)
+        self.input_label_var = tk.StringVar(value=selection or (choices[0] if choices else ""))
         self.full_name_var = tk.StringVar(value=full_name)
         self.label_var = tk.StringVar(value=label or INSTRUMENT_LABELS[0])
         self.musician_var = tk.StringVar(value=musician)
         self.freq_min_var = tk.StringVar(value=(f"{freq_min_hz:g}" if freq_min_hz else ""))
         self.freq_max_var = tk.StringVar(value=(f"{freq_max_hz:g}" if freq_max_hz else ""))
         self.tuning_var = tk.StringVar(value=format_tuning(tuning or []))
-        self.midi_device_var = tk.StringVar(value=midi_device)
         # Blank rather than defaulting to MIDI_SYNTH_VOICES[0] when this
         # isn't (yet) a MIDI row — an analog instrument's Voice dropdown
         # showing "piano" would look like a real setting even though
-        # to_instrument() ignores it entirely whenever midi_device is
-        # empty. Picking a MIDI Device fills in a sensible default voice
-        # instead — see _on_midi_device_changed.
+        # to_instrument() ignores it entirely for an analog row. Picking
+        # a MIDI entry in Input fills in a default voice instead — see
+        # _on_input_changed.
         self.synth_voice_var = tk.StringVar(value=synth_voice or (MIDI_SYNTH_VOICES[0] if midi_device else ""))
         # display name -> notes for whichever label is currently selected
         # — refreshed by _refresh_tuning_presets, read by _on_tuning_
@@ -177,23 +201,20 @@ class _InstrumentRow:
         # dropdown popup (typing a custom value never touches this).
         self._tuning_presets: dict[str, list[str]] = {}
 
-        tuning_combo = ttk.Combobox(table, textvariable=self.tuning_var, width=22)
+        tuning_combo = ttk.Combobox(table, textvariable=self.tuning_var, width=18)
         tuning_combo.bind("<<ComboboxSelected>>", self._on_tuning_preset_picked)
 
-        # Editable (not "readonly"), unlike the other comboboxes here — a
-        # freshly plugged-in MIDI device might not be in midi_device_names
-        # yet if Studio Setup was opened before it was plugged in, and
-        # "Reload Devices" only refreshes this dropdown's *values*, not
-        # whatever's already typed/selected into it.
-        midi_combo = ttk.Combobox(table, textvariable=self.midi_device_var, values=midi_device_names, width=18)
-
+        # Column widths are chosen so the whole row (through the Remove
+        # button) still fits the default 1100px window — Input has to
+        # hold a "MIDI: <device>" entry now, so Tuning/Voice give back
+        # what it takes. Anything longer is clipped in the closed
+        # combobox but shown in full in its dropdown popup.
         self.widgets = [
             ttk.Entry(table, textvariable=self.full_name_var, width=20),
             ttk.Combobox(table, textvariable=self.label_var, values=INSTRUMENT_LABELS, state="readonly", width=16),
-            ttk.Combobox(table, textvariable=self.input_label_var, values=input_label_names, state="readonly", width=12),
-            midi_combo,
+            ttk.Combobox(table, textvariable=self.input_label_var, values=choices, state="readonly", width=19),
             ttk.Combobox(
-                table, textvariable=self.synth_voice_var, values=MIDI_SYNTH_VOICES, state="readonly", width=8,
+                table, textvariable=self.synth_voice_var, values=MIDI_SYNTH_VOICES, state="readonly", width=6,
             ),
             ttk.Entry(table, textvariable=self.musician_var, width=10),
             tuning_combo,
@@ -209,29 +230,61 @@ class _InstrumentRow:
         # that sets it programmatically later would silently stop
         # refreshing the tuning dropdown too).
         self.label_var.trace_add("write", self._refresh_tuning_presets)
-        self.midi_device_var.trace_add("write", self._on_midi_device_changed)
+        self.input_label_var.trace_add("write", self._on_input_changed)
 
-    def _on_midi_device_changed(self, *_args) -> None:
-        """Fill in a sensible default Voice the moment a MIDI Device is
-        first set on a row that didn't have one yet (see synth_voice_
-        var's own constructor comment for why it starts blank rather
-        than defaulting eagerly) — never overwrites a voice the operator
-        already picked."""
-        if self.midi_device_var.get().strip() and not self.synth_voice_var.get().strip():
+    @staticmethod
+    def _input_choices(
+        input_label_names: list[str], midi_device_names: list[str], current: str = "",
+    ) -> list[str]:
+        """Every Input dropdown entry: the configured input labels first,
+        then each visible USB MIDI device as "MIDI: <device>".
+
+        `current`, when it isn't among those already, is appended so a
+        readonly combobox can still *display* a selection whose hardware
+        isn't visible right now — a MIDI keyboard that's unplugged (or
+        an input label since renamed) would otherwise silently blank
+        itself out of the row and get dropped on the next Save."""
+        choices = list(input_label_names)
+        choices += [_midi_input_choice(name) for name in midi_device_names]
+        if current and current not in choices:
+            choices.append(current)
+        return choices
+
+    def set_input_choices(self, input_label_names: list[str], midi_device_names: list[str]) -> None:
+        """Refresh the Input dropdown's choices, e.g. after "Reload
+        Devices" — mirrors _InputRow.set_input_devices. Never touches
+        the current selection (see _input_choices' `current`)."""
+        self._input_label_names = list(input_label_names)
+        self.widgets[2]["values"] = self._input_choices(
+            input_label_names, midi_device_names, self.input_label_var.get().strip(),
+        )
+
+    def _on_input_changed(self, *_args) -> None:
+        """Fill in a sensible default Voice the moment Input is pointed
+        at a MIDI device on a row that has no voice picked yet (see
+        synth_voice_var's own constructor comment for why it starts
+        blank rather than defaulting eagerly) — never overwrites a voice
+        the operator already chose."""
+        _input_label, midi_device = self._parse_input_selection(self.input_label_var.get().strip())
+        if midi_device and not self.synth_voice_var.get().strip():
             self.synth_voice_var.set(MIDI_SYNTH_VOICES[0])
 
-    def set_midi_devices(self, midi_device_names: list[str]) -> None:
-        """Refresh the MIDI Device dropdown's choices, e.g. after
-        "Reload Devices" — mirrors _InputRow.set_input_devices, but
-        never forces state="readonly" the way that one does, since a
-        not-yet-visible device name should stay typeable here too (see
-        the constructor's own note on midi_combo)."""
-        self.widgets[3]["values"] = midi_device_names
+    def _parse_input_selection(self, selection: str) -> tuple[str, str]:
+        """Split an Input dropdown selection into the (input_label,
+        midi_device) pair config.Instrument stores — exactly one of
+        which is ever non-empty. A real input label wins over the
+        "MIDI: " prefix if one is somehow named that way, so an analog
+        input can never be mistaken for a MIDI device."""
+        if selection in self._input_label_names:
+            return selection, ""
+        if selection.startswith(_MIDI_INPUT_PREFIX):
+            return "", selection[len(_MIDI_INPUT_PREFIX):].strip()
+        return selection, ""
 
     def _refresh_tuning_presets(self, *_args) -> None:
         presets = TUNING_PRESETS_BY_LABEL.get(self.label_var.get().strip(), [])
         self._tuning_presets = dict(presets)
-        self.widgets[6]["values"] = list(self._tuning_presets.keys())
+        self.widgets[5]["values"] = list(self._tuning_presets.keys())
 
     def _on_tuning_preset_picked(self, _event: object = None) -> None:
         notes = self._tuning_presets.get(self.tuning_var.get())
@@ -248,13 +301,11 @@ class _InstrumentRow:
 
     def to_instrument(self) -> Instrument | None:
         full_name = self.full_name_var.get().strip()
-        midi_device = self.midi_device_var.get().strip()
-        # A MIDI Device makes this instrument MIDI-driven — input_label is
-        # then blanked out regardless of whatever's still showing in the
-        # Input dropdown, so it's never silently used alongside/instead of
-        # the MIDI device (see config.Instrument.is_midi, which is what
-        # every backend.py code path actually branches on).
-        input_label = "" if midi_device else self.input_label_var.get().strip()
+        # Exactly one of these is ever set — Input is a single picker
+        # over both kinds of source (see _parse_input_selection), and
+        # config.Instrument.is_midi (what every backend.py code path
+        # branches on) is just "midi_device is non-empty".
+        input_label, midi_device = self._parse_input_selection(self.input_label_var.get().strip())
         if not full_name or not (input_label or midi_device):
             return None
         return Instrument(
@@ -679,7 +730,7 @@ class StudioSetupFrame(ttk.Frame):
         for row_widget in self._input_rows:
             row_widget.set_input_devices(self.input_devices)
         for inst_row in self._instrument_rows:
-            inst_row.set_midi_devices(self.midi_devices)
+            inst_row.set_input_choices(self._current_input_label_names(), self.midi_devices)
         self.status_var.set(
             f"Devices reloaded ({len(self.input_devices)} inputs, {len(self.midi_devices)} MIDI found)."
         )
@@ -694,9 +745,14 @@ class StudioSetupFrame(ttk.Frame):
         row += 1
 
         input_label_names = self._current_input_label_names()
-        if not input_label_names:
+        # A MIDI-only rig is a perfectly good setup — a MIDI keyboard is
+        # its own source and needs no InputLabel (see _InstrumentRow) —
+        # so only block on having neither kind of input available.
+        if not input_label_names and not self.midi_devices:
             ttk.Label(
-                self.content, text="Add an input label above before assigning instruments.",
+                self.content,
+                text="Add an input label above (or plug in a USB MIDI device and press Reload "
+                     "Devices) before assigning instruments.",
                 foreground="#666666",
             ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
             row += 1
@@ -709,10 +765,11 @@ class StudioSetupFrame(ttk.Frame):
                  "song's need for a take, so recording one with either won't have the setlist offer "
                  "it again for the other. Tuning is the Record tab's tuner target notes, low to high "
                  "(e.g. \"E2 A2 D3 G3 B3 E4\" for standard guitar) — leave blank to use a sensible "
-                 "default for the instrument's label. MIDI Device makes an instrument (typically "
-                 "piano/organ) MIDI-driven instead of an analog input: its sound is synthesized from "
-                 "a USB MIDI keyboard's notes right inside the recording engine, so the Input column "
-                 "is ignored whenever MIDI Device is set.",
+                 "default for the instrument's label. Input lists the studio's input labels plus any "
+                 "USB MIDI device (shown as \"MIDI: ...\"); picking a MIDI one makes the instrument "
+                 "(typically piano/organ) MIDI-driven — its sound is synthesized from that keyboard's "
+                 "notes right inside the recording engine instead of captured off an analog channel, "
+                 "and Voice picks which synth sound it plays.",
             foreground="#666666", wraplength=760, justify="left",
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(2, 6))
         row += 1
@@ -721,7 +778,7 @@ class StudioSetupFrame(ttk.Frame):
         self.table.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         row += 1
 
-        headers = ["Full name", "Label", "Input", "MIDI Device", "Voice", "Musician", "Tuning", ""]
+        headers = ["Full name", "Label", "Input", "Voice", "Musician", "Tuning", ""]
         for col, text in enumerate(headers):
             ttk.Label(self.table, text=text).grid(row=0, column=col, sticky="w", padx=(0, 6))
 
