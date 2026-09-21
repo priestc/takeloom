@@ -94,13 +94,25 @@ class Synth:
         self._lock = threading.Lock()
 
     def set_voice(self, voice: str) -> None:
-        """Meant to be called before any notes are active (e.g. right
-        after construction, picking the instrument's configured voice) —
-        switching mid-note would leave an in-flight voice's harmonic
-        table mismatched against the new voice's, which render() doesn't
-        guard against."""
-        if voice in SYNTH_VOICES:
-            self.voice = voice
+        """Live voice switch — e.g. the Record page's "Sound" picker
+        (backend.py's set_synth_voice), which is meant to work while
+        notes are actively playing, not just before the first one. Safe
+        to call from any thread: guarded by the same lock render() holds
+        for its own self.voice reads, so a change can never land mid-
+        block and mix harmonics from one voice with envelope math from
+        the other.
+
+        Both current voices' harmonic tables are the same length (see
+        SYNTH_VOICES' arrays), so switching never crashes an in-flight
+        note — but it does immediately reinterpret every *currently
+        ringing* note's envelope under the new voice's math too (there's
+        no per-voice "which sound was this struck under" memory), which
+        can produce a brief, audible discontinuity on a note that's
+        still sustaining at the moment of the switch. A newly struck
+        note is unaffected either way."""
+        with self._lock:
+            if voice in SYNTH_VOICES:
+                self.voice = voice
 
     def note_on(self, note: int, velocity: int) -> None:
         """A velocity of 0 is, per the MIDI spec, a common alternate

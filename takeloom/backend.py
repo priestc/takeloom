@@ -581,6 +581,30 @@ class Backend(ABC):
         ...
 
     @abstractmethod
+    def set_synth_voice(self, instrument_name: str, voice: str) -> None:
+        """Change instrument_name's (a MIDI-driven Instrument's
+        full_name — see config.Instrument.is_midi/midi_device) synth
+        voice to `voice` (one of audio.synth.SYNTH_VOICES) — the Record
+        page's "Sound" picker, not Studio Setup, is what calls this; a
+        MIDI instrument's voice is meant to be changed live while
+        playing, not fixed at setup time the way its label/input are.
+
+        Persisted onto that Instrument in config for next time (per
+        specific instrument, not per label, since two different MIDI
+        instruments could each want a different default voice — unlike
+        set_compressor_settings, which is keyed by label) and, if a
+        currently-running engine (an active session's, or the ambient
+        monitor's) is open for this exact instrument, applied to its
+        live Synth immediately (see audio/synth.py's Synth.set_voice) —
+        no restart needed, same "immediately" as adjust_instrument_
+        volume/set_compressor_settings.
+
+        Raises BackendError if instrument_name isn't a configured
+        instrument, isn't MIDI-driven, or voice isn't a recognized
+        SYNTH_VOICES value."""
+        ...
+
+    @abstractmethod
     def benchmark_audio_modifiers(self) -> dict:
         """Run audio.benchmark.run_audio_modifier_benchmark() against
         this machine's own current config (sample_rate/buffer_size, and
@@ -2129,6 +2153,27 @@ class LocalBackend(Backend):
             if engine is not None and inst is not None and inst.label == label:
                 engine.set_compressor_settings(new_settings)
 
+    def set_synth_voice(self, instrument_name: str, voice: str) -> None:
+        from .audio.synth import SYNTH_VOICES
+        if voice not in SYNTH_VOICES:
+            raise BackendError(f"Unknown synth voice '{voice}' (must be one of {', '.join(SYNTH_VOICES)}).")
+        with self._record_lock:
+            config = self.get_config()
+            inst = config.get_instrument(instrument_name)
+            if inst is None:
+                raise BackendError(f"Instrument '{instrument_name}' not found.")
+            if not inst.is_midi:
+                raise BackendError(f"'{inst.full_name}' isn't a MIDI-driven instrument.")
+            inst.synth_voice = voice
+            config.save(self._config_path)
+            engine, active_inst = self._get_active_engine_and_inst()
+            if (
+                engine is not None and active_inst is not None
+                and active_inst.full_name.lower() == inst.full_name.lower()
+                and engine.synth is not None
+            ):
+                engine.synth.set_voice(voice)
+
     def benchmark_audio_modifiers(self) -> dict:
         from .audio.benchmark import run_audio_modifier_benchmark
         result = run_audio_modifier_benchmark(self.get_config())
@@ -3588,10 +3633,20 @@ class LocalBackend(Backend):
                     monitor = self._active_monitor
                     if monitor is not None and inst is not None:
                         self._attach_tuner_sink(monitor.engine, inst.input_label, effective_tuning(inst))
+                from .audio.synth import DEFAULT_SYNTH_VOICE
                 self._emit("auto_detect_status", {
                     "phase": "detected", "instrument": name,
                     "full_name": inst.full_name if inst is not None else "",
                     "label": inst.label if inst is not None else "",
+                    "is_midi": bool(inst is not None and inst.is_midi),
+                    # The Record page's "Sound" picker (ui/record.py) seeds
+                    # its dropdown from this — empty/unset always resolves
+                    # to DEFAULT_SYNTH_VOICE the same way Synth's own
+                    # constructor does (see audio/synth.py), so the picker
+                    # never shows a blank selection for a MIDI instrument.
+                    "synth_voice": (
+                        (inst.synth_voice or DEFAULT_SYNTH_VOICE) if inst is not None and inst.is_midi else ""
+                    ),
                 })
 
             def on_channel_tuner(input_label: str, freq_hz: float) -> None:

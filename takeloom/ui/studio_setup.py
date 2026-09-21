@@ -32,7 +32,7 @@ from tkinter import filedialog, messagebox, ttk
 from ..audio.filters import COMPRESSOR_PRESETS, CompressorSettings
 from ..audio.pitch import TUNING_PRESETS_BY_LABEL, format_tuning, parse_tuning
 from ..backend import BackendError
-from ..config import INSTRUMENT_LABELS, MIDI_SYNTH_VOICES, Instrument, InputLabel, StudioConfig
+from ..config import INSTRUMENT_LABELS, Instrument, InputLabel, StudioConfig
 from .app_state import AppState
 from .instrument_colors import make_label_badge
 
@@ -153,10 +153,16 @@ class _InstrumentRow:
     synthesized from that keyboard's notes inside the recording engine
     rather than captured off an analog channel, so it has no InputLabel/
     channel of its own and to_instrument() saves midi_device with
-    input_label blank. Voice (piano/organ — see audio/synth.py's
-    SYNTH_VOICES, the synthesized *sound*, distinct from "midi-keyboard"
-    the instrument *label*) only means anything for such a row, and is
-    likewise saved blank for an analog one."""
+    input_label blank.
+
+    Which synth sound (piano/organ — audio/synth.py's SYNTH_VOICES) a
+    MIDI row actually plays isn't set here at all — that's the Record
+    page's "Sound" picker (ui/record.py), changeable live while playing.
+    synth_voice still round-trips through this row unedited (self.
+    _synth_voice, set once at construction from the loaded Instrument),
+    same reasoning as freq_min_var/freq_max_var above: Save must not
+    silently blank out a value some other part of the app is
+    responsible for."""
 
     def __init__(
         self,
@@ -190,13 +196,10 @@ class _InstrumentRow:
         self.freq_min_var = tk.StringVar(value=(f"{freq_min_hz:g}" if freq_min_hz else ""))
         self.freq_max_var = tk.StringVar(value=(f"{freq_max_hz:g}" if freq_max_hz else ""))
         self.tuning_var = tk.StringVar(value=format_tuning(tuning or []))
-        # Blank rather than defaulting to MIDI_SYNTH_VOICES[0] when this
-        # isn't (yet) a MIDI row — an analog instrument's Voice dropdown
-        # showing "piano" would look like a real setting even though
-        # to_instrument() ignores it entirely for an analog row. Picking
-        # a MIDI entry in Input fills in a default voice instead — see
-        # _on_input_changed.
-        self.synth_voice_var = tk.StringVar(value=synth_voice or (MIDI_SYNTH_VOICES[0] if midi_device else ""))
+        # Not a tk.StringVar/widget — nothing here edits it (see the
+        # Record page's "Sound" picker instead), just carries it through
+        # to_instrument() unchanged so Save doesn't wipe it out.
+        self._synth_voice = synth_voice
         # display name -> notes for whichever label is currently selected
         # — refreshed by _refresh_tuning_presets, read by _on_tuning_
         # preset_picked once the user actually picks one from the
@@ -208,16 +211,13 @@ class _InstrumentRow:
 
         # Column widths are chosen so the whole row (through the Remove
         # button) still fits the default 1100px window — Input has to
-        # hold a "MIDI: <device>" entry now, so Tuning/Voice give back
-        # what it takes. Anything longer is clipped in the closed
+        # hold a "MIDI: <device>" entry now, so Tuning gives back some
+        # of what it takes. Anything longer is clipped in the closed
         # combobox but shown in full in its dropdown popup.
         self.widgets = [
             ttk.Entry(table, textvariable=self.full_name_var, width=20),
             ttk.Combobox(table, textvariable=self.label_var, values=INSTRUMENT_LABELS, state="readonly", width=16),
-            ttk.Combobox(table, textvariable=self.input_label_var, values=choices, state="readonly", width=19),
-            ttk.Combobox(
-                table, textvariable=self.synth_voice_var, values=MIDI_SYNTH_VOICES, state="readonly", width=6,
-            ),
+            ttk.Combobox(table, textvariable=self.input_label_var, values=choices, state="readonly", width=22),
             ttk.Entry(table, textvariable=self.musician_var, width=10),
             tuning_combo,
             ttk.Button(table, text="Remove", command=lambda: self._on_remove(self)),
@@ -232,7 +232,6 @@ class _InstrumentRow:
         # that sets it programmatically later would silently stop
         # refreshing the tuning dropdown too).
         self.label_var.trace_add("write", self._refresh_tuning_presets)
-        self.input_label_var.trace_add("write", self._on_input_changed)
 
     @staticmethod
     def _input_choices(
@@ -261,16 +260,6 @@ class _InstrumentRow:
             input_label_names, midi_device_names, self.input_label_var.get().strip(),
         )
 
-    def _on_input_changed(self, *_args) -> None:
-        """Fill in a sensible default Voice the moment Input is pointed
-        at a MIDI device on a row that has no voice picked yet (see
-        synth_voice_var's own constructor comment for why it starts
-        blank rather than defaulting eagerly) — never overwrites a voice
-        the operator already chose."""
-        _input_label, midi_device = self._parse_input_selection(self.input_label_var.get().strip())
-        if midi_device and not self.synth_voice_var.get().strip():
-            self.synth_voice_var.set(MIDI_SYNTH_VOICES[0])
-
     def _parse_input_selection(self, selection: str) -> tuple[str, str]:
         """Split an Input dropdown selection into the (input_label,
         midi_device) pair config.Instrument stores — exactly one of
@@ -286,7 +275,7 @@ class _InstrumentRow:
     def _refresh_tuning_presets(self, *_args) -> None:
         presets = TUNING_PRESETS_BY_LABEL.get(self.label_var.get().strip(), [])
         self._tuning_presets = dict(presets)
-        self.widgets[5]["values"] = list(self._tuning_presets.keys())
+        self.widgets[4]["values"] = list(self._tuning_presets.keys())
 
     def _on_tuning_preset_picked(self, _event: object = None) -> None:
         notes = self._tuning_presets.get(self.tuning_var.get())
@@ -319,7 +308,7 @@ class _InstrumentRow:
             freq_max_hz=self._parse_hz(self.freq_max_var),
             tuning=parse_tuning(self.tuning_var.get()),
             midi_device=midi_device,
-            synth_voice=self.synth_voice_var.get().strip() if midi_device else "",
+            synth_voice=self._synth_voice,
         )
 
     @staticmethod
@@ -771,7 +760,8 @@ class StudioSetupFrame(ttk.Frame):
                  "USB MIDI device (shown as \"MIDI: ...\"); picking a MIDI one makes the instrument "
                  "MIDI-driven (give it the \"midi-keyboard\" label) — its sound is synthesized from "
                  "that keyboard's notes right inside the recording engine instead of captured off an "
-                 "analog channel, and Voice picks which synth sound (piano/organ) it plays.",
+                 "analog channel. Which synth sound it plays (piano/organ) is picked live on the "
+                 "Record page, not here — it's a change you'd make while playing, not while setting up.",
             foreground="#666666", wraplength=760, justify="left",
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(2, 6))
         row += 1
@@ -780,7 +770,7 @@ class StudioSetupFrame(ttk.Frame):
         self.table.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         row += 1
 
-        headers = ["Full name", "Label", "Input", "Voice", "Musician", "Tuning", ""]
+        headers = ["Full name", "Label", "Input", "Musician", "Tuning", ""]
         for col, text in enumerate(headers):
             ttk.Label(self.table, text=text).grid(row=0, column=col, sticky="w", padx=(0, 6))
 

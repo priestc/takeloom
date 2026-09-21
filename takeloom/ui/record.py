@@ -19,6 +19,7 @@ from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
 
 from ..audio.pitch import TunerSmoother
+from ..audio.synth import DEFAULT_SYNTH_VOICE, SYNTH_VOICES
 from ..backend import BackendError, StartRecordingRequest
 from ..config import StudioConfig
 from ..inspiration import average_duration, derive_filter_label
@@ -87,6 +88,12 @@ class RecordFrame(ttk.Frame):
         # _handle_auto_detect_status). This is what a session actually
         # starts with; there's no manual instrument picker anymore.
         self._detected_instrument = ""
+        # Whether that instrument is MIDI-driven (config.Instrument.
+        # is_midi) — set alongside _detected_instrument by _handle_auto_
+        # detect_status's "detected" branch, and what controls whether
+        # the "Sound" picker (self.synth_voice_row, built in _build_left)
+        # is shown at all; meaningless while this is "" or False.
+        self._detected_is_midi = False
         # Sub-state of an "idle" _phase — see the "instrument identify
         # cycle" section below for the full "idle" -> "identifying" ->
         # "ready" -> (Play opens a session) flow.
@@ -178,6 +185,7 @@ class RecordFrame(ttk.Frame):
                     pass
         self._stop_preview()
         self._detected_instrument = ""
+        self._detected_is_midi = False
         self._identify_state = "idle"
         self._pending_streaming = False
         self._tuner_note = None
@@ -310,6 +318,28 @@ class RecordFrame(ttk.Frame):
         ttk.Label(left, textvariable=self.auto_detect_status_var, foreground="#666666", wraplength=360).grid(
             row=row, column=0, columnspan=2, sticky="w", pady=(0, 12)
         )
+        row += 1
+
+        # Only shown once auto-detect commits to a MIDI-driven instrument
+        # (self._detected_is_midi — see _handle_auto_detect_status's
+        # "detected" branch, which grid()/grid_remove()s this and sets
+        # synth_voice_var to whatever's currently playing) and stays up
+        # right through an active session, not just the "ready" phase —
+        # a MIDI instrument's sound is meant to be changeable live while
+        # playing, not just chosen once before Record. Selecting a new
+        # value calls backend.set_synth_voice immediately (see _on_synth_
+        # voice_changed); there's no separate "apply" step.
+        self.synth_voice_row = ttk.Frame(left)
+        self.synth_voice_row.grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 12))
+        ttk.Label(self.synth_voice_row, text="Sound").pack(side="left", padx=(0, 8))
+        self.synth_voice_var = tk.StringVar(value=DEFAULT_SYNTH_VOICE)
+        self.synth_voice_combo = ttk.Combobox(
+            self.synth_voice_row, textvariable=self.synth_voice_var, values=SYNTH_VOICES,
+            state="readonly", width=12,
+        )
+        self.synth_voice_combo.pack(side="left")
+        self.synth_voice_combo.bind("<<ComboboxSelected>>", self._on_synth_voice_changed)
+        self.synth_voice_row.grid_remove()
         row += 1
 
         # Tk equivalent of streamdeck_controller.py's touchscreen tuner
@@ -764,7 +794,9 @@ class RecordFrame(ttk.Frame):
         self._pending_streaming = streaming
         self._identify_state = "identifying"
         self._detected_instrument = ""
+        self._detected_is_midi = False
         self.detected_instrument_var.set("")
+        self.synth_voice_row.grid_remove()
         self.auto_detect_status_var.set("Listening...")
         self.redetect_button.state(["disabled"])
         self._tuner_note = None
@@ -792,7 +824,9 @@ class RecordFrame(ttk.Frame):
         the streaming/local choice already made)."""
         self._identify_state = "identifying"
         self._detected_instrument = ""
+        self._detected_is_midi = False
         self.detected_instrument_var.set("")
+        self.synth_voice_row.grid_remove()
         self.auto_detect_status_var.set("Listening...")
         self.redetect_button.state(["disabled"])
         self._tuner_note = None
@@ -834,6 +868,12 @@ class RecordFrame(ttk.Frame):
             full_name = data.get("full_name", "")
             detail = " — ".join(part for part in (label, full_name) if part)
             self.auto_detect_status_var.set(f"Detected ({detail})" if detail else "Detected.")
+            self._detected_is_midi = bool(data.get("is_midi"))
+            if self._detected_is_midi:
+                self.synth_voice_var.set(data.get("synth_voice") or DEFAULT_SYNTH_VOICE)
+                self.synth_voice_row.grid()
+            else:
+                self.synth_voice_row.grid_remove()
             if self._identify_state == "identifying":
                 self._identify_state = "ready"
                 # Every channel's stream just got torn down (see Backend.
@@ -851,6 +891,28 @@ class RecordFrame(ttk.Frame):
         elif phase == "stopped":
             self.auto_detect_status_var.set("")
         self.streamdeck_emulator.update_recording_page(self._phase, self._video_check_phase, self._identify_state)
+
+    def _on_synth_voice_changed(self, _event: object = None) -> None:
+        """The "Sound" picker was changed — applies immediately (no
+        separate confirm step), whether or not a session is currently
+        recording (see Backend.set_synth_voice: it reaches whichever
+        engine — the ambient monitor's during "ready", the session's
+        during "recording" — currently has this exact instrument open)."""
+        if not self._detected_instrument:
+            return
+        instrument_name = self._detected_instrument
+        voice = self.synth_voice_var.get()
+        backend = self.app_state.backend
+        self._run_backend(
+            lambda: backend.set_synth_voice(instrument_name, voice),
+            lambda _result, error: self._on_synth_voice_set_result(error),
+        )
+
+    def _on_synth_voice_set_result(self, error: str | None) -> None:
+        if not self.winfo_exists():
+            return
+        if error:
+            messagebox.showerror("Couldn't change sound", error)
 
     def _handle_tuner_status(self, data: dict) -> None:
         # Meaningful throughout the whole identify cycle, not just
@@ -1350,7 +1412,9 @@ class RecordFrame(ttk.Frame):
                     # (re)starts once Start Local/Start Streaming is
                     # pressed again — see _begin_identify.
                     self._detected_instrument = ""
+                    self._detected_is_midi = False
                     self.detected_instrument_var.set("")
+                    self.synth_voice_row.grid_remove()
                     self.auto_detect_status_var.set("")
                     self._identify_state = "idle"
                     self.redetect_button.state(["disabled"])
