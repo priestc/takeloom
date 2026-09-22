@@ -38,8 +38,11 @@ from .streamdeck_emulator import StreamDeckEmulator
 from .video_check_dialog import VideoCheckDialog
 
 # Ring thickness (px) a connected-instrument box gets once auto-detect
-# picks it out — see RecordFrame._mark_device_identified.
+# picks it out, and the two sizes its own instrument-name text switches
+# between — see RecordFrame._mark_device_identified/_make_device_box.
 _BOX_HIGHLIGHT_THICKNESS = 3
+_BOX_NAME_FONT_NORMAL = ("TkDefaultFont", 10, "bold")
+_BOX_NAME_FONT_IDENTIFIED = ("TkDefaultFont", 18, "bold")
 
 
 class RecordFrame(ttk.Frame):
@@ -311,23 +314,23 @@ class RecordFrame(ttk.Frame):
         # every configured instrument's own channel at once and locks onto
         # whichever one the classifier commits to; that becomes "the
         # instrument" the session Play then opens uses, same role the
-        # dropdown used to play. This label doubles as that flow's live
-        # status ("Listening...") and, once a session is open, the same
-        # "here's what we think you're playing" realtime display it always
-        # was (see "instrument_detected" handling below) — the two don't
-        # conflict since auto-detect only ever runs before a session
-        # starts. Redetect here is a convenience duplicate of the deck's
-        # own Re-identify tile (_redo_identify) — same action, two entry
-        # points. See _handle_auto_detect_status/_begin_identify.
+        # dropdown used to play. Redetect here is a convenience duplicate
+        # of the deck's own Re-identify tile (_redo_identify) — same
+        # action, two entry points. See _handle_auto_detect_status/
+        # _begin_identify.
+        #
+        # detected_instrument_var itself is kept (still updated
+        # throughout the identify cycle) but no longer rendered here —
+        # the connected-instruments panel above is what shows which
+        # instrument was found now (see _mark_device_identified: the
+        # matching box is what's left on screen, enlarged, once
+        # detection commits), so a second, separate "here's what we
+        # found" label directly under it was just the same answer twice.
         detect_row = ttk.Frame(left)
         detect_row.grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 2))
         self.detected_instrument_var = tk.StringVar(value="")
-        ttk.Label(
-            detect_row, textvariable=self.detected_instrument_var,
-            font=("TkDefaultFont", 28, "bold"), foreground="#2a6db0",
-        ).pack(side="left")
         self.redetect_button = ttk.Button(detect_row, text="Redetect", command=self._redo_identify)
-        self.redetect_button.pack(side="left", padx=(12, 0))
+        self.redetect_button.pack(side="left")
         self.redetect_button.state(["disabled"])  # enabled once identifying/ready — see _set_controls_enabled
         row += 1
 
@@ -485,11 +488,19 @@ class RecordFrame(ttk.Frame):
             self.connected_devices_frame, text="No configured instrument is currently connected.",
             foreground="#999999",
         )
-        # Instrument full_name -> {"frame", "label"} (its own
-        # config.Instrument.label, cached here so _mark_device_
-        # identified doesn't need a config_obj lookup just to know
-        # which color ring to draw).
+        # Instrument full_name -> {"frame", "label", "name_label"}
+        # (label is its own config.Instrument.label, cached here so
+        # _mark_device_identified doesn't need a config_obj lookup just
+        # to know which color ring to draw; name_label is the Tk Label
+        # widget showing the instrument's name, whose font size toggles
+        # between _BOX_NAME_FONT_NORMAL/_IDENTIFIED).
         self._device_boxes: dict[str, dict] = {}
+        # Which box (an Instrument full_name), if any, is currently the
+        # identified/highlighted one — see _mark_device_identified/
+        # _reset_device_identifications. While set, _on_connected_
+        # devices_loaded's periodic refresh leaves every other box
+        # hidden instead of showing them all again.
+        self._identified_full_name: str | None = None
         self._refresh_connected_devices()
         return row
 
@@ -562,12 +573,17 @@ class RecordFrame(ttk.Frame):
             self.no_devices_label.pack(side="top", anchor="w")
         # Re-pack every surviving/new box in `wanted` order each time —
         # cheap, and the simplest way to both position newcomers
-        # correctly and reflect a device that's since disappeared,
-        # without disturbing an already-highlighted box's own state.
+        # correctly and reflect a device that's since disappeared.
         # side="top" + fill="x" stacks them one per row, each stretched
         # to the column's full width, rather than side by side splitting
-        # that width between them.
+        # that width between them. While one instrument is the currently
+        # identified one (self._identified_full_name), every other box
+        # stays hidden (_mark_device_identified already pack_forget()
+        # them) rather than being shown again by the next periodic
+        # refresh — only _reset_device_identifications brings them back.
         for key in wanted:
+            if self._identified_full_name and key != self._identified_full_name:
+                continue
             self._device_boxes[key]["frame"].pack(side="top", fill="x", pady=(0, 4))
 
     def _make_device_box(self, full_name: str) -> dict:
@@ -581,31 +597,44 @@ class RecordFrame(ttk.Frame):
             ttk.Label(frame, text=label, font=("TkDefaultFont", 8), foreground=color_for_label(label)).pack(
                 anchor="w"
             )
-        ttk.Label(frame, text=full_name, font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
-        return {"frame": frame, "label": label}
+        name_label = tk.Label(frame, text=full_name, font=_BOX_NAME_FONT_NORMAL)
+        name_label.pack(anchor="w")
+        return {"frame": frame, "label": label, "name_label": name_label}
 
     def _mark_device_identified(self, full_name: str) -> None:
-        """Auto-detect just committed to `full_name` — ring its box (it
-        already shows that instrument's own name; see the panel's own
-        docstring for why nothing here needs relabeling) and make sure
-        every other box's ring, if any, is off. A no-op if that
-        instrument somehow has no box right now (shouldn't happen —
-        auto-detect only ever finds an instrument whose device is
-        connected, the same condition a box requires — but harmless
-        either way)."""
+        """Auto-detect just committed to `full_name` — ring its box and
+        enlarge its instrument-name text (it already shows that
+        instrument's own name; see the panel's own docstring for why
+        nothing here needs relabeling), and hide every other box
+        entirely, so the one thing left on screen is unambiguous. A
+        no-op for `full_name` if it somehow has no box right now
+        (shouldn't happen — auto-detect only ever finds an instrument
+        whose device is connected, the same condition a box requires —
+        but harmless either way)."""
+        self._identified_full_name = full_name
         for key, box in self._device_boxes.items():
-            box["frame"].configure(highlightthickness=_BOX_HIGHLIGHT_THICKNESS if key == full_name else 0)
+            if key == full_name:
+                box["frame"].configure(highlightthickness=_BOX_HIGHLIGHT_THICKNESS)
+                box["name_label"].configure(font=_BOX_NAME_FONT_IDENTIFIED)
+                box["frame"].pack(side="top", fill="x", pady=(0, 4))
+            else:
+                box["frame"].pack_forget()
 
     def _reset_device_identifications(self) -> None:
-        """Turn off every box's highlight ring — called wherever the
-        rest of the identify cycle resets (_begin_identify/_redo_
-        identify/session end), so a box never keeps showing a *previous*
-        session's highlight once a new identify cycle is underway. The
-        box itself (and its instrument name) stays exactly as it was —
-        unlike the old device-keyed design, there's nothing here that
-        ever needs to go back to a "not yet identified" placeholder."""
+        """Undo _mark_device_identified — turn every box's ring off,
+        its instrument-name text back to normal size, and bring back
+        whichever boxes it hid. Called wherever the rest of the
+        identify cycle resets (_begin_identify/_redo_identify/session
+        end), so a box never keeps showing a *previous* session's
+        highlight (or stays hidden) once a new identify cycle is
+        underway. No box's instrument name itself is ever touched here
+        — unlike the old device-keyed design, there's nothing that ever
+        needs to go back to a "not yet identified" placeholder."""
+        self._identified_full_name = None
         for box in self._device_boxes.values():
             box["frame"].configure(highlightthickness=0)
+            box["name_label"].configure(font=_BOX_NAME_FONT_NORMAL)
+            box["frame"].pack(side="top", fill="x", pady=(0, 4))
 
     # --- right column: Setlist ---
 
