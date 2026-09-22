@@ -29,6 +29,7 @@ from ..utils import format_duration
 from .add_to_setlist_dialog import AddToSetlistDialog
 from .app_state import AppState
 from .filter_slot_dialogs import EditFilterDialog, ShowTracksDialog
+from .instrument_colors import color_for_label
 from .level_meter import LevelMeter
 from .tuner_meter import TunerMeter
 from .new_project_dialog import NewProjectDialog
@@ -113,6 +114,15 @@ class RecordFrame(ttk.Frame):
         self._preview_sub = None
         self._preview_imgtk = None
         self._preview_width = 0  # current width available for the preview label, tracked via <Configure>
+        # (kind, device_name) -> {"frame", "instrument_var", "instrument_label"}
+        # for the "Connected Instruments" panel at the top of the left
+        # column — see _build_connected_devices_panel/_refresh_connected_
+        # devices. kind is "midi" or "audio"; device_name is the raw MIDI
+        # port name for a MIDI box, or the configured InputLabel's own
+        # label for an audio one. Populated the moment the Record page
+        # loads, independent of Start/auto-detect — see that method's
+        # own docstring for why.
+        self._device_boxes: dict[tuple[str, str], dict] = {}
 
         self._current_backend = None
         self._streamdeck_driver = RecordingDeckDriver(
@@ -130,6 +140,7 @@ class RecordFrame(ttk.Frame):
         threading.Thread(target=self._connect_streamdeck, daemon=True).start()
 
         self.after(50, self._poll_levels)
+        self.after(3000, self._poll_connected_devices)
 
     # --- StreamDeck (shared RecordingDeckDriver — see recording_driver.py) ---
 
@@ -288,6 +299,8 @@ class RecordFrame(ttk.Frame):
         )
         row += 1
 
+        row = self._build_connected_devices_panel(left, row)
+
         # No more manual Instrument dropdown — pressing Start Local/Start
         # Streaming (on the on-screen Stream Deck emulator below) kicks off
         # backend.py's start_auto_detect_instrument(), which listens across
@@ -433,6 +446,154 @@ class RecordFrame(ttk.Frame):
             self.video_check_button.grid_remove()
         elif not self.config_obj.instruments or not self._project_names:
             self.video_check_button.state(["disabled"])
+
+    # --- connected instruments panel (top of left column) ---
+    #
+    # Deliberately independent of the Start/auto-detect cycle below: a
+    # box for every MIDI device and every configured, currently-present
+    # audio InputLabel appears the moment the Record page loads, showing
+    # just the raw device/label name. Once auto-detect commits to an
+    # instrument (_handle_auto_detect_status's "detected" branch), that
+    # instrument's own name replaces the placeholder inside whichever
+    # box its device matches — see _mark_device_identified. This is
+    # "what's plugged in" at a glance, before you've even pressed Start;
+    # the big blue instrument-name label further down is "what we just
+    # figured out you're playing", a different, narrower thing.
+
+    def _build_connected_devices_panel(self, left: ttk.Frame, row: int) -> int:
+        ttk.Label(left, text="Connected Instruments", foreground="#666666").grid(
+            row=row, column=0, columnspan=2, sticky="w"
+        )
+        row += 1
+        self.connected_devices_frame = ttk.Frame(left)
+        self.connected_devices_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(2, 12))
+        row += 1
+        self.no_devices_label = ttk.Label(
+            self.connected_devices_frame, text="No MIDI or audio devices detected.", foreground="#999999",
+        )
+        self._device_boxes = {}
+        self._refresh_connected_devices()
+        return row
+
+    def _refresh_connected_devices(self) -> None:
+        if not hasattr(self, "connected_devices_frame") or not self.connected_devices_frame.winfo_exists():
+            return
+        backend = self.app_state.backend
+        self._run_backend(
+            lambda: (backend.list_audio_devices(), backend.list_midi_devices()),
+            lambda result, error: self._on_connected_devices_loaded(result, error),
+        )
+
+    def _poll_connected_devices(self) -> None:
+        """A slower, independent timer from _poll_levels' 50ms VU-meter
+        poll — enumerating MIDI ports isn't free the way reading an
+        already-open stream's last level is, and doesn't need to be
+        anywhere near that responsive; this just needs to notice a
+        keyboard being plugged in without the operator having to press
+        Refresh Devices. Audio devices are deliberately not re-polled
+        here — unlike MIDI, PortAudio snapshots its device list once and
+        needs refresh_devices()'s heavier reinit to see a new one (see
+        that method's own docstring), which isn't something to do
+        silently on a timer."""
+        if not self.winfo_exists():
+            return
+        self._refresh_connected_devices()
+        self.after(3000, self._poll_connected_devices)
+
+    def _on_connected_devices_loaded(self, result: tuple | None, error: str | None) -> None:
+        if not self.winfo_exists() or not hasattr(self, "connected_devices_frame"):
+            return
+        if not self.connected_devices_frame.winfo_exists():
+            return
+        if error or result is None:
+            return  # best-effort — leave whatever's already shown rather than clearing it on a hiccup
+        audio_devices, midi_devices = result
+        audio_names = {d["name"] for d in audio_devices if d.get("max_input_channels", 0) > 0}
+
+        wanted: list[tuple[str, str]] = []
+        if self.config_obj is not None:
+            for il in self.config_obj.input_labels:
+                if any(il.device == name or il.device.lower() in name.lower() for name in audio_names):
+                    wanted.append(("audio", il.label))
+        for name in midi_devices:
+            wanted.append(("midi", name))
+
+        for key in list(self._device_boxes):
+            if key not in wanted:
+                self._device_boxes.pop(key)["frame"].destroy()
+        for key in wanted:
+            if key not in self._device_boxes:
+                self._device_boxes[key] = self._make_device_box(key)
+
+        if wanted:
+            self.no_devices_label.pack_forget()
+        else:
+            self.no_devices_label.pack(side="left")
+        # Re-pack every surviving/new box in `wanted` order each time —
+        # cheap, and the simplest way to both position newcomers
+        # correctly and reflect a device that's since disappeared,
+        # without disturbing an already-identified box's own state
+        # (only new boxes start blank — see _make_device_box).
+        for key in wanted:
+            self._device_boxes[key]["frame"].pack(side="left", padx=(0, 8))
+
+    def _make_device_box(self, key: tuple[str, str]) -> dict:
+        kind, name = key
+        frame = tk.Frame(self.connected_devices_frame, relief="solid", borderwidth=1, padx=8, pady=4)
+        ttk.Label(
+            frame, text=f"{'MIDI' if kind == 'midi' else 'Audio'}: {name}",
+            font=("TkDefaultFont", 8), foreground="#888888",
+        ).pack(anchor="w")
+        instrument_var = tk.StringVar(value="—")
+        instrument_label = tk.Label(
+            frame, textvariable=instrument_var, font=("TkDefaultFont", 10, "bold"), foreground="#333333",
+        )
+        instrument_label.pack(anchor="w")
+        return {"frame": frame, "instrument_var": instrument_var, "instrument_label": instrument_label}
+
+    def _mark_device_identified(self, full_name: str) -> None:
+        """Auto-detect just committed to `full_name` (a configured
+        Instrument) — find whichever connected-device box its own
+        midi_device/input_label matches and show its name there,
+        colored the same way its label badge is everywhere else in the
+        app. A device box that isn't currently showing (e.g. the
+        instrument's hardware isn't actually plugged in — start_auto_
+        detect_instrument wouldn't have found it in the first place, but
+        this stays a no-op rather than erroring either way) is simply
+        left alone."""
+        if self.config_obj is None:
+            return
+        inst = self.config_obj.get_instrument(full_name)
+        if inst is None:
+            return
+        if inst.is_midi:
+            target_kind, target_name = "midi", inst.midi_device
+        else:
+            input_info = self.config_obj.resolve_input(inst.input_label)
+            if input_info is None:
+                return
+            target_kind, target_name = "audio", input_info.label
+        for (kind, name), box in self._device_boxes.items():
+            if kind != target_kind:
+                continue
+            # Exact match for audio (keyed by InputLabel name directly);
+            # fuzzy for MIDI, same partial-match tolerance MidiInput
+            # itself uses when opening the port (see audio/midi_input.py).
+            matched = name == target_name or (kind == "midi" and target_name.lower() in name.lower())
+            if matched:
+                box["instrument_var"].set(inst.full_name)
+                box["instrument_label"].configure(foreground=color_for_label(inst.label))
+                return
+
+    def _reset_device_identifications(self) -> None:
+        """Clear every box's instrument name back to "not yet
+        identified" — called wherever the rest of the identify cycle
+        resets (_begin_identify/_redo_identify/session end), so a device
+        box never keeps showing a *previous* session's instrument once a
+        new identify cycle is underway."""
+        for box in self._device_boxes.values():
+            box["instrument_var"].set("—")
+            box["instrument_label"].configure(foreground="#333333")
 
     # --- right column: Setlist ---
 
@@ -796,6 +957,7 @@ class RecordFrame(ttk.Frame):
         self._detected_instrument = ""
         self._detected_is_midi = False
         self.detected_instrument_var.set("")
+        self._reset_device_identifications()
         self.synth_voice_row.grid_remove()
         self.auto_detect_status_var.set("Listening...")
         self.redetect_button.state(["disabled"])
@@ -826,6 +988,7 @@ class RecordFrame(ttk.Frame):
         self._detected_instrument = ""
         self._detected_is_midi = False
         self.detected_instrument_var.set("")
+        self._reset_device_identifications()
         self.synth_voice_row.grid_remove()
         self.auto_detect_status_var.set("Listening...")
         self.redetect_button.state(["disabled"])
@@ -864,6 +1027,7 @@ class RecordFrame(ttk.Frame):
             name = data.get("instrument", "")
             self._detected_instrument = name
             self.detected_instrument_var.set(name.upper())
+            self._mark_device_identified(name)
             label = data.get("label", "")
             full_name = data.get("full_name", "")
             detail = " — ".join(part for part in (label, full_name) if part)
@@ -1414,6 +1578,7 @@ class RecordFrame(ttk.Frame):
                     self._detected_instrument = ""
                     self._detected_is_midi = False
                     self.detected_instrument_var.set("")
+                    self._reset_device_identifications()
                     self.synth_voice_row.grid_remove()
                     self.auto_detect_status_var.set("")
                     self._identify_state = "idle"
