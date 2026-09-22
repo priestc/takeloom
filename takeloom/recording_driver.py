@@ -271,19 +271,46 @@ class RecordingDeckDriver:
                 if self.phase == "idle" and self.identify_state == "ready":
                     self._confirm_start()
             elif key == "n":
-                # Only meaningful with a session already open — idx 2 isn't
-                # part of the idle layout (RECORDING_IDLE_BUTTONS), so there's
-                # no "start via Next" shortcut anymore; use "r"/"s" instead.
-                if self.phase != "idle":
-                    self.streamdeck.notify("Loading next track…")
-                    self._backend.next_track()
+                # No local phase pre-check — see "b"/"d" below for why:
+                # Backend.next_track() already raises its own clear
+                # BackendError ("No session in progress.") when there's
+                # nothing to advance, caught below same as any other
+                # failure, so gating on this driver's own (possibly
+                # stale — see the "b" comment) cached self.phase would
+                # only risk silently swallowing a press that the backend
+                # itself would have handled correctly.
+                self.streamdeck.notify("Loading next track…")
+                self._backend.next_track()
             elif key == "d":
-                if self.phase in ("waiting", "recording"):
-                    self.streamdeck.notify("Finding another track…")
-                    self._backend.redraw_current_track()
+                # Same reasoning as "n" — Backend.redraw_current_track()
+                # already raises its own clear BackendError ("Nothing is
+                # currently loaded." / "...isn't a random draw...").
+                self.streamdeck.notify("Finding another track…")
+                self._backend.redraw_current_track()
             elif key == "b":
-                if self.phase == "recording":
-                    self._backend.restart_take()
+                # Deliberately no local `if self.phase == "recording":`
+                # guard (there used to be one) — this driver's own
+                # cached self.phase is only ever updated by whichever
+                # backend events have actually arrived, and can end up
+                # stale relative to the real session state (e.g. a
+                # Remote connection that dropped and reconnected — see
+                # CLAUDE.md's testing notes on the laptop sleeping/
+                # dropping off the network mid-session — resets phase to
+                # "idle" locally and only corrects itself once a *new*
+                # event happens to arrive). A stale-but-wrong local guard
+                # here meant a real, actively-playing take could make
+                # Restart silently do nothing at all, no error, nothing
+                # logged — exactly the "pressed it and nothing happened"
+                # failure this driver's whole design otherwise goes out
+                # of its way to avoid (see the module docstring's own
+                # "ack presses instantly" principle). Backend.
+                # restart_take() already raises its own clear
+                # BackendError ("Not currently recording.") when there's
+                # genuinely nothing to restart, which the except clause
+                # below surfaces exactly like any other failure — so the
+                # backend's own live, authoritative state is what
+                # actually decides this now, not a local cache of it.
+                self._backend.restart_take()
             elif key == "m":
                 # Monitor toggle (idx 3) is likewise only part of the active
                 # layout — nothing to toggle while idle.
