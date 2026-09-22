@@ -533,9 +533,13 @@ class RecordFrame(ttk.Frame):
         # cheap, and the simplest way to both position newcomers
         # correctly and reflect a device that's since disappeared,
         # without disturbing an already-identified box's own state
-        # (only new boxes start blank — see _make_device_box).
+        # (only new boxes start blank — see _make_device_box). expand=
+        # True + fill="both" on every packed box is what makes them
+        # split the row's full width evenly between however many there
+        # are, rather than sitting at their own minimal content width
+        # with dead space after them.
         for key in wanted:
-            self._device_boxes[key]["frame"].pack(side="left", padx=(0, 8))
+            self._device_boxes[key]["frame"].pack(side="left", expand=True, fill="both", padx=(0, 8))
 
     def _make_device_box(self, key: tuple[str, str]) -> dict:
         kind, name = key
