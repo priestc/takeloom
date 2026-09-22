@@ -559,17 +559,16 @@ class RecordFrame(ttk.Frame):
         if wanted:
             self.no_devices_label.pack_forget()
         else:
-            self.no_devices_label.pack(side="left")
+            self.no_devices_label.pack(side="top", anchor="w")
         # Re-pack every surviving/new box in `wanted` order each time —
         # cheap, and the simplest way to both position newcomers
         # correctly and reflect a device that's since disappeared,
         # without disturbing an already-highlighted box's own state.
-        # expand=True + fill="both" on every packed box is what makes
-        # them split the row's full width evenly between however many
-        # there are, rather than sitting at their own minimal content
-        # width with dead space after them.
+        # side="top" + fill="x" stacks them one per row, each stretched
+        # to the column's full width, rather than side by side splitting
+        # that width between them.
         for key in wanted:
-            self._device_boxes[key]["frame"].pack(side="left", expand=True, fill="both", padx=(0, 8))
+            self._device_boxes[key]["frame"].pack(side="top", fill="x", pady=(0, 4))
 
     def _make_device_box(self, full_name: str) -> dict:
         inst = self.config_obj.get_instrument(full_name) if self.config_obj else None
