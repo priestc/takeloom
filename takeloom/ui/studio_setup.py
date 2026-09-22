@@ -166,7 +166,18 @@ class _InstrumentRow:
     carried through the exact same way, for the exact same reason — it's
     the Record page's live-monitor dial (backend.py's adjust_
     instrument_volume), deliberately per-instrument rather than fixed
-    here, not something this row has any control for."""
+    here, not something this row has any control for.
+
+    "Vol CC" *is* editable here, unlike those — which MIDI Control
+    Change number a specific device's own physical volume knob sends
+    (config.Instrument.volume_cc) is a setup-time hardware fact, not a
+    live performance choice, the same reasoning MIDI Device itself
+    already gets edited here rather than on the Record page. Blank
+    means "not pinned down yet" (audio/midi_input.py then guesses from
+    any Control Change that isn't sustain/modulation/expression); type
+    a specific number once you know it — e.g. from takeloom's own
+    console output, which logs every distinct CC a connected device
+    sends the first time it's seen."""
 
     def __init__(
         self,
@@ -185,6 +196,7 @@ class _InstrumentRow:
         midi_device: str = "",
         synth_voice: str = "",
         instrument_volume: int = 100,
+        volume_cc: int = 0,
     ) -> None:
         self._on_remove = on_remove
         # Kept current by set_input_choices() — _parse_input_selection
@@ -207,6 +219,8 @@ class _InstrumentRow:
         # unchanged so Save doesn't wipe them out.
         self._synth_voice = synth_voice
         self._instrument_volume = instrument_volume
+        # "" (blank) means 0/auto — see to_instrument()'s parsing.
+        self.volume_cc_var = tk.StringVar(value=str(volume_cc) if volume_cc else "")
         # display name -> notes for whichever label is currently selected
         # — refreshed by _refresh_tuning_presets, read by _on_tuning_
         # preset_picked once the user actually picks one from the
@@ -224,7 +238,8 @@ class _InstrumentRow:
         self.widgets = [
             ttk.Entry(table, textvariable=self.full_name_var, width=20),
             ttk.Combobox(table, textvariable=self.label_var, values=INSTRUMENT_LABELS, state="readonly", width=16),
-            ttk.Combobox(table, textvariable=self.input_label_var, values=choices, state="readonly", width=22),
+            ttk.Combobox(table, textvariable=self.input_label_var, values=choices, state="readonly", width=19),
+            ttk.Entry(table, textvariable=self.volume_cc_var, width=5),
             ttk.Entry(table, textvariable=self.musician_var, width=10),
             tuning_combo,
             ttk.Button(table, text="Remove", command=lambda: self._on_remove(self)),
@@ -282,7 +297,7 @@ class _InstrumentRow:
     def _refresh_tuning_presets(self, *_args) -> None:
         presets = TUNING_PRESETS_BY_LABEL.get(self.label_var.get().strip(), [])
         self._tuning_presets = dict(presets)
-        self.widgets[4]["values"] = list(self._tuning_presets.keys())
+        self.widgets[5]["values"] = list(self._tuning_presets.keys())
 
     def _on_tuning_preset_picked(self, _event: object = None) -> None:
         notes = self._tuning_presets.get(self.tuning_var.get())
@@ -317,7 +332,18 @@ class _InstrumentRow:
             midi_device=midi_device,
             synth_voice=self._synth_voice,
             instrument_volume=self._instrument_volume,
+            volume_cc=self._parse_volume_cc(),
         )
+
+    def _parse_volume_cc(self) -> int:
+        """Blank (or unparseable) -> 0, "auto" — same tolerance _parse_hz
+        already extends to a garbled Min/Max Hz entry, so a typo here
+        just falls back to auto-detect rather than blocking Save."""
+        text = self.volume_cc_var.get().strip()
+        try:
+            return int(text) if text else 0
+        except ValueError:
+            return 0
 
     @staticmethod
     def _parse_hz(var: tk.StringVar) -> float:
@@ -769,7 +795,11 @@ class StudioSetupFrame(ttk.Frame):
                  "MIDI-driven (give it the \"midi-keyboard\" label) — its sound is synthesized from "
                  "that keyboard's notes right inside the recording engine instead of captured off an "
                  "analog channel. Which synth sound it plays (piano/organ) is picked live on the "
-                 "Record page, not here — it's a change you'd make while playing, not while setting up.",
+                 "Record page, not here — it's a change you'd make while playing, not while setting up. "
+                 "Vol CC is which MIDI Control Change number that keyboard's own physical volume knob "
+                 "sends — every keyboard's wired differently (takeloom's own console output shows every "
+                 "control number it sees) — leave blank to guess automatically from whichever control "
+                 "gets touched.",
             foreground="#666666", wraplength=760, justify="left",
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(2, 6))
         row += 1
@@ -778,7 +808,7 @@ class StudioSetupFrame(ttk.Frame):
         self.table.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         row += 1
 
-        headers = ["Full name", "Label", "Input", "Musician", "Tuning", ""]
+        headers = ["Full name", "Label", "Input", "Vol CC", "Musician", "Tuning", ""]
         for col, text in enumerate(headers):
             ttk.Label(self.table, text=text).grid(row=0, column=col, sticky="w", padx=(0, 6))
 
@@ -788,7 +818,7 @@ class StudioSetupFrame(ttk.Frame):
                 full_name=inst.full_name, label=inst.label, musician=inst.musician,
                 freq_min_hz=inst.freq_min_hz, freq_max_hz=inst.freq_max_hz, tuning=inst.tuning,
                 midi_device=inst.midi_device, synth_voice=inst.synth_voice,
-                instrument_volume=inst.instrument_volume,
+                instrument_volume=inst.instrument_volume, volume_cc=inst.volume_cc,
             )
         if not self.config_obj.instruments:
             self._add_instrument_row(input_label_names)
@@ -883,7 +913,7 @@ class StudioSetupFrame(ttk.Frame):
         self, input_label_names: list[str], input_label: str = "",
         full_name: str = "", label: str = "", musician: str = "",
         freq_min_hz: float = 0.0, freq_max_hz: float = 0.0, tuning: list[str] | None = None,
-        midi_device: str = "", synth_voice: str = "", instrument_volume: int = 100,
+        midi_device: str = "", synth_voice: str = "", instrument_volume: int = 100, volume_cc: int = 0,
     ) -> None:
         if self.table is None:
             return
@@ -893,6 +923,7 @@ class StudioSetupFrame(ttk.Frame):
             input_label=input_label, full_name=full_name, label=label, musician=musician,
             freq_min_hz=freq_min_hz, freq_max_hz=freq_max_hz, tuning=tuning,
             midi_device=midi_device, synth_voice=synth_voice, instrument_volume=instrument_volume,
+            volume_cc=volume_cc,
         )
         self._instrument_rows.append(row)
         self._bind_mousewheel(self._canvas)

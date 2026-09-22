@@ -127,6 +127,22 @@ class Instrument:
     # the Record page's dial while listening, same "round-trips through
     # this row unedited" reasoning as synth_voice above.
     instrument_volume: int = 100
+    # Which MIDI Control Change number this specific device's physical
+    # "volume" control sends — a hardware-wiring fact, like midi_device
+    # itself, not something this app can know in advance: confirmed in
+    # practice that it varies per manufacturer/model (an Alesis QX25's
+    # own volume knob sends CC22, a number with no standard MIDI meaning
+    # at all) and every device may differ. 0 means "not pinned down yet"
+    # — audio/midi_input.py then falls back to treating *any* incoming
+    # Control Change that isn't sustain (CC64) or the modulation wheel
+    # (CC1) as volume, which is a reasonable guess for an unconfigured
+    # device but isn't reliable once more than one control gets touched.
+    # Editable in Studio Setup's "Vol CC" column (see ui/studio_setup.py)
+    # — unlike instrument_volume/synth_voice above, this genuinely is a
+    # setup-time fact about the hardware, not a live performance choice.
+    # Once set to a specific number, *only* that exact CC drives this
+    # instrument's volume; every other CC is left alone.
+    volume_cc: int = 0
 
     @property
     def is_midi(self) -> bool:
@@ -282,6 +298,23 @@ class StudioConfig:
                 errors.append(
                     f"Instrument '{inst.full_name or '(unnamed)'}' has an out-of-range volume "
                     f"({inst.instrument_volume}% — must be 0-{MAX_INSTRUMENT_VOLUME_PERCENT}%)."
+                )
+            if not (0 <= inst.volume_cc <= 127):
+                errors.append(
+                    f"Instrument '{inst.full_name or '(unnamed)'}' has an invalid Volume CC "
+                    f"({inst.volume_cc} — MIDI Control Change numbers run 0-127; use 0 for auto-detect)."
+                )
+            # 1 (modulation wheel), 11 (expression — has its own always-
+            # separate handling), and 64 (sustain pedal) are always
+            # handled as those specific controls, never as volume — see
+            # audio/midi_input.py — so pinning volume_cc to any of them
+            # would silently never fire.
+            elif inst.volume_cc in (1, 11, 64):
+                reserved_for = {1: "modulation wheel", 11: "expression", 64: "sustain pedal"}[inst.volume_cc]
+                errors.append(
+                    f"Instrument '{inst.full_name or '(unnamed)'}' has Volume CC set to "
+                    f"{inst.volume_cc}, which is reserved for the {reserved_for} and never treated "
+                    f"as volume — pick a different CC number (0 for auto-detect)."
                 )
         return errors
 

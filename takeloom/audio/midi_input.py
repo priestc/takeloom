@@ -1,28 +1,40 @@
 """USB MIDI input: turns incoming Note On/Off, sustain-pedal (CC64),
-channel-volume (CC7), and expression (CC11) messages into calls against
-plain callables — usually a Synth's own note_on/note_off/set_sustain/
+volume, and expression (CC11) messages into calls against plain
+callables — usually a Synth's own note_on/note_off/set_sustain/
 set_channel_volume/set_expression (see audio/synth.py and backend.py's
 MIDI branch of instrument-engine construction), but a detection scan
 (start_auto_detect_instrument/start_detect_all) instead passes
 on_note_on alone and ignores note number/velocity entirely: any note at
 all is itself the detection.
 
-CC7 and CC11 get their own semantically-correct handling (independent,
-multiplicative — see set_channel_volume/set_expression) when a keyboard
-sends them. But plenty of keyboards' physical "volume" control isn't
-wired to either at the factory — confirmed in practice: an Alesis QX25
-sends CC22 for what's functionally its volume knob, a number with no
-standard MIDI meaning at all — and there's no way to enumerate every
-manufacturer's own default in advance. So any Control Change that isn't
-sustain (CC64) or the universal modulation wheel (CC1 — too well-
-established a convention on too many keyboards to safely repurpose) is
-also treated as a volume-equivalent control (routed to on_volume, same
-as CC7), on the theory that this app's synth has no other defined
-meaning for an arbitrary incoming CC anyway, so "some knob got turned"
-is far more likely to mean "make it louder or quieter" than anything
-else. Every distinct CC number seen is still logged once (never
-spammed), both so the fallback's behavior is visible and so it's easy
-to tell CC1 apart from everything else that reaches it.
+"Which CC is volume" varies by keyboard — confirmed in practice: an
+Alesis QX25's own labeled volume knob sends CC22, a number with no
+standard MIDI meaning at all, and there's no way to enumerate every
+manufacturer's own default in advance. So this supports two modes, via
+the `volume_cc` constructor param (see config.Instrument.volume_cc,
+which is where it actually comes from — a per-device setup fact, not
+something decided in here):
+
+- Pinned (volume_cc != 0): *only* that exact CC number drives volume.
+  Deterministic — once you know (or Studio Setup's "Vol CC" field
+  records) which control a specific keyboard's volume knob actually
+  sends, every other control on that same keyboard is left alone, no
+  matter what else gets touched.
+- Auto (volume_cc == 0, the default before anything's been pinned
+  down): any Control Change that isn't sustain (CC64) or the universal
+  modulation wheel (CC1 — too well-established a convention on too many
+  keyboards to safely repurpose) is treated as volume-equivalent. A
+  reasonable guess for a keyboard nobody's configured yet, but not
+  reliable once more than one control might get touched — that's what
+  pinning volume_cc down is for.
+
+CC11 (Expression) always gets its own separate, correct handling
+(independent, multiplicative — see Synth.set_expression) regardless of
+volume_cc, since unlike an arbitrary assignable knob it's an actual
+MIDI/GM standard with a defined meaning of its own. Every distinct CC
+number seen is still logged once (never spammed), so it's visible
+whether a given control is being treated as volume, and what to type
+into Studio Setup's "Vol CC" field to pin it down precisely.
 
 Uses python-rtmidi directly (not e.g. `mido`'s higher-level wrapper)
 because a callback-driven port — no polling loop of our own — is what
@@ -43,18 +55,12 @@ _NOTE_OFF = 0x80
 _CONTROL_CHANGE = 0xB0
 _SUSTAIN_CC = 64
 _SUSTAIN_THRESHOLD = 64  # >= this counts as "pedal down" — the common MIDI-spec convention
-# Two distinct, independent, multiplicative volume-like controls in the
-# MIDI/GM spec, given their own semantically-correct handling when a
-# keyboard actually sends them (see on_volume/on_expression below) —
-# anything else falls through to the generic "any other CC means
-# volume" catch-all in _on_message instead (see module docstring).
-_VOLUME_CC = 7        # "Channel Volume" — the most common default for a dedicated volume slider
-_EXPRESSION_CC = 11   # "Expression" — the other common default, especially on assignable faders
+_EXPRESSION_CC = 11   # "Expression" — always its own thing, a real MIDI/GM standard, see module docstring
 # The modulation wheel — a near-universal, dedicated physical control on
 # any keyboard that has pitch/mod wheels at all, distinct from whatever
 # assignable knob/slider its "volume" control happens to be wired to.
-# Excluded from the catch-all specifically because it's too well-
-# established a convention (vibrato/modulation depth) to safely
+# Excluded from the volume catch-all specifically because it's too
+# well-established a convention (vibrato/modulation depth) to safely
 # repurpose just because this app has no other use for it.
 _MODULATION_CC = 1
 
@@ -104,6 +110,7 @@ class MidiInput:
         on_sustain: Callable[[bool], None] | None = None,
         on_volume: Callable[[int], None] | None = None,
         on_expression: Callable[[int], None] | None = None,
+        volume_cc: int = 0,
     ) -> None:
         try:
             import rtmidi
@@ -117,6 +124,9 @@ class MidiInput:
         self._on_sustain = on_sustain
         self._on_volume = on_volume
         self._on_expression = on_expression
+        # 0 = auto-detect (see module docstring); otherwise only this
+        # exact CC number is ever routed to on_volume.
+        self._volume_cc = volume_cc
         self._lock = threading.Lock()
         self._closed = False
         # Every distinct CC number seen so far, logged once each (never
@@ -188,33 +198,34 @@ class MidiInput:
                 self._on_note_off(message[1])
         elif status == _CONTROL_CHANGE and len(message) >= 3:
             cc, value = message[1], message[2]
+            # Sustain and Expression are always their own thing,
+            # regardless of volume_cc (see module docstring on why
+            # Expression never doubles as volume). Otherwise: pinned
+            # mode (self._volume_cc set) means *only* that exact CC
+            # counts as volume; auto mode (0, the default) means
+            # anything that isn't one of the three reserved controls
+            # does.
+            is_volume = (
+                (cc == self._volume_cc) if self._volume_cc
+                else cc not in (_SUSTAIN_CC, _MODULATION_CC, _EXPRESSION_CC)
+            )
             if cc not in self._logged_unknown_ccs:
                 self._logged_unknown_ccs.add(cc)
-                if cc not in (_SUSTAIN_CC, _MODULATION_CC):
-                    print(
-                        f"takeloom: MIDI device '{self.device_name}' sent Control Change {cc} "
-                        f"(value {value}) — treating as a volume-equivalent control."
-                    )
-                else:
-                    print(f"takeloom: MIDI device '{self.device_name}' sent Control Change {cc} (value {value}).")
+                suffix = " — treating as volume." if is_volume and cc not in (_SUSTAIN_CC, _EXPRESSION_CC) else "."
+                print(f"takeloom: MIDI device '{self.device_name}' sent Control Change {cc} (value {value}){suffix}")
             if cc == _SUSTAIN_CC:
                 if self._on_sustain is not None:
                     self._on_sustain(value >= _SUSTAIN_THRESHOLD)
-            elif cc == _MODULATION_CC:
-                pass  # the mod wheel — deliberately never treated as volume, see module docstring
-            elif cc == _VOLUME_CC:
-                if self._on_volume is not None:
-                    self._on_volume(value)
             elif cc == _EXPRESSION_CC:
                 if self._on_expression is not None:
                     self._on_expression(value)
-            else:
-                # Catch-all: some other, non-standard CC — most likely
-                # an assignable knob/slider a keyboard's own factory
-                # template happens to wire its "volume" control to (see
-                # module docstring) — treated the same as CC7.
+            elif is_volume:
                 if self._on_volume is not None:
                     self._on_volume(value)
+            # else: the modulation wheel (auto mode), or — in pinned
+            # mode — some CC other than the one that's actually
+            # configured as this device's volume control. Neither is
+            # acted on.
 
     def stop(self) -> None:
         """Alias for close() — lets a MidiInput sit in the same list of

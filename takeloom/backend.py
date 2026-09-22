@@ -2324,7 +2324,7 @@ class LocalBackend(Backend):
                 midi_input = MidiInput(
                     inst.midi_device, on_note_on=synth.note_on, on_note_off=synth.note_off,
                     on_sustain=synth.set_sustain, on_volume=synth.set_channel_volume,
-                    on_expression=synth.set_expression,
+                    on_expression=synth.set_expression, volume_cc=inst.volume_cc,
                 )
             except MidiUnavailableError as e:
                 raise BackendError(str(e)) from e
