@@ -105,20 +105,20 @@ class SessionsFrame(ttk.Frame):
         tree_frame = ttk.Frame(self)
         tree_frame.pack(fill="x")
         self.tree = ttk.Treeview(
-            tree_frame, columns=("date", "project", "instrument", "tracks"),
+            tree_frame, columns=("date", "project", "instrument", "status"),
             show="headings", height=10, selectmode="browse",
         )
         self.tree.heading("date", text="Date")
         self.tree.heading("project", text="Project")
         self.tree.heading("instrument", text="Instrument")
-        self.tree.heading("tracks", text="Tracks")
+        self.tree.heading("status", text="Status")
         self.tree.column("date", width=150)
         self.tree.column("project", width=140)
         self.tree.column("instrument", width=100)
-        self.tree.column("tracks", width=360)
+        self.tree.column("status", width=360)
         for session in self._sessions:
             self.tree.insert("", "end", iid=session["session_dir"], values=(
-                session["date"], session["project"], session["instrument"], ", ".join(session["track_names"]),
+                session["date"], session["project"], session["instrument"], session.get("status_summary", ""),
             ))
         self.tree.pack(side="left", fill="x", expand=True)
         scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
@@ -203,6 +203,18 @@ class SessionsFrame(ttk.Frame):
         for track in detail.get("tracks", []):
             self._build_track_row(session_dir, project_name, track, instrument_labels)
 
+    # Display text + color for each of get_session_detail's per-track
+    # `status` values (see backend.py's _track_take_status for what each
+    # one means and when it's reported).
+    _STATUS_STYLES = {
+        "completed": ("Completed", "#2a7d2a"),
+        "skipped": ("Skipped", "#888888"),
+        "stopped early": ("Stopped early", "#b06a00"),
+        "recorded, not filed": ("Recorded, but never filed — take processing likely failed", "#b00020"),
+        "not recorded": ("Not recorded", "#888888"),
+        "pending": ("Pending processing", "#2a6db0"),
+    }
+
     def _build_track_row(
         self, session_dir: str, project_name: str, track: dict, instrument_labels: list[str],
     ) -> None:
@@ -212,14 +224,13 @@ class SessionsFrame(ttk.Frame):
             side="left"
         )
 
-        is_filter_draw = track["is_filter_draw"]
-
         takes = track.get("takes", [])
+        status_text, status_color = self._STATUS_STYLES.get(track.get("status", "not recorded"), ("", "#888888"))
+        if track.get("status") == "completed" and len(takes) > 1:
+            status_text = f"{status_text} ({len(takes)} takes)"
+        ttk.Label(header_row, text=status_text, foreground=status_color).pack(side="left")
+
         if not takes:
-            if not is_filter_draw:
-                ttk.Label(header_row, text="no take currently filed for this track", foreground="#888888").pack(
-                    side="left"
-                )
             return
 
         # A track normally has one take per instrument that's actually

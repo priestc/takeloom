@@ -238,10 +238,13 @@ class Backend(ABC):
         `session_dir` (opaque id — pass back to the other session methods),
         `date` (session_log.json's own wall_time, not derived from the
         directory name, which is filename-sanitized and thus lossy),
-        `project`, `instrument`, and `track_names` (deduplicated, from the
-        session's logged events). Only sessions still present on local
-        disk — one already pruned to a remote-only vault (session_vault_
-        mode "remote", see vault.sync_and_maybe_prune) won't show up here."""
+        `project`, `instrument`, `track_names` (deduplicated, from the
+        session's logged events), and `status_summary` (a short rollup
+        like "2 completed, 1 skipped" — see get_session_detail's `status`
+        for the per-track vocabulary this counts). Only sessions still
+        present on local disk — one already pruned to a remote-only vault
+        (session_vault_mode "remote", see vault.sync_and_maybe_prune)
+        won't show up here."""
         ...
 
     @abstractmethod
@@ -260,7 +263,14 @@ class Backend(ABC):
         reports whether it was an inspiration filter-slot draw
         (session_log.json's filter_slot_draws) — reassign_take/
         analyze_take both work on those the same as any other take (see
-        reassign_take's docstring)."""
+        reassign_take's docstring) — and a `status`: "completed" (a take
+        is on file), "skipped"/"stopped early" (the play-through was
+        abandoned — see processing/splicer.py's module docstring),
+        "recorded, not filed" (reached the end of the song but still has
+        no take on file — abnormal once processing has run; usually
+        means process_session raised partway through), or "pending"
+        (this session hasn't been through process_session at all yet, so
+        nothing about its outcome is known — see _track_take_status)."""
         ...
 
     @abstractmethod
@@ -1681,14 +1691,60 @@ class LocalBackend(Backend):
         results.sort(key=lambda s: s["date"], reverse=True)
         return results
 
+    # A track's outcome, in the vocabulary shown in the Sessions tab —
+    # see _track_take_status's docstring for what each one means.
+    _TERMINAL_EVENT_TYPES = ("song_end", "track_skipped", "song_stopped")
+
+    @staticmethod
+    def _track_take_status(data: dict, track_index: int) -> str:
+        """What actually became of one track_index in this session:
+        "completed" (a take is on file for it — see process_session's
+        session_takes snapshot), "skipped"/"stopped early" (the
+        play-through was abandoned, per the raw event log — see
+        processing/splicer.py's module docstring for the exact rules,
+        including when an abandoned one is long enough to be kept
+        anyway, which already shows up as "completed" above), "recorded,
+        not filed" (reached song_end but no take is on file for it —
+        not a normal outcome once processing has run; usually means
+        process_session raised partway through, e.g. on a later track in
+        the same session, before it could write this track's take back —
+        see backend.py's _process_session), or "pending" (this session's
+        "takes" key is entirely absent — process_session hasn't run on
+        it yet at all, so nothing above can be answered from event-log
+        guessing alone)."""
+        if "takes" not in data:
+            return "pending"
+        if data.get("takes", {}).get(str(track_index)):
+            return "completed"
+        last_terminal: str | None = None
+        for e in data.get("events", []):
+            if e.get("track_index") == track_index and e.get("event_type") in LocalBackend._TERMINAL_EVENT_TYPES:
+                last_terminal = e["event_type"]
+        if last_terminal == "song_end":
+            return "recorded, not filed"
+        if last_terminal == "track_skipped":
+            return "skipped"
+        if last_terminal == "song_stopped":
+            return "stopped early"
+        return "not recorded"
+
     @staticmethod
     def _session_summary(session_dir_name: str, data: dict) -> dict:
         events = data.get("events", [])
-        track_names = []
+        track_names: list[str] = []
+        track_index_by_name: dict[str, int] = {}
         for e in events:
             name = e.get("track_name")
             if name and name not in track_names:
                 track_names.append(name)
+                track_index_by_name[name] = e.get("track_index")
+        counts: dict[str, int] = {}
+        for track_index in track_index_by_name.values():
+            if track_index is None:
+                continue
+            status = LocalBackend._track_take_status(data, track_index)
+            counts[status] = counts.get(status, 0) + 1
+        status_summary = ", ".join(f"{n} {status}" for status, n in counts.items())
         return {
             "session_dir": session_dir_name,
             # events[0]'s wall_time (real, human-typed timestamp) rather
@@ -1698,6 +1754,7 @@ class LocalBackend(Backend):
             "project": data.get("project", ""),
             "instrument": data.get("instrument", ""),
             "track_names": track_names,
+            "status_summary": status_summary,
         }
 
     def get_session_detail(self, session_dir: str) -> dict:
@@ -1722,7 +1779,10 @@ class LocalBackend(Backend):
             track_index = track_index_by_name.get(name)
             is_filter_draw = track_index in filter_slot_indices
             takes = session_takes.get(str(track_index), [])
-            tracks.append({"track_name": name, "is_filter_draw": is_filter_draw, "takes": takes})
+            status = self._track_take_status(data, track_index) if track_index is not None else "not recorded"
+            tracks.append({
+                "track_name": name, "is_filter_draw": is_filter_draw, "takes": takes, "status": status,
+            })
 
         return {**data, "session_dir": session_dir, "tracks": tracks}
 
