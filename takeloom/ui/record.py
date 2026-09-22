@@ -37,6 +37,10 @@ from .setlist_row import SetlistRow
 from .streamdeck_emulator import StreamDeckEmulator
 from .video_check_dialog import VideoCheckDialog
 
+# Ring thickness (px) a connected-instrument box gets once auto-detect
+# picks it out — see RecordFrame._mark_device_identified.
+_BOX_HIGHLIGHT_THICKNESS = 3
+
 
 class RecordFrame(ttk.Frame):
     """Instrument/project/track picker, camera preview, and recording."""
@@ -450,15 +454,24 @@ class RecordFrame(ttk.Frame):
     # --- connected instruments panel (top of left column) ---
     #
     # Deliberately independent of the Start/auto-detect cycle below: a
-    # box for every MIDI device and every configured, currently-present
-    # audio InputLabel appears the moment the Record page loads, showing
-    # just the raw device/label name. Once auto-detect commits to an
-    # instrument (_handle_auto_detect_status's "detected" branch), that
-    # instrument's own name replaces the placeholder inside whichever
-    # box its device matches — see _mark_device_identified. This is
-    # "what's plugged in" at a glance, before you've even pressed Start;
-    # the big blue instrument-name label further down is "what we just
-    # figured out you're playing", a different, narrower thing.
+    # box for every *configured Instrument* whose own device is
+    # currently connected appears the moment the Record page loads,
+    # already labeled with that instrument's name — not one box per raw
+    # device. That distinction matters in practice: a device with no
+    # instrument configured on it at all (e.g. an audio interface's own
+    # unused MIDI DIN port) never gets a box, since there's nothing to
+    # call it; and two different instruments sharing one physical device
+    # (a bass and a guitar both wired through the same audio interface,
+    # a home rig's two MIDI keyboards that both happen to still say the
+    # same generic port name) each still get their own box, since each
+    # is independently "ready to record" the moment that shared device
+    # is connected — you just don't know which one is actually being
+    # played until you press Start. That's what auto-detect answers:
+    # once it commits (_handle_auto_detect_status's "detected" branch),
+    # the one matching box is highlighted (a colored ring — see
+    # _mark_device_identified/_reset_device_identifications), not
+    # relabeled, since every box already shows its own instrument's name
+    # from the moment it appeared.
 
     def _build_connected_devices_panel(self, left: ttk.Frame, row: int) -> int:
         ttk.Label(left, text="Connected Instruments", foreground="#666666").grid(
@@ -469,9 +482,14 @@ class RecordFrame(ttk.Frame):
         self.connected_devices_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(2, 12))
         row += 1
         self.no_devices_label = ttk.Label(
-            self.connected_devices_frame, text="No MIDI or audio devices detected.", foreground="#999999",
+            self.connected_devices_frame, text="No configured instrument is currently connected.",
+            foreground="#999999",
         )
-        self._device_boxes = {}
+        # Instrument full_name -> {"frame", "label"} (its own
+        # config.Instrument.label, cached here so _mark_device_
+        # identified doesn't need a config_obj lookup just to know
+        # which color ring to draw).
+        self._device_boxes: dict[str, dict] = {}
         self._refresh_connected_devices()
         return row
 
@@ -500,6 +518,21 @@ class RecordFrame(ttk.Frame):
         self._refresh_connected_devices()
         self.after(3000, self._poll_connected_devices)
 
+    def _instrument_is_connected(self, inst, audio_names: set, midi_names: list[str]) -> bool:
+        """Whether `inst`'s own device currently shows up in a fresh
+        list_audio_devices()/list_midi_devices() call — same fuzzy,
+        one-direction substring tolerance MidiInput/resolve_device
+        themselves already extend a configured name (a live device name
+        sometimes carries a changing numeric suffix a stored name
+        wouldn't), not the other way around."""
+        if inst.is_midi:
+            configured = inst.midi_device.strip().lower()
+            return any(configured in name.lower() or name.lower() in configured for name in midi_names)
+        input_info = self.config_obj.resolve_input(inst.input_label) if self.config_obj else None
+        if input_info is None:
+            return False
+        return any(input_info.device == name or input_info.device.lower() in name.lower() for name in audio_names)
+
     def _on_connected_devices_loaded(self, result: tuple | None, error: str | None) -> None:
         if not self.winfo_exists() or not hasattr(self, "connected_devices_frame"):
             return
@@ -510,13 +543,11 @@ class RecordFrame(ttk.Frame):
         audio_devices, midi_devices = result
         audio_names = {d["name"] for d in audio_devices if d.get("max_input_channels", 0) > 0}
 
-        wanted: list[tuple[str, str]] = []
+        wanted: list[str] = []
         if self.config_obj is not None:
-            for il in self.config_obj.input_labels:
-                if any(il.device == name or il.device.lower() in name.lower() for name in audio_names):
-                    wanted.append(("audio", il.label))
-        for name in midi_devices:
-            wanted.append(("midi", name))
+            for inst in self.config_obj.instruments:
+                if self._instrument_is_connected(inst, audio_names, midi_devices):
+                    wanted.append(inst.full_name)
 
         for key in list(self._device_boxes):
             if key not in wanted:
@@ -532,72 +563,50 @@ class RecordFrame(ttk.Frame):
         # Re-pack every surviving/new box in `wanted` order each time —
         # cheap, and the simplest way to both position newcomers
         # correctly and reflect a device that's since disappeared,
-        # without disturbing an already-identified box's own state
-        # (only new boxes start blank — see _make_device_box). expand=
-        # True + fill="both" on every packed box is what makes them
-        # split the row's full width evenly between however many there
-        # are, rather than sitting at their own minimal content width
-        # with dead space after them.
+        # without disturbing an already-highlighted box's own state.
+        # expand=True + fill="both" on every packed box is what makes
+        # them split the row's full width evenly between however many
+        # there are, rather than sitting at their own minimal content
+        # width with dead space after them.
         for key in wanted:
             self._device_boxes[key]["frame"].pack(side="left", expand=True, fill="both", padx=(0, 8))
 
-    def _make_device_box(self, key: tuple[str, str]) -> dict:
-        kind, name = key
-        frame = tk.Frame(self.connected_devices_frame, relief="solid", borderwidth=1, padx=8, pady=4)
-        ttk.Label(
-            frame, text=f"{'MIDI' if kind == 'midi' else 'Audio'}: {name}",
-            font=("TkDefaultFont", 8), foreground="#888888",
-        ).pack(anchor="w")
-        instrument_var = tk.StringVar(value="—")
-        instrument_label = tk.Label(
-            frame, textvariable=instrument_var, font=("TkDefaultFont", 10, "bold"), foreground="#333333",
+    def _make_device_box(self, full_name: str) -> dict:
+        inst = self.config_obj.get_instrument(full_name) if self.config_obj else None
+        label = inst.label if inst is not None else ""
+        frame = tk.Frame(
+            self.connected_devices_frame, relief="solid", borderwidth=1,
+            highlightthickness=0, highlightbackground=color_for_label(label), padx=8, pady=4,
         )
-        instrument_label.pack(anchor="w")
-        return {"frame": frame, "instrument_var": instrument_var, "instrument_label": instrument_label}
+        if label:
+            ttk.Label(frame, text=label, font=("TkDefaultFont", 8), foreground=color_for_label(label)).pack(
+                anchor="w"
+            )
+        ttk.Label(frame, text=full_name, font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
+        return {"frame": frame, "label": label}
 
     def _mark_device_identified(self, full_name: str) -> None:
-        """Auto-detect just committed to `full_name` (a configured
-        Instrument) — find whichever connected-device box its own
-        midi_device/input_label matches and show its name there,
-        colored the same way its label badge is everywhere else in the
-        app. A device box that isn't currently showing (e.g. the
-        instrument's hardware isn't actually plugged in — start_auto_
-        detect_instrument wouldn't have found it in the first place, but
-        this stays a no-op rather than erroring either way) is simply
-        left alone."""
-        if self.config_obj is None:
-            return
-        inst = self.config_obj.get_instrument(full_name)
-        if inst is None:
-            return
-        if inst.is_midi:
-            target_kind, target_name = "midi", inst.midi_device
-        else:
-            input_info = self.config_obj.resolve_input(inst.input_label)
-            if input_info is None:
-                return
-            target_kind, target_name = "audio", input_info.label
-        for (kind, name), box in self._device_boxes.items():
-            if kind != target_kind:
-                continue
-            # Exact match for audio (keyed by InputLabel name directly);
-            # fuzzy for MIDI, same partial-match tolerance MidiInput
-            # itself uses when opening the port (see audio/midi_input.py).
-            matched = name == target_name or (kind == "midi" and target_name.lower() in name.lower())
-            if matched:
-                box["instrument_var"].set(inst.full_name)
-                box["instrument_label"].configure(foreground=color_for_label(inst.label))
-                return
+        """Auto-detect just committed to `full_name` — ring its box (it
+        already shows that instrument's own name; see the panel's own
+        docstring for why nothing here needs relabeling) and make sure
+        every other box's ring, if any, is off. A no-op if that
+        instrument somehow has no box right now (shouldn't happen —
+        auto-detect only ever finds an instrument whose device is
+        connected, the same condition a box requires — but harmless
+        either way)."""
+        for key, box in self._device_boxes.items():
+            box["frame"].configure(highlightthickness=_BOX_HIGHLIGHT_THICKNESS if key == full_name else 0)
 
     def _reset_device_identifications(self) -> None:
-        """Clear every box's instrument name back to "not yet
-        identified" — called wherever the rest of the identify cycle
-        resets (_begin_identify/_redo_identify/session end), so a device
-        box never keeps showing a *previous* session's instrument once a
-        new identify cycle is underway."""
+        """Turn off every box's highlight ring — called wherever the
+        rest of the identify cycle resets (_begin_identify/_redo_
+        identify/session end), so a box never keeps showing a *previous*
+        session's highlight once a new identify cycle is underway. The
+        box itself (and its instrument name) stays exactly as it was —
+        unlike the old device-keyed design, there's nothing here that
+        ever needs to go back to a "not yet identified" placeholder."""
         for box in self._device_boxes.values():
-            box["instrument_var"].set("—")
-            box["instrument_label"].configure(foreground="#333333")
+            box["frame"].configure(highlightthickness=0)
 
     # --- right column: Setlist ---
 
