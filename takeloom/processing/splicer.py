@@ -181,6 +181,7 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
     project = Project.open(projects_dir / f"{data['project']}.json", root)
     instrument = data["instrument"]
     instrument_label = data.get("instrument_label", "")
+    input_label = data.get("input_label", "")
     musician = data.get("musician", "")
     sample_rate = data.get("sample_rate") or 48000
     mix_start_frame = data.get("mix_start_frame", 0)
