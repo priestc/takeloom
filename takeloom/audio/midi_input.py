@@ -7,16 +7,22 @@ MIDI branch of instrument-engine construction), but a detection scan
 on_note_on alone and ignores note number/velocity entirely: any note at
 all is itself the detection.
 
-CC7 and CC11 are both wired up — not just whichever one seemed more
-likely — because which physical control a given keyboard's own labeled
-"volume" slider actually sends varies by manufacturer/model, and
-there's no way to know in advance which this app will see; both are
-legitimate, independent, multiplicative volume-like controls per the
-MIDI/GM spec, so having both covered is strictly more compatible than
-picking one and hoping. Any Control Change number that isn't one of
-these four is still logged (once per distinct number, never spammed)
-rather than silently dropped, so if a keyboard's slider turns out to
-send something else entirely, that's visible instead of another guess.
+CC7 and CC11 get their own semantically-correct handling (independent,
+multiplicative — see set_channel_volume/set_expression) when a keyboard
+sends them. But plenty of keyboards' physical "volume" control isn't
+wired to either at the factory — confirmed in practice: an Alesis QX25
+sends CC22 for what's functionally its volume knob, a number with no
+standard MIDI meaning at all — and there's no way to enumerate every
+manufacturer's own default in advance. So any Control Change that isn't
+sustain (CC64) or the universal modulation wheel (CC1 — too well-
+established a convention on too many keyboards to safely repurpose) is
+also treated as a volume-equivalent control (routed to on_volume, same
+as CC7), on the theory that this app's synth has no other defined
+meaning for an arbitrary incoming CC anyway, so "some knob got turned"
+is far more likely to mean "make it louder or quieter" than anything
+else. Every distinct CC number seen is still logged once (never
+spammed), both so the fallback's behavior is visible and so it's easy
+to tell CC1 apart from everything else that reaches it.
 
 Uses python-rtmidi directly (not e.g. `mido`'s higher-level wrapper)
 because a callback-driven port — no polling loop of our own — is what
@@ -38,13 +44,19 @@ _CONTROL_CHANGE = 0xB0
 _SUSTAIN_CC = 64
 _SUSTAIN_THRESHOLD = 64  # >= this counts as "pedal down" — the common MIDI-spec convention
 # Two distinct, independent, multiplicative volume-like controls in the
-# MIDI/GM spec — both are dispatched (see on_volume/on_expression below)
-# rather than picking just one, since which physical control a given
-# keyboard's own "volume" slider is actually wired to at the factory
-# varies by manufacturer/model and isn't something this app can know in
-# advance.
+# MIDI/GM spec, given their own semantically-correct handling when a
+# keyboard actually sends them (see on_volume/on_expression below) —
+# anything else falls through to the generic "any other CC means
+# volume" catch-all in _on_message instead (see module docstring).
 _VOLUME_CC = 7        # "Channel Volume" — the most common default for a dedicated volume slider
 _EXPRESSION_CC = 11   # "Expression" — the other common default, especially on assignable faders
+# The modulation wheel — a near-universal, dedicated physical control on
+# any keyboard that has pitch/mod wheels at all, distinct from whatever
+# assignable knob/slider its "volume" control happens to be wired to.
+# Excluded from the catch-all specifically because it's too well-
+# established a convention (vibrato/modulation depth) to safely
+# repurpose just because this app has no other use for it.
+_MODULATION_CC = 1
 
 
 class MidiUnavailableError(Exception):
@@ -107,15 +119,14 @@ class MidiInput:
         self._on_expression = on_expression
         self._lock = threading.Lock()
         self._closed = False
-        # Every distinct CC number seen but not one of the ones above —
-        # each logged (once, the first time) rather than dropped
-        # silently, since "which CC does this control actually send" is
-        # otherwise invisible and different keyboards vary. Not a
-        # general-purpose MIDI monitor: still ignores note/sustain/
-        # volume/expression once those are already accounted for, and
-        # never repeats the same CC number twice, so a controller
-        # streaming continuous aftertouch/mod-wheel data doesn't flood
-        # the console.
+        # Every distinct CC number seen so far, logged once each (never
+        # repeated) so it's visible which controls a given keyboard
+        # actually sends — otherwise which CC ends up driving the
+        # volume-equivalent catch-all (see _on_message) would be
+        # invisible. Not a general-purpose MIDI monitor: only the
+        # number/whether-it's-volume distinction is logged, and only
+        # once per number, so a controller streaming continuous CC data
+        # doesn't flood the console.
         self._logged_unknown_ccs: set[int] = set()
 
         self._midi_in = rtmidi.MidiIn()
@@ -175,23 +186,35 @@ class MidiInput:
         elif status == _NOTE_OFF and len(message) >= 3:
             if self._on_note_off is not None:
                 self._on_note_off(message[1])
-        elif status == _CONTROL_CHANGE and len(message) >= 3 and message[1] == _SUSTAIN_CC:
-            if self._on_sustain is not None:
-                self._on_sustain(message[2] >= _SUSTAIN_THRESHOLD)
-        elif status == _CONTROL_CHANGE and len(message) >= 3 and message[1] == _VOLUME_CC:
-            if self._on_volume is not None:
-                self._on_volume(message[2])
-        elif status == _CONTROL_CHANGE and len(message) >= 3 and message[1] == _EXPRESSION_CC:
-            if self._on_expression is not None:
-                self._on_expression(message[2])
         elif status == _CONTROL_CHANGE and len(message) >= 3:
-            cc = message[1]
+            cc, value = message[1], message[2]
             if cc not in self._logged_unknown_ccs:
                 self._logged_unknown_ccs.add(cc)
-                print(
-                    f"takeloom: MIDI device '{self.device_name}' sent Control Change {cc} "
-                    f"(value {message[2]}) — not recognized as sustain/volume/expression, ignored."
-                )
+                if cc not in (_SUSTAIN_CC, _MODULATION_CC):
+                    print(
+                        f"takeloom: MIDI device '{self.device_name}' sent Control Change {cc} "
+                        f"(value {value}) — treating as a volume-equivalent control."
+                    )
+                else:
+                    print(f"takeloom: MIDI device '{self.device_name}' sent Control Change {cc} (value {value}).")
+            if cc == _SUSTAIN_CC:
+                if self._on_sustain is not None:
+                    self._on_sustain(value >= _SUSTAIN_THRESHOLD)
+            elif cc == _MODULATION_CC:
+                pass  # the mod wheel — deliberately never treated as volume, see module docstring
+            elif cc == _VOLUME_CC:
+                if self._on_volume is not None:
+                    self._on_volume(value)
+            elif cc == _EXPRESSION_CC:
+                if self._on_expression is not None:
+                    self._on_expression(value)
+            else:
+                # Catch-all: some other, non-standard CC — most likely
+                # an assignable knob/slider a keyboard's own factory
+                # template happens to wire its "volume" control to (see
+                # module docstring) — treated the same as CC7.
+                if self._on_volume is not None:
+                    self._on_volume(value)
 
     def stop(self) -> None:
         """Alias for close() — lets a MidiInput sit in the same list of
