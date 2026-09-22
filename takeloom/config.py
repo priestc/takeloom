@@ -15,6 +15,17 @@ DEFAULT_CONFIG_PATH = Path.home() / "studio_config.json"
 VALID_SAMPLE_RATES = [44100, 48000, 96000]
 VALID_BUFFER_SIZES = [128, 256, 512, 1024, 2048]
 
+# Ceiling for Instrument.instrument_volume, enforced by backend.py's
+# adjust_instrument_volume (each "+" nudge clamps to this) and checked
+# again here in validate() for a hand-edited config. The dial is
+# deliberately allowed above 100% — real headroom for a genuinely weak
+# input (a quiet passive pickup/DI) — but uncapped was a real bug: nudge
+# it the same direction enough times (each press has no readout showing
+# it's climbed past 100%) and it silently reaches an absurd multiple,
+# clipping the signal outright with no obvious cause. 200% (+6dB) is
+# generous boost headroom without inviting that.
+MAX_INSTRUMENT_VOLUME_PERCENT = 200
+
 # The fixed, closed vocabulary for Instrument.label — a controlled
 # instrument-type category, distinct from Instrument.full_name (this
 # specific piece of gear's manufacturer/model, e.g. "Fender American
@@ -101,6 +112,21 @@ class Instrument:
     # to audio.synth.DEFAULT_SYNTH_VOICE, the same "unset -> sensible
     # default" convention tuning/freq_min_hz/freq_max_hz above use.
     synth_voice: str = ""
+    # This instrument's own live-monitor gain, in percent (100 = unity,
+    # matching the dial's own units — see backend.py's adjust_
+    # instrument_volume) — deliberately per-instrument rather than one
+    # shared "sticky" fader the way backing/takes volume are (see
+    # StudioConfig.last_backing_volume/last_takes_volume): a MIDI
+    # instrument that's already calibrated sensibly and a quiet passive
+    # pickup that genuinely needs boosting have nothing in common, so
+    # one dial shared between every instrument means switching
+    # instruments is wrong for one of them every time. Clamped to
+    # [0, MAX_INSTRUMENT_VOLUME_PERCENT] by adjust_instrument_volume —
+    # see that constant's own comment for why a ceiling exists at all.
+    # Not editable in Studio Setup (no UI here for it) — set live from
+    # the Record page's dial while listening, same "round-trips through
+    # this row unedited" reasoning as synth_voice above.
+    instrument_volume: int = 100
 
     @property
     def is_midi(self) -> bool:
@@ -177,7 +203,10 @@ class StudioConfig:
     inspiration_volume: float = 1.0
     last_backing_volume: int = 70  # remembered mixer level, seeded onto every newly loaded track
     last_takes_volume: int = 100
-    last_instrument_volume: int = 100  # remembered live-monitor gain for the instrument input
+    # No last_instrument_volume here — unlike backing/takes (one shared
+    # "sticky" fader), instrument volume is per-Instrument (see
+    # Instrument.instrument_volume's own comment for why) and lives on
+    # each Instrument entry below instead.
     last_selected_project: str = ""  # prefilled on the Record tab at startup
     last_selected_instrument: str = ""
     latency_compensation_ms: float = 0.0  # ms to trim from start of takes during playback
@@ -248,6 +277,11 @@ class StudioConfig:
                 errors.append(
                     f"Instrument '{inst.full_name or '(unnamed)'}' has an unrecognized MIDI voice "
                     f"'{inst.synth_voice}' (must be one of {', '.join(MIDI_SYNTH_VOICES)})."
+                )
+            if not (0 <= inst.instrument_volume <= MAX_INSTRUMENT_VOLUME_PERCENT):
+                errors.append(
+                    f"Instrument '{inst.full_name or '(unnamed)'}' has an out-of-range volume "
+                    f"({inst.instrument_volume}% — must be 0-{MAX_INSTRUMENT_VOLUME_PERCENT}%)."
                 )
         return errors
 

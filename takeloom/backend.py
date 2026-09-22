@@ -31,7 +31,7 @@ from typing import Callable
 from .audio.filters import CompressorSettings
 from .audio.pitch import effective_tuning, nearest_target
 from .audio.scarlett2_direct_monitor import FOCUSRITE_DEVICE_NAME, set_channel_gain
-from .config import DEFAULT_CONFIG_PATH, INSTRUMENT_LABELS, Instrument, StudioConfig
+from .config import DEFAULT_CONFIG_PATH, INSTRUMENT_LABELS, MAX_INSTRUMENT_VOLUME_PERCENT, Instrument, StudioConfig
 from .project import Project, Setlist, TakeInfo, TrackEntry
 from .utils import ensure_dir, sanitize_filename, timestamp_now, wall_timestamp
 
@@ -1331,13 +1331,16 @@ class LocalBackend(Backend):
         config = self.get_config()
         self._backing_volume: int = config.last_backing_volume
         self._takes_volume: int = config.last_takes_volume
-        self._instrument_volume: int = config.last_instrument_volume
+        # No self._instrument_volume — unlike backing/takes, instrument
+        # volume is per-Instrument (config.Instrument.instrument_volume),
+        # not one sticky value this backend carries in memory; see
+        # adjust_instrument_volume, which reads/writes it straight on
+        # whichever Instrument is currently active.
 
     def _save_last_volumes(self) -> None:
         config = self.get_config()
         config.last_backing_volume = self._backing_volume
         config.last_takes_volume = self._takes_volume
-        config.last_instrument_volume = self._instrument_volume
         config.save(self._config_path)
 
     def _get_active_engine(self):
@@ -2116,30 +2119,41 @@ class LocalBackend(Backend):
             self._emit("recording_status", {"status": f"Takes volume: {track.takes_volume}%"})
 
     def adjust_instrument_volume(self, delta: int) -> None:
-        """Nudge the instrument's live-monitor gain — see
-        AudioEngine.set_instrument_volume. Applied in software (uncapped,
-        like backing/takes volume) and, when the "recording" monitoring mode
-        has the instrument routed through the interface's own hardware
-        direct monitor instead, mirrored onto that fader too — see
-        _apply_hardware_direct_monitor.
+        """Nudge *this instrument's own* live-monitor gain — see
+        AudioEngine.set_instrument_volume and config.Instrument.
+        instrument_volume's own comment for why this is per-instrument
+        rather than one shared "sticky" fader the way adjust_backing_
+        volume/adjust_takes_volume are. Persisted straight onto whichever
+        Instrument is currently active (config.get_instrument, matched
+        by full_name — get_config() always hands back a fresh object
+        graph, so this never assumes the cached _active_session/_active_
+        monitor Instrument reference is the same object) and, when the
+        "recording" monitoring mode has the instrument routed through
+        the interface's own hardware direct monitor instead, mirrored
+        onto that fader too — see _apply_hardware_direct_monitor.
 
-        Unlike adjust_backing_volume/adjust_takes_volume (which only make
-        sense mid-take, since they write onto the loaded track's own volume
-        fields), instrument monitoring is meaningful any time an engine is
-        open at all — including the ambient monitor-only stream opened by
-        start_monitoring() before Record is ever pressed."""
+        Clamped to [0, MAX_INSTRUMENT_VOLUME_PERCENT] — see that
+        constant's own comment for why a ceiling exists at all.
+
+        Meaningful any time an engine is open at all — including the
+        ambient monitor-only stream opened by start_monitoring() before
+        Record is ever pressed — unlike adjust_backing_volume/adjust_
+        takes_volume, which only make sense mid-take."""
         with self._record_lock:
-            engine, inst = self._get_active_engine_and_inst()
-            if engine is None:
+            engine, active_inst = self._get_active_engine_and_inst()
+            if engine is None or active_inst is None:
                 return
-            self._instrument_volume = max(0, self._instrument_volume + delta)
-            engine.set_instrument_volume(self._instrument_volume / 100.0)
-            if inst is not None and self._monitoring_mode == "recording":
-                config = self.get_config()
+            config = self.get_config()
+            inst = config.get_instrument(active_inst.full_name)
+            if inst is None:
+                return
+            inst.instrument_volume = max(0, min(MAX_INSTRUMENT_VOLUME_PERCENT, inst.instrument_volume + delta))
+            config.save(self._config_path)
+            engine.set_instrument_volume(inst.instrument_volume / 100.0)
+            if self._monitoring_mode == "recording":
                 input_info = config.resolve_input(inst.input_label)
-                self._apply_hardware_direct_monitor(input_info, True)
-            self._save_last_volumes()
-            self._emit("recording_status", {"status": f"Instrument volume: {self._instrument_volume}%"})
+                self._apply_hardware_direct_monitor(input_info, True, inst.instrument_volume)
+            self._emit("recording_status", {"status": f"Instrument volume: {inst.instrument_volume}%"})
 
     # --- audio filters (compressor now, more later) ---
 
@@ -2200,11 +2214,17 @@ class LocalBackend(Backend):
                 engine.set_monitor_instrument(mode == "production")
             if inst is not None:
                 config = self.get_config()
-                input_info = config.resolve_input(inst.input_label)
-                self._apply_hardware_direct_monitor(input_info, mode == "recording")
+                # Re-fetched by full_name rather than trusting the cached
+                # inst's own instrument_volume — get_config() always hands
+                # back a fresh object graph, and another client could have
+                # just nudged this instrument's volume (adjust_instrument_
+                # volume) since inst was captured.
+                fresh_inst = config.get_instrument(inst.full_name) or inst
+                input_info = config.resolve_input(fresh_inst.input_label)
+                self._apply_hardware_direct_monitor(input_info, mode == "recording", fresh_inst.instrument_volume)
             self._emit("monitoring_mode_changed", {"mode": mode})
 
-    def _apply_hardware_direct_monitor(self, input_info, enabled: bool) -> None:
+    def _apply_hardware_direct_monitor(self, input_info, enabled: bool, instrument_volume_percent: int) -> None:
         """Best-effort: also flip the audio interface's own zero-latency
         hardware direct monitor, for interfaces this is known to work on
         (currently just the studio's Scarlett 4i4 4th Gen — see
@@ -2213,15 +2233,17 @@ class LocalBackend(Backend):
         has it open, etc.) are never surfaced — the Record page's on-screen
         reminder is the fallback either way.
 
-        When enabling, uses the operator's current Instrument Volume dial
-        level (self._instrument_volume) rather than a fixed unity gain, so
-        the dial reaches "recording" monitoring mode too, where the
-        instrument is heard purely through this hardware path — see
-        adjust_instrument_volume."""
+        When enabling, uses `instrument_volume_percent` — the specific
+        instrument's own Instrument Volume dial level (config.Instrument.
+        instrument_volume; every caller already has this in scope for
+        whichever instrument it's actually acting on) rather than a fixed
+        unity gain, so the dial reaches "recording" monitoring mode too,
+        where the instrument is heard purely through this hardware path
+        — see adjust_instrument_volume."""
         if input_info is None or input_info.device != FOCUSRITE_DEVICE_NAME:
             return
         try:
-            set_channel_gain(input_info.channel, (self._instrument_volume / 100.0) if enabled else 0.0)
+            set_channel_gain(input_info.channel, (instrument_volume_percent / 100.0) if enabled else 0.0)
         except Exception:
             pass
 
@@ -2243,7 +2265,7 @@ class LocalBackend(Backend):
 
     def _build_engine_for_instrument(
         self, config: StudioConfig, inst: Instrument, *,
-        monitor_instrument: bool, instrument_volume: float,
+        monitor_instrument: bool, instrument_volume: float | None = None,
     ) -> tuple[object, object | None, object | None]:
         """Build (but don't start) an AudioEngine for `inst`, branching on
         whether it's MIDI-driven (see config.Instrument.is_midi) or an
@@ -2265,12 +2287,21 @@ class LocalBackend(Backend):
           already no-ops on None) can keep branching on it exactly as
           before.
 
+        `instrument_volume`, left at its default (None), resolves to
+        `inst.instrument_volume / 100.0` — this instrument's own saved
+        dial level (see that field's own comment for why it's per-
+        instrument). Pass an explicit value only to override that, which
+        only start_video_check does (a fixed 1.0 — Video Check has no
+        Instrument Volume dial of its own to reflect).
+
         Raises BackendError on any device-resolution failure (bad output
         device, bad/unavailable MIDI device, bad input channel/device for
         an analog instrument) — every existing call site already either
         wraps this kind of setup in a try/except or lets BackendError
         propagate, so this doesn't change any caller's error-handling
         shape, just where the logic that can raise it lives."""
+        if instrument_volume is None:
+            instrument_volume = inst.instrument_volume / 100.0
         import sounddevice as sd
         from .audio.devices import resolve_device
 
@@ -2367,16 +2398,14 @@ class LocalBackend(Backend):
         midi_input = None
         try:
             engine, midi_input, input_info = self._build_engine_for_instrument(
-                config, inst,
-                monitor_instrument=self._monitoring_mode == "production",
-                instrument_volume=self._instrument_volume / 100.0,
+                config, inst, monitor_instrument=self._monitoring_mode == "production",
             )
             engine.start()
         except Exception:
             if midi_input is not None:
                 midi_input.close()
             return False
-        self._apply_hardware_direct_monitor(input_info, self._monitoring_mode == "recording")
+        self._apply_hardware_direct_monitor(input_info, self._monitoring_mode == "recording", inst.instrument_volume)
         self._active_monitor = _ActiveMonitor(engine=engine, inst=inst, midi_input=midi_input)
         return True
 
@@ -3777,14 +3806,16 @@ class LocalBackend(Backend):
             # the Record page's monitoring_mode toggle is currently set
             # to — see get_monitoring_mode()/set_monitoring_mode() —
             # hence monitor_instrument=False unconditionally here.
-            # instrument_volume=1.0 (not the dial's self._instrument_volume)
-            # — same unity-gain default the original inline AudioEngine(...)
-            # construction here left implicit, since Video Check has no
-            # Instrument Volume dial of its own to reflect.
+            # instrument_volume=1.0 (not the instrument's own saved dial
+            # level) — same unity-gain default the original inline
+            # AudioEngine(...) construction here left implicit, since
+            # Video Check has no Instrument Volume dial of its own to
+            # reflect; the hardware-monitor mirror below matches with a
+            # flat 100% for the same reason.
             engine, midi_input, input_info = self._build_engine_for_instrument(
                 config, inst, monitor_instrument=False, instrument_volume=1.0,
             )
-            self._apply_hardware_direct_monitor(input_info, True)
+            self._apply_hardware_direct_monitor(input_info, True, 100)
 
             if backing_path.exists():
                 engine.mixer.add_source("backing", backing_path, volume=self._backing_volume / 100.0)
@@ -4019,12 +4050,12 @@ class LocalBackend(Backend):
             raise BackendError(f"sounddevice unavailable: {e}") from e
 
         engine, midi_input, input_info = self._build_engine_for_instrument(
-            config, inst,
-            monitor_instrument=self._monitoring_mode == "production",
-            instrument_volume=self._instrument_volume / 100.0,
+            config, inst, monitor_instrument=self._monitoring_mode == "production",
         )
         try:
-            self._apply_hardware_direct_monitor(input_info, self._monitoring_mode == "recording")
+            self._apply_hardware_direct_monitor(
+                input_info, self._monitoring_mode == "recording", inst.instrument_volume,
+            )
             engine.start()
         except Exception:
             if midi_input is not None:

@@ -162,7 +162,11 @@ class _InstrumentRow:
     _synth_voice, set once at construction from the loaded Instrument),
     same reasoning as freq_min_var/freq_max_var above: Save must not
     silently blank out a value some other part of the app is
-    responsible for."""
+    responsible for. instrument_volume (self._instrument_volume) is
+    carried through the exact same way, for the exact same reason — it's
+    the Record page's live-monitor dial (backend.py's adjust_
+    instrument_volume), deliberately per-instrument rather than fixed
+    here, not something this row has any control for."""
 
     def __init__(
         self,
@@ -180,6 +184,7 @@ class _InstrumentRow:
         tuning: list[str] | None = None,
         midi_device: str = "",
         synth_voice: str = "",
+        instrument_volume: int = 100,
     ) -> None:
         self._on_remove = on_remove
         # Kept current by set_input_choices() — _parse_input_selection
@@ -196,10 +201,12 @@ class _InstrumentRow:
         self.freq_min_var = tk.StringVar(value=(f"{freq_min_hz:g}" if freq_min_hz else ""))
         self.freq_max_var = tk.StringVar(value=(f"{freq_max_hz:g}" if freq_max_hz else ""))
         self.tuning_var = tk.StringVar(value=format_tuning(tuning or []))
-        # Not a tk.StringVar/widget — nothing here edits it (see the
-        # Record page's "Sound" picker instead), just carries it through
-        # to_instrument() unchanged so Save doesn't wipe it out.
+        # Neither is a tk.StringVar/widget — nothing here edits either
+        # (see the Record page's "Sound" picker and Instrument Volume
+        # dial instead), just carries them through to_instrument()
+        # unchanged so Save doesn't wipe them out.
         self._synth_voice = synth_voice
+        self._instrument_volume = instrument_volume
         # display name -> notes for whichever label is currently selected
         # — refreshed by _refresh_tuning_presets, read by _on_tuning_
         # preset_picked once the user actually picks one from the
@@ -309,6 +316,7 @@ class _InstrumentRow:
             tuning=parse_tuning(self.tuning_var.get()),
             midi_device=midi_device,
             synth_voice=self._synth_voice,
+            instrument_volume=self._instrument_volume,
         )
 
     @staticmethod
@@ -780,6 +788,7 @@ class StudioSetupFrame(ttk.Frame):
                 full_name=inst.full_name, label=inst.label, musician=inst.musician,
                 freq_min_hz=inst.freq_min_hz, freq_max_hz=inst.freq_max_hz, tuning=inst.tuning,
                 midi_device=inst.midi_device, synth_voice=inst.synth_voice,
+                instrument_volume=inst.instrument_volume,
             )
         if not self.config_obj.instruments:
             self._add_instrument_row(input_label_names)
@@ -874,7 +883,7 @@ class StudioSetupFrame(ttk.Frame):
         self, input_label_names: list[str], input_label: str = "",
         full_name: str = "", label: str = "", musician: str = "",
         freq_min_hz: float = 0.0, freq_max_hz: float = 0.0, tuning: list[str] | None = None,
-        midi_device: str = "", synth_voice: str = "",
+        midi_device: str = "", synth_voice: str = "", instrument_volume: int = 100,
     ) -> None:
         if self.table is None:
             return
@@ -883,7 +892,7 @@ class StudioSetupFrame(ttk.Frame):
             self.table, row_index, input_label_names, self.midi_devices, self._remove_instrument_row,
             input_label=input_label, full_name=full_name, label=label, musician=musician,
             freq_min_hz=freq_min_hz, freq_max_hz=freq_max_hz, tuning=tuning,
-            midi_device=midi_device, synth_voice=synth_voice,
+            midi_device=midi_device, synth_voice=synth_voice, instrument_volume=instrument_volume,
         )
         self._instrument_rows.append(row)
         self._bind_mousewheel(self._canvas)
