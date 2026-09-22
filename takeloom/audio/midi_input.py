@@ -1,10 +1,22 @@
-"""USB MIDI input: turns incoming Note On/Off, sustain-pedal (CC64), and
-channel-volume (CC7) messages into calls against plain callables —
-usually a Synth's own note_on/note_off/set_sustain/set_channel_volume
-(see audio/synth.py and backend.py's MIDI branch of instrument-engine
-construction), but a detection scan (start_auto_detect_instrument/
-start_detect_all) instead passes on_note_on alone and ignores note
-number/velocity entirely: any note at all is itself the detection.
+"""USB MIDI input: turns incoming Note On/Off, sustain-pedal (CC64),
+channel-volume (CC7), and expression (CC11) messages into calls against
+plain callables — usually a Synth's own note_on/note_off/set_sustain/
+set_channel_volume/set_expression (see audio/synth.py and backend.py's
+MIDI branch of instrument-engine construction), but a detection scan
+(start_auto_detect_instrument/start_detect_all) instead passes
+on_note_on alone and ignores note number/velocity entirely: any note at
+all is itself the detection.
+
+CC7 and CC11 are both wired up — not just whichever one seemed more
+likely — because which physical control a given keyboard's own labeled
+"volume" slider actually sends varies by manufacturer/model, and
+there's no way to know in advance which this app will see; both are
+legitimate, independent, multiplicative volume-like controls per the
+MIDI/GM spec, so having both covered is strictly more compatible than
+picking one and hoping. Any Control Change number that isn't one of
+these four is still logged (once per distinct number, never spammed)
+rather than silently dropped, so if a keyboard's slider turns out to
+send something else entirely, that's visible instead of another guess.
 
 Uses python-rtmidi directly (not e.g. `mido`'s higher-level wrapper)
 because a callback-driven port — no polling loop of our own — is what
@@ -25,7 +37,14 @@ _NOTE_OFF = 0x80
 _CONTROL_CHANGE = 0xB0
 _SUSTAIN_CC = 64
 _SUSTAIN_THRESHOLD = 64  # >= this counts as "pedal down" — the common MIDI-spec convention
-_VOLUME_CC = 7  # "Channel Volume" — what a keyboard's own physical volume slider/fader sends
+# Two distinct, independent, multiplicative volume-like controls in the
+# MIDI/GM spec — both are dispatched (see on_volume/on_expression below)
+# rather than picking just one, since which physical control a given
+# keyboard's own "volume" slider is actually wired to at the factory
+# varies by manufacturer/model and isn't something this app can know in
+# advance.
+_VOLUME_CC = 7        # "Channel Volume" — the most common default for a dedicated volume slider
+_EXPRESSION_CC = 11   # "Expression" — the other common default, especially on assignable faders
 
 
 class MidiUnavailableError(Exception):
@@ -58,10 +77,10 @@ def list_midi_devices() -> list[str]:
 
 class MidiInput:
     """One open USB MIDI input port, dispatching Note On/Off/sustain/
-    volume to plain callables on rtmidi's own dedicated notification
-    thread — never the realtime audio callback thread, and never
-    anything that blocks on that thread (Synth.note_on/note_off/
-    set_sustain/set_channel_volume only ever briefly
+    volume/expression to plain callables on rtmidi's own dedicated
+    notification thread — never the realtime audio callback thread, and
+    never anything that blocks on that thread (Synth.note_on/note_off/
+    set_sustain/set_channel_volume/set_expression only ever briefly
     hold a lock), so a keystroke's audio reaches the engine's very next
     output block with no added buffering of its own."""
 
@@ -72,6 +91,7 @@ class MidiInput:
         on_note_off: Callable[[int], None] | None = None,
         on_sustain: Callable[[bool], None] | None = None,
         on_volume: Callable[[int], None] | None = None,
+        on_expression: Callable[[int], None] | None = None,
     ) -> None:
         try:
             import rtmidi
@@ -84,8 +104,19 @@ class MidiInput:
         self._on_note_off = on_note_off
         self._on_sustain = on_sustain
         self._on_volume = on_volume
+        self._on_expression = on_expression
         self._lock = threading.Lock()
         self._closed = False
+        # Every distinct CC number seen but not one of the ones above —
+        # each logged (once, the first time) rather than dropped
+        # silently, since "which CC does this control actually send" is
+        # otherwise invisible and different keyboards vary. Not a
+        # general-purpose MIDI monitor: still ignores note/sustain/
+        # volume/expression once those are already accounted for, and
+        # never repeats the same CC number twice, so a controller
+        # streaming continuous aftertouch/mod-wheel data doesn't flood
+        # the console.
+        self._logged_unknown_ccs: set[int] = set()
 
         self._midi_in = rtmidi.MidiIn()
         ports = self._midi_in.get_ports()
@@ -150,6 +181,17 @@ class MidiInput:
         elif status == _CONTROL_CHANGE and len(message) >= 3 and message[1] == _VOLUME_CC:
             if self._on_volume is not None:
                 self._on_volume(message[2])
+        elif status == _CONTROL_CHANGE and len(message) >= 3 and message[1] == _EXPRESSION_CC:
+            if self._on_expression is not None:
+                self._on_expression(message[2])
+        elif status == _CONTROL_CHANGE and len(message) >= 3:
+            cc = message[1]
+            if cc not in self._logged_unknown_ccs:
+                self._logged_unknown_ccs.add(cc)
+                print(
+                    f"takeloom: MIDI device '{self.device_name}' sent Control Change {cc} "
+                    f"(value {message[2]}) — not recognized as sustain/volume/expression, ignored."
+                )
 
     def stop(self) -> None:
         """Alias for close() — lets a MidiInput sit in the same list of

@@ -113,30 +113,43 @@ class _AdditiveSynth:
         self._order: list[int] = []  # notes in note-on order, oldest first — for voice stealing
         self._sustain = False
         self._sustained_notes: set[int] = set()  # held past their own note_off by the sustain pedal
-        # 0.0-1.0, driven by the MIDI keyboard's own physical volume
-        # slider (CC7, "Channel Volume" — see audio/midi_input.py) if it
-        # has one. Starts at full: most keyboards don't resend their
-        # slider's current position on connect, and a silently-quiet
-        # instrument would be a far more confusing default than "as loud
-        # as everything else until the slider is actually touched."
+        # 0.0-1.0 each, driven by the MIDI keyboard's own physical
+        # volume slider — CC7 ("Channel Volume") and/or CC11
+        # ("Expression"), whichever it actually sends (see audio/
+        # midi_input.py's module docstring for why both are wired up
+        # rather than picking one) — multiplied together in render().
+        # Both start at full: most keyboards don't resend their slider's
+        # current position on connect, and a silently-quiet instrument
+        # would be a far more confusing default than "as loud as
+        # everything else until the slider is actually touched."
         self._channel_volume = 1.0
+        self._expression = 1.0
         self._lock = threading.Lock()
 
     def set_channel_volume(self, value: int) -> None:
-        """MIDI Control Change 7 — applied to the actual generated
-        signal (not just the live monitor feed the way AudioEngine's own
-        instrument_volume dial is, see engine.py), the same way easing
-        off a real instrument's own volume knob would naturally result
-        in a quieter microphone capture: this is part of the
-        performance, so it's reflected in the take itself, not just
-        what's heard live. 0-127, MIDI's own standard range — squared
-        (not linear) to match _FluidSynthVoice's own CC7 curve
+        """MIDI Control Change 7 ("Channel Volume") — applied to the
+        actual generated signal (not just the live monitor feed the way
+        AudioEngine's own instrument_volume dial is, see engine.py), the
+        same way easing off a real instrument's own volume knob would
+        naturally result in a quieter microphone capture: this is part
+        of the performance, so it's reflected in the take itself, not
+        just what's heard live. 0-127, MIDI's own standard range —
+        squared (not linear) to match _FluidSynthVoice's own CC7 curve
         (measured empirically: FluidSynth scales its output by
         (value/127)**2, a perceptual/loudness curve rather than a flat
         amplitude one), so a keyboard's slider feels the same regardless
         of which backend happens to be rendering."""
         with self._lock:
             self._channel_volume = (max(0, min(127, value)) / 127.0) ** 2
+
+    def set_expression(self, value: int) -> None:
+        """MIDI Control Change 11 ("Expression") — a second, independent
+        volume-like control (see __init__'s own comment for why both are
+        tracked), multiplied together with channel_volume in render()
+        the same way a real GM synth combines them. Same squared curve
+        and same reasoning as set_channel_volume."""
+        with self._lock:
+            self._expression = (max(0, min(127, value)) / 127.0) ** 2
 
     def set_voice(self, voice: str) -> None:
         """Live voice switch — e.g. the Record page's "Sound" picker
@@ -226,7 +239,7 @@ class _AdditiveSynth:
         block_t = np.arange(1, frames + 1, dtype=np.float64) * dt  # time-since-block-start, per sample
         out = np.zeros(frames, dtype=np.float64)
         with self._lock:
-            channel_volume = self._channel_volume
+            channel_volume = self._channel_volume * self._expression
             if not self._voices:
                 return out.astype(np.float32).reshape(-1, 1)
             harmonics = _ORGAN_HARMONICS if self.voice == "organ" else _PIANO_HARMONICS
@@ -367,6 +380,15 @@ class _FluidSynthVoice:
         with self._lock:
             self._fs.cc(self._channel, 7, max(0, min(127, value)))  # CC7 = channel volume
 
+    def set_expression(self, value: int) -> None:
+        """Same as set_channel_volume, forwarded to FluidSynth's own
+        native CC11 handling — FluidSynth combines channel volume and
+        expression itself (both are independent, multiplicative gain
+        stages per the GM spec), so there's nothing extra to do here
+        either."""
+        with self._lock:
+            self._fs.cc(self._channel, 11, max(0, min(127, value)))  # CC11 = expression
+
     def all_notes_off(self) -> None:
         """Unlike _AdditiveSynth's hard, instant cut, FluidSynth's own
         all_notes_off triggers each voice's normal release/decay tail
@@ -423,6 +445,9 @@ class Synth:
 
     def set_channel_volume(self, value: int) -> None:
         self._impl.set_channel_volume(value)
+
+    def set_expression(self, value: int) -> None:
+        self._impl.set_expression(value)
 
     def all_notes_off(self) -> None:
         self._impl.all_notes_off()
