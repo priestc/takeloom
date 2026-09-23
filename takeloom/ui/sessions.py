@@ -1,29 +1,22 @@
 """Sessions tab: browse past recording sessions and their takes.
 
-Two read-only, independently-usable actions per take — see backend.py's
-list_sessions/get_session_detail/analyze_take/play_take for exactly what
-each one touches:
+Per take, "▶ Play" opens it in the OS's default player — see backend.py's
+list_sessions/get_session_detail/play_take. Downloads it from the backup
+server first if it isn't already on local disk (see backend.py's
+ensure_take_local) — a take shown here doesn't have to be any project's
+*current* preferred one (see get_session_detail), so this can't assume
+next_untaken_track_index-style "still local" the way an active session's
+own playback can. Also behaves genuinely differently over a Remote
+connection: the server resolves/downloads the file on its own end and
+streams the bytes back in chunks to actually play on the machine looking
+at this tab, not the studio's.
 
-1. "Analyze" runs the take's actual recorded audio through the
-   frequency-based instrument classifier (audio/instrument_classifier.py)
-   and reports which configured instrument it most resembles — never
-   touches anything itself.
-2. "▶ Play" opens the take in the OS's default player. Downloads it from
-   the backup server first if it isn't already on local disk (see
-   backend.py's ensure_take_local) — a take shown here doesn't have to be
-   any project's *current* preferred one (see get_session_detail), so
-   this can't assume next_untaken_track_index-style "still local" the
-   way an active session's own playback can. Also the only one of the two
-   that behaves genuinely differently over a Remote connection: the
-   server resolves/downloads the file on its own end and streams the
-   bytes back in chunks to actually play on the machine looking at this
-   tab, not the studio's.
-
-(This tab used to also offer "Correct instrument" and "Reassign", for
-retitling a session/re-filing a take recorded under the wrong instrument —
-removed once the underlying mis-filing causes were fixed at the source;
-backend.py's correct_session_instrument/reassign_take still exist and work
-if that's ever needed again, just nothing in this UI calls them anymore.)
+(This tab used to also offer "Correct instrument", "Reassign", and
+"Analyze", for retitling a session/re-filing a take recorded under the
+wrong instrument — removed once the underlying mis-filing causes were
+fixed at the source; backend.py's correct_session_instrument/
+reassign_take/analyze_take still exist and work if that's ever needed
+again, just nothing in this UI calls them anymore.)
 
 Everything here goes through app_state.backend, same as every other tab —
 works identically pointed at local hardware or a Remote connection.
@@ -89,8 +82,7 @@ class SessionsFrame(ttk.Frame):
         ttk.Label(self, text="Sessions", font=("TkDefaultFont", 14, "bold")).pack(anchor="w", pady=(0, 4))
         ttk.Label(
             self,
-            text="Past recording sessions. Select one to see each track's take status, play a "
-                 "take, or analyze it.",
+            text="Past recording sessions. Select one to see each track's take status, or play a take.",
             foreground="#666666", wraplength=760, justify="left",
         ).pack(anchor="w", pady=(0, 12))
 
@@ -151,9 +143,9 @@ class SessionsFrame(ttk.Frame):
                 anchor="w"
             )
             return
-        self._build_detail(session_dir, detail)
+        self._build_detail(detail)
 
-    def _build_detail(self, session_dir: str, detail: dict) -> None:
+    def _build_detail(self, detail: dict) -> None:
         ttk.Label(
             self.detail_frame, text=f"Recorded as: {detail.get('instrument', '')}",
             font=("TkDefaultFont", 11, "bold"),
@@ -161,7 +153,7 @@ class SessionsFrame(ttk.Frame):
 
         project_name = detail.get("project", "")
         for track in detail.get("tracks", []):
-            self._build_track_row(session_dir, project_name, track)
+            self._build_track_row(project_name, track)
 
     # Display text + color for each of get_session_detail's per-track
     # `status` values (see backend.py's _track_take_status for what each
@@ -175,7 +167,7 @@ class SessionsFrame(ttk.Frame):
         "pending": ("Pending processing", "#2a6db0"),
     }
 
-    def _build_track_row(self, session_dir: str, project_name: str, track: dict) -> None:
+    def _build_track_row(self, project_name: str, track: dict) -> None:
         # A grid (not pack) per track: column 0 holds the track name and,
         # below it, nothing for each take row — grid sizes column 0 to
         # its widest cell automatically, so take rows still line up under
@@ -204,12 +196,9 @@ class SessionsFrame(ttk.Frame):
         # so a track with takes under more than one instrument doesn't
         # hide any of them.
         for i, take in enumerate(takes, start=1):
-            self._build_take_row(track_frame, i, session_dir, project_name, track["track_name"], take)
+            self._build_take_row(track_frame, i, project_name, take)
 
-    def _build_take_row(
-        self, track_frame: ttk.Frame, grid_row: int, session_dir: str, project_name: str, track_name: str,
-        take: dict,
-    ) -> None:
+    def _build_take_row(self, track_frame: ttk.Frame, grid_row: int, project_name: str, take: dict) -> None:
         old_instrument = take["instrument"]  # a label — takes are filed by label
         # Gridded into track_frame's column 1 (see _build_track_row) so it
         # lines up under the status text, not the track name in column 0;
@@ -228,12 +217,11 @@ class SessionsFrame(ttk.Frame):
         make_label_badge(row, old_instrument).pack(side="left", padx=(0, 6))
         ttk.Label(row, text=take["filename"], foreground="#666666").pack(side="left", padx=(0, 8))
         self._build_play_controls(row, project_name, take["filename"], old_instrument)
-        self._build_analyze_controls(row, session_dir, track_name, old_instrument)
 
     def _build_play_controls(self, row: ttk.Frame, project_name: str, filename: str, label: str) -> None:
-        # Read-only, same spirit as Analyze — opens the take in the OS's
-        # default player (backend.py's play_take) rather than anything
-        # this tab renders itself. Works identically pointed at local
+        # Read-only — opens the take in the OS's default player
+        # (backend.py's play_take) rather than anything this tab renders
+        # itself. Works identically pointed at local
         # hardware or a Remote connection: locally it just needs the file
         # to exist (downloading it from the backup server first if
         # "remote" vault mode already pruned it — see ensure_take_local),
@@ -249,16 +237,6 @@ class SessionsFrame(ttk.Frame):
             command=lambda: self._on_play_take(project_name, filename, label, play_var),
         ).pack(side="left", padx=(0, 4))
         ttk.Label(row, textvariable=play_var, foreground="#666666").pack(side="left", padx=(0, 4))
-
-    def _build_analyze_controls(self, row: ttk.Frame, session_dir: str, track_name: str, instrument: str) -> None:
-        # Read-only (see backend.py's analyze_take) — its result just
-        # updates analyze_var in place, never touches anything on disk.
-        analyze_var = tk.StringVar(value="")
-        ttk.Button(
-            row, text="Analyze",
-            command=lambda: self._on_analyze_take(session_dir, track_name, instrument, analyze_var),
-        ).pack(side="left", padx=(10, 0))
-        ttk.Label(row, textvariable=analyze_var, foreground="#2a6db0").pack(side="left", padx=(6, 0))
 
     # --- actions ---
 
@@ -281,31 +259,3 @@ class SessionsFrame(ttk.Frame):
         status_var.set("")
         if error:
             messagebox.showerror("Could not play take", error)
-
-    def _on_analyze_take(
-        self, session_dir: str, track_name: str, instrument_name: str, result_var: tk.StringVar,
-    ) -> None:
-        result_var.set("Analyzing...")
-        backend = self.app_state.backend
-        self._run_backend(
-            lambda: backend.analyze_take(session_dir, track_name, instrument_name),
-            lambda result, error: self._on_analyze_result(instrument_name, result_var, result, error),
-        )
-
-    def _on_analyze_result(
-        self, old_instrument: str, result_var: tk.StringVar, result: dict | None, error: str | None,
-    ) -> None:
-        if not self.winfo_exists():
-            return  # a different session was selected (or the tab left) before this reply arrived
-        if error:
-            result_var.set("")
-            messagebox.showerror("Could not analyze take", error)
-            return
-        guess = (result or {}).get("guess")
-        confidence = (result or {}).get("confidence") or 0.0
-        if guess is None:
-            result_var.set("Couldn't tell — too quiet or unreadable.")
-        elif guess == old_instrument:
-            result_var.set(f"Matches: {guess} ({confidence:.0%})")
-        else:
-            result_var.set(f"Sounds more like: {guess} ({confidence:.0%})")
