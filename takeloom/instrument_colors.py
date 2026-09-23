@@ -24,7 +24,14 @@ LABEL_COLORS: dict[str, str] = {
     "electric-bass": "#1565C0",
     "electric-bass-fretless": "#0D47A1",
     "drums": "#E65100",
+    # A MIDI take is filed under its synth_voice ("piano"/"organ" — see
+    # processing/splicer.py's process_session), not this generic label —
+    # "midi-keyboard" only still shows up for a take filed before that
+    # change, or one with no synth_voice logged for some other reason.
+    # Two reds so they still read as one family at a glance.
     "midi-keyboard": "#C62828",
+    "piano": "#C62828",
+    "organ": "#AD1457",
 }
 # An unrecognized/legacy label (predates today's INSTRUMENT_LABELS
 # vocabulary, or was hand-edited in) — never a real current choice, but

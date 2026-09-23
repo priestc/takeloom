@@ -218,17 +218,25 @@ class SessionsFrame(ttk.Frame):
     def _build_track_row(
         self, session_dir: str, project_name: str, track: dict, instrument_labels: list[str],
     ) -> None:
-        header_row = ttk.Frame(self.detail_frame)
-        header_row.pack(fill="x", pady=(6, 0))
-        ttk.Label(header_row, text=track["track_name"], width=28, anchor="w", font=("TkDefaultFont", 10, "bold")).pack(
-            side="left"
-        )
+        # A grid (not pack) per track: column 0 holds the track name and,
+        # below it, nothing for each take row — grid sizes column 0 to
+        # its widest cell automatically, so take rows still line up under
+        # the (now unclipped, however long) track name without having to
+        # guess a fixed character width that either truncates a long title
+        # (the bug this replaced) or wastes space on a short one.
+        track_frame = ttk.Frame(self.detail_frame)
+        track_frame.pack(fill="x", pady=(6, 0))
+        ttk.Label(
+            track_frame, text=track["track_name"], anchor="w", font=("TkDefaultFont", 10, "bold"),
+        ).grid(row=0, column=0, sticky="w")
 
         takes = track.get("takes", [])
         status_text, status_color = self._STATUS_STYLES.get(track.get("status", "not recorded"), ("", "#888888"))
         if track.get("status") == "completed" and len(takes) > 1:
             status_text = f"{status_text} ({len(takes)} takes)"
-        ttk.Label(header_row, text=status_text, foreground=status_color).pack(side="left")
+        ttk.Label(track_frame, text=status_text, foreground=status_color).grid(
+            row=0, column=1, sticky="w", padx=(8, 0)
+        )
 
         if not takes:
             return
@@ -240,16 +248,23 @@ class SessionsFrame(ttk.Frame):
         # inspiration-take index in that case — see its docstring), so a
         # track with takes under more than one instrument doesn't hide any
         # of them.
-        for take in takes:
-            self._build_take_row(session_dir, project_name, track["track_name"], take, instrument_labels)
+        for i, take in enumerate(takes, start=1):
+            self._build_take_row(
+                track_frame, i, session_dir, project_name, track["track_name"], take, instrument_labels,
+            )
 
     def _build_take_row(
-        self, session_dir: str, project_name: str, track_name: str, take: dict, instrument_labels: list[str],
+        self, track_frame: ttk.Frame, grid_row: int, session_dir: str, project_name: str, track_name: str,
+        take: dict, instrument_labels: list[str],
     ) -> None:
         old_instrument = take["instrument"]  # a label — takes are filed by label, see reassign_take's docstring
-        row = ttk.Frame(self.detail_frame)
-        row.pack(fill="x", pady=1)
-        ttk.Label(row, text="", width=28).pack(side="left")  # aligns under the track name above
+        # Gridded into track_frame's column 1 (see _build_track_row) so it
+        # lines up under the status text, not the track name in column 0;
+        # its own contents are still packed, same as before — grid/pack
+        # can mix freely as long as they're never both used directly on
+        # the same parent's children.
+        row = ttk.Frame(track_frame)
+        row.grid(row=grid_row, column=1, sticky="w", pady=1)
         # Label called out as its own colored badge, not just bracketed
         # into the filename text below it — the filename usually repeats
         # it too, but this is what actually answers "what was this filed

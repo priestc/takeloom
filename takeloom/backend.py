@@ -1094,13 +1094,22 @@ class _SessionEvent:
     # scope its comparison even once a take's label has since been
     # renamed or removed from config — see that method's docstring.
     input_label: str = ""
+    # Which sound (audio/synth.py's SYNTH_VOICES — "piano"/"organ") was
+    # selected on this instrument when the event was logged — empty for a
+    # non-MIDI instrument, where the concept doesn't apply. Same per-event-
+    # carries-its-own-copy reasoning as instrument/instrument_label above:
+    # processing/splicer.py's take-filing uses this (not "midi-keyboard")
+    # as a MIDI take's actual label, so it survives the instrument's voice
+    # being changed later, and two voices recorded in the same session
+    # file as distinctly as if they were different instruments.
+    synth_voice: str = ""
 
     def to_dict(self) -> dict:
         d = {
             "timestamp": self.timestamp, "wall_time": self.wall_time,
             "event_type": self.event_type, "details": self.details,
             "instrument": self.instrument, "instrument_label": self.instrument_label,
-            "input_label": self.input_label,
+            "input_label": self.input_label, "synth_voice": self.synth_voice,
         }
         if self.frame is not None:
             d["frame"] = self.frame
@@ -3993,6 +4002,10 @@ class LocalBackend(Backend):
         session = self._active_session
         if session is None:
             return
+        synth_voice = ""
+        if session.inst.is_midi:
+            from .audio.synth import DEFAULT_SYNTH_VOICE
+            synth_voice = session.inst.synth_voice or DEFAULT_SYNTH_VOICE
         session.events.append(_SessionEvent(
             timestamp=timestamp_now() - session.session_start,
             wall_time=wall_timestamp(),
@@ -4004,6 +4017,7 @@ class LocalBackend(Backend):
             instrument=session.inst.full_name,
             instrument_label=session.inst.label,
             input_label=session.inst.input_label,
+            synth_voice=synth_voice,
         ))
 
     def begin_session(self, project_name: str, instrument_name: str) -> None:

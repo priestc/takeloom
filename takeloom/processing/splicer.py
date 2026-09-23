@@ -92,6 +92,11 @@ class CompletedTake:
     # after the take's label has since been renamed or removed from
     # config — see that method's docstring.
     input_label: str = ""
+    # The MIDI sound ("piano"/"organ" — audio/synth.py's SYNTH_VOICES)
+    # active when this take was recorded, empty for a non-MIDI instrument.
+    # When set, process_session below files the take under this instead
+    # of instrument_label ("midi-keyboard") — see that assignment for why.
+    synth_voice: str = ""
 
 
 def parse_session_log(data: dict) -> list[CompletedTake]:
@@ -107,6 +112,7 @@ def parse_session_log(data: dict) -> list[CompletedTake]:
     instrument = ""
     instrument_label = ""
     input_label = ""
+    synth_voice = ""
 
     def close_segment(end_frame: int | None, natural_end: bool) -> None:
         nonlocal start_frame
@@ -120,6 +126,7 @@ def parse_session_log(data: dict) -> list[CompletedTake]:
                 start_frame=start_frame, end_frame=end_frame,
                 start_wall_time=start_wall,
                 instrument=instrument, instrument_label=instrument_label, input_label=input_label,
+                synth_voice=synth_voice,
             ))
         start_frame = None
 
@@ -138,6 +145,7 @@ def parse_session_log(data: dict) -> list[CompletedTake]:
             instrument = event.get("instrument", "")
             instrument_label = event.get("instrument_label", "")
             input_label = event.get("input_label", "")
+            synth_voice = event.get("synth_voice", "")
         elif etype == "song_end":
             close_segment(frame, natural_end=True)
         elif etype in ("track_skipped", "song_stopped", "track_loaded", "session_end"):
@@ -238,7 +246,23 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                 # lives in session_log.json for that purpose. Falls back
                 # to the session-wide fields only for a log recorded
                 # before events/labels carried their own.
-                take_label = take.instrument_label or instrument_label or take.instrument or instrument
+                #
+                # A MIDI take files under its synth_voice ("piano"/
+                # "organ") instead of the generic "midi-keyboard" —
+                # every MIDI instrument shares that one instrument_label
+                # regardless of which sound was actually playing, so
+                # filing by instrument_label the same way as any other
+                # instrument would silently merge a piano take-number
+                # sequence with an organ one, and Completed Takes/
+                # Sessions would show every MIDI take under the same
+                # uninformative "midi-keyboard" badge — exactly the
+                # complaint that prompted this. Never set for a
+                # non-MIDI take (see _SessionEvent/CompletedTake), so
+                # this only changes behavior for MIDI ones.
+                take_label = (
+                    take.synth_voice or take.instrument_label or instrument_label
+                    or take.instrument or instrument
+                )
                 take_full_name = take.instrument or instrument
 
                 # For a filter slot, the take belongs to whatever song got
