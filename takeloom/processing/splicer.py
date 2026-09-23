@@ -198,6 +198,11 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
     session_video_raw = session_dir / "session_video_raw.mp4"
     session_mix_flac = session_dir / "session_mix.flac"
     have_video = session_video_raw.exists() and session_mix_flac.exists()
+    # Only present for a MIDI-recorded session (backend.py's _end_session
+    # writes it, from audio/midi_log.py's MidiEventLog) — absent for an
+    # analog one, and for a MIDI session recorded before this existed.
+    session_midi = session_dir / "session_midi.mid"
+    have_midi = session_midi.exists()
 
     completed = parse_session_log(data)
     filter_slot_draws = data.get("filter_slot_draws", {})
@@ -299,9 +304,29 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                     )
                     videos += has_video
 
+                # Only for a MIDI take (synth_voice set — see take_label
+                # above): the same [start, end) range, cut from the raw
+                # MIDI performance instead of the rendered audio, so the
+                # take can later be revoiced (re-rendered through a
+                # different synth voice) without re-recording. See
+                # audio/midi_log.py's slice_midi_file for how the cut
+                # itself stays musically correct at the boundaries (notes/
+                # sustain/volume/expression already active going in,
+                # notes still held closed off going out).
+                has_midi = False
+                if take.synth_voice and have_midi:
+                    from ..audio.midi_log import slice_midi_file
+                    slice_midi_file(
+                        session_midi, start, end, sample_rate,
+                        completed_dir / take_filename(
+                            track_name, take_label, take_num, take_source, take_backing_track, "mid",
+                        ),
+                    )
+                    has_midi = True
+
                 take_info = TakeInfo(
                     instrument=take_label, take_number=take_num, filename=flac_name, has_video=has_video,
-                    input_label=take.input_label or input_label,
+                    has_midi=has_midi, input_label=take.input_label or input_label,
                 )
                 if slot.is_inspiration_filter:
                     # Recorded into the shared vault-wide index (vault.py),

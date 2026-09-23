@@ -1173,6 +1173,12 @@ class _ActiveSession:
     # manual reselect) gets the same resolved track back rather than a
     # fresh random draw each time.
     resolved_filter_picks: dict = field(default_factory=dict)
+    # Raw MIDI performance captured alongside the audio (see audio/
+    # midi_log.py) when `inst.is_midi` — None for an analog instrument,
+    # where the concept doesn't apply. Written out to session_midi.mid
+    # at session end (_end_session) and later sliced per-take by
+    # processing/splicer.py, so a completed take can be revoiced later.
+    midi_log: object | None = None
 
 
 @dataclass
@@ -1824,16 +1830,17 @@ class LocalBackend(Backend):
         self, project: Project, track_name: str, new_instrument: str, take: TakeInfo, source: str,
         backing_track: str,
     ) -> TakeInfo:
-        """Rename a completed take's audio (and video, if present) file(s)
-        on disk to new_instrument's naming convention, returning the new
-        TakeInfo — reassign_take's two cases (an ordinary setlist track,
-        and a track drawn from an inspiration filter slot) do this
+        """Rename a completed take's audio (and video/MIDI, if present)
+        file(s) on disk to new_instrument's naming convention, returning
+        the new TakeInfo — reassign_take's two cases (an ordinary setlist
+        track, and a track drawn from an inspiration filter slot) do this
         identical file move; only where the resulting TakeInfo then gets
         stored differs."""
         from .utils import next_take_number, take_filename
         old_stem = Path(take.filename).stem
         old_audio_path = project.completed_takes_dir / take.filename
         old_video_path = project.completed_takes_dir / f"{old_stem}.mp4"
+        old_midi_path = project.completed_takes_dir / f"{old_stem}.mid"
         ext = Path(take.filename).suffix.lstrip(".") or "flac"
 
         new_take_number = next_take_number(project.completed_takes_dir, track_name, new_instrument)
@@ -1841,16 +1848,20 @@ class LocalBackend(Backend):
         new_stem = Path(new_filename).stem
         new_audio_path = project.completed_takes_dir / new_filename
         new_video_path = project.completed_takes_dir / f"{new_stem}.mp4"
+        new_midi_path = project.completed_takes_dir / f"{new_stem}.mid"
 
         if old_audio_path.exists():
             shutil.move(str(old_audio_path), str(new_audio_path))
         has_video = take.has_video and old_video_path.exists()
         if has_video:
             shutil.move(str(old_video_path), str(new_video_path))
+        has_midi = take.has_midi and old_midi_path.exists()
+        if has_midi:
+            shutil.move(str(old_midi_path), str(new_midi_path))
 
         return TakeInfo(
             instrument=new_instrument, take_number=new_take_number, filename=new_filename,
-            volume=take.volume, has_video=has_video, input_label=take.input_label,
+            volume=take.volume, has_video=has_video, has_midi=has_midi, input_label=take.input_label,
         )
 
     def _update_session_take_snapshot(
@@ -2335,6 +2346,7 @@ class LocalBackend(Backend):
     def _build_engine_for_instrument(
         self, config: StudioConfig, inst: Instrument, *,
         monitor_instrument: bool, instrument_volume: float | None = None,
+        midi_log: "MidiEventLog | None" = None,
     ) -> tuple[object, object | None, object | None]:
         """Build (but don't start) an AudioEngine for `inst`, branching on
         whether it's MIDI-driven (see config.Instrument.is_midi) or an
@@ -2363,6 +2375,14 @@ class LocalBackend(Backend):
         only start_video_check does (a fixed 1.0 — Video Check has no
         Instrument Volume dial of its own to reflect).
 
+        `midi_log`, only meaningful when `inst.is_midi`: every note/
+        sustain/volume/expression event MidiInput delivers also gets
+        appended there, frame-stamped against `engine.session_frames` —
+        see audio/midi_log.py. Only _begin_session_locked passes one (a
+        real recording is the only case that ever produces a completed
+        take worth revoicing later); monitoring/video-check/latency-test
+        leave it None and nothing is captured.
+
         Raises BackendError on any device-resolution failure (bad output
         device, bad/unavailable MIDI device, bad input channel/device for
         an analog instrument) — every existing call site already either
@@ -2380,24 +2400,13 @@ class LocalBackend(Backend):
         out_info = sd.query_devices(out_dev, "output")
         output_channels = min(config.output_channels, out_info["max_output_channels"])
 
-        midi_input = None
         input_info = None
         synth = None
         if inst.is_midi:
             from .audio.synth import Synth
-            from .audio.midi_input import MidiInput, MidiUnavailableError
             synth = Synth(config.sample_rate, voice=inst.synth_voice)
             in_dev, input_channels = self._resolve_midi_route(config, sd, resolve_device)
             monitor_channel = 0
-            try:
-                midi_input = MidiInput(
-                    inst.midi_device, on_note_on=synth.note_on, on_note_off=synth.note_off,
-                    on_sustain=synth.set_sustain, on_volume=synth.set_channel_volume,
-                    on_expression=synth.set_expression, volume_cc=inst.volume_cc,
-                )
-            except MidiUnavailableError as e:
-                raise BackendError(str(e)) from e
-            midi_input.start()
         else:
             input_info = config.resolve_input(inst.input_label)
             if input_info is None:
@@ -2425,6 +2434,54 @@ class LocalBackend(Backend):
             monitor_instrument=monitor_instrument, instrument_volume=instrument_volume,
             synth=synth,
         )
+
+        midi_input = None
+        if inst.is_midi:
+            from .audio.midi_input import MidiInput, MidiUnavailableError
+
+            # Built after `engine` exists (unlike everything else above,
+            # which only has to precede it) specifically so these closures
+            # can read engine.session_frames — the same frame counter
+            # process_session's audio splicing keys off of, so a take's
+            # sliced-out .mid (see audio/midi_log.py) lines up with its
+            # .flac exactly. Each still forwards to the Synth exactly as
+            # before; midi_log is only ever an additional tap, never a
+            # substitute.
+            def on_note_on(note: int, velocity: int) -> None:
+                if midi_log is not None:
+                    midi_log.append(engine.session_frames, "note_on", note=note, velocity=velocity)
+                synth.note_on(note, velocity)
+
+            def on_note_off(note: int) -> None:
+                if midi_log is not None:
+                    midi_log.append(engine.session_frames, "note_off", note=note)
+                synth.note_off(note)
+
+            def on_sustain(down: bool) -> None:
+                if midi_log is not None:
+                    midi_log.append(engine.session_frames, "sustain", down=down)
+                synth.set_sustain(down)
+
+            def on_volume(value: int) -> None:
+                if midi_log is not None:
+                    midi_log.append(engine.session_frames, "volume", value=value)
+                synth.set_channel_volume(value)
+
+            def on_expression(value: int) -> None:
+                if midi_log is not None:
+                    midi_log.append(engine.session_frames, "expression", value=value)
+                synth.set_expression(value)
+
+            try:
+                midi_input = MidiInput(
+                    inst.midi_device, on_note_on=on_note_on, on_note_off=on_note_off,
+                    on_sustain=on_sustain, on_volume=on_volume,
+                    on_expression=on_expression, volume_cc=inst.volume_cc,
+                )
+            except MidiUnavailableError as e:
+                raise BackendError(str(e)) from e
+            midi_input.start()
+
         return engine, midi_input, input_info
 
     def start_monitoring(self) -> bool:
@@ -4123,8 +4180,17 @@ class LocalBackend(Backend):
         except Exception as e:
             raise BackendError(f"sounddevice unavailable: {e}") from e
 
+        # Only a real recording session captures raw MIDI alongside the
+        # audio — see audio/midi_log.py and _end_session below. None for
+        # an analog instrument; _build_engine_for_instrument ignores it
+        # entirely in that case.
+        midi_log = None
+        if inst.is_midi:
+            from .audio.midi_log import MidiEventLog
+            midi_log = MidiEventLog()
+
         engine, midi_input, input_info = self._build_engine_for_instrument(
-            config, inst, monitor_instrument=self._monitoring_mode == "production",
+            config, inst, monitor_instrument=self._monitoring_mode == "production", midi_log=midi_log,
         )
         try:
             self._apply_hardware_direct_monitor(
@@ -4259,6 +4325,7 @@ class LocalBackend(Backend):
             mix_start_frame=mix_start_frame, stream_feeder=stream_feeder,
             youtube_broadcast_id=youtube_broadcast_id,
             resolved_filter_picks=prefetched_picks,
+            midi_log=midi_log,
         )
         self._log_session_event("session_start", f"instrument={inst.full_name}")
 
@@ -4319,6 +4386,20 @@ class LocalBackend(Backend):
                 self._emit("preview_resumed", {})
             if session.youtube_broadcast_id is not None:
                 self._complete_youtube_broadcast(self.get_config(), session.youtube_broadcast_id)
+
+            if session.midi_log:
+                # The whole session's raw MIDI performance, same spirit
+                # (and same session-frame timeline) as session.flac —
+                # processing/splicer.py slices a take's own range out of
+                # this alongside its audio, so it can be revoiced later
+                # (re-rendered through a different synth voice) without
+                # re-recording. Quick (in-memory to file), so it belongs
+                # here with the rest of the fast finalization, not the
+                # background processing thread.
+                from .audio.midi_log import write_midi_file
+                write_midi_file(
+                    session.midi_log.events(), session.engine.sample_rate, session.session_dir / "session_midi.mid",
+                )
 
             self._save_session_log(session)
             self._emit("recording_status", {

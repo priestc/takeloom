@@ -171,6 +171,9 @@ def _files_used_by_track(project: Project, track: TrackEntry, config: StudioConf
         if take.has_video:
             video_name = Path(take.filename).stem + ".mp4"
             needed.add((project.completed_takes_dir / video_name, f"completed_takes/{video_name}"))
+        if take.has_midi:
+            midi_name = Path(take.filename).stem + ".mid"
+            needed.add((project.completed_takes_dir / midi_name, f"completed_takes/{midi_name}"))
 
     add_backing(track.backing_track)
     for take in track.preferred_takes.values():

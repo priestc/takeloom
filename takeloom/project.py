@@ -27,10 +27,15 @@ class TakeInfo:
     take_number: int
     filename: str
     volume: float = 1.0
-    # Derived fresh from disk by Project.open() (see _sync_has_video) rather
+    # Derived fresh from disk by Project.open() (see _sync_derived_take_flags) rather
     # than trusted as persisted truth — self-heals if the video mux failed,
     # was never attempted, or the .mp4 was later removed by hand.
     has_video: bool = False
+    # Same self-healing treatment as has_video, for the take's sliced-out
+    # raw MIDI performance (see audio/midi_log.py/processing/splicer.py) —
+    # only ever true for a MIDI take, and only once revoicing (re-
+    # rendering through a different synth voice) is built to use it.
+    has_midi: bool = False
     # Which physical input (an InputLabel.label — e.g. "guitar-cable", not
     # an instrument identity) actually recorded this take, captured at
     # record time from the session (see backend.py's _SessionEvent/
@@ -188,19 +193,20 @@ class Project:
         if proj.setlist_path.exists():
             data = json.loads(proj.setlist_path.read_text())
             proj.setlist = Setlist.from_dict(data)
-            proj._sync_has_video()
+            proj._sync_derived_take_flags()
         return proj
 
-    def _sync_has_video(self) -> None:
-        """Set each take's has_video flag from whether its companion .mp4
-        actually exists in completed_takes_dir, rather than from whatever
-        was last persisted — so a take is correctly flagged "audio only"
-        whether video was never recorded, muxing failed, or the file was
-        since deleted."""
+    def _sync_derived_take_flags(self) -> None:
+        """Set each take's has_video/has_midi flags from whether its
+        companion .mp4/.mid actually exist in completed_takes_dir, rather
+        than from whatever was last persisted — so a take is correctly
+        flagged "audio only" whether video/MIDI was never recorded (or,
+        for video, muxing failed), or the file was since deleted."""
         for track in self.setlist.tracks:
             for take in track.preferred_takes.values():
-                video_path = self.completed_takes_dir / (Path(take.filename).stem + ".mp4")
-                take.has_video = video_path.exists()
+                stem = Path(take.filename).stem
+                take.has_video = (self.completed_takes_dir / f"{stem}.mp4").exists()
+                take.has_midi = (self.completed_takes_dir / f"{stem}.mid").exists()
 
     @classmethod
     def create_new(cls, parent_dir: Path, name: str, vault_root: Path) -> Project:
