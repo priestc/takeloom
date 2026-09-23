@@ -239,12 +239,14 @@ class Backend(ABC):
         `date` (session_log.json's own wall_time, not derived from the
         directory name, which is filename-sanitized and thus lossy),
         `project`, `instrument`, `track_names` (deduplicated, from the
-        session's logged events), and `status_summary` (a short rollup
-        like "2 completed, 1 skipped" — see get_session_detail's `status`
-        for the per-track vocabulary this counts). Only sessions still
-        present on local disk — one already pruned to a remote-only vault
-        (session_vault_mode "remote", see vault.sync_and_maybe_prune)
-        won't show up here."""
+        session's logged events), `status_summary` ("N completed takes",
+        or "Pending processing" before process_session has run — see
+        _session_summary), and `duration` (m:ss, or h:mm:ss past an
+        hour — the last logged event's timestamp, i.e. time elapsed
+        since the session started). Only sessions still present on local
+        disk — one already pruned to a remote-only vault (session_vault_
+        mode "remote", see vault.sync_and_maybe_prune) won't show up
+        here."""
         ...
 
     @abstractmethod
@@ -1744,22 +1746,41 @@ class LocalBackend(Backend):
         return "not recorded"
 
     @staticmethod
+    def _format_duration(seconds: float) -> str:
+        total = max(0, int(round(seconds)))
+        hours, remainder = divmod(total, 3600)
+        minutes, secs = divmod(remainder, 60)
+        if hours:
+            return f"{hours}:{minutes:02d}:{secs:02d}"
+        return f"{minutes}:{secs:02d}"
+
+    @staticmethod
     def _session_summary(session_dir_name: str, data: dict) -> dict:
         events = data.get("events", [])
         track_names: list[str] = []
-        track_index_by_name: dict[str, int] = {}
         for e in events:
             name = e.get("track_name")
             if name and name not in track_names:
                 track_names.append(name)
-                track_index_by_name[name] = e.get("track_index")
-        counts: dict[str, int] = {}
-        for track_index in track_index_by_name.values():
-            if track_index is None:
-                continue
-            status = LocalBackend._track_take_status(data, track_index)
-            counts[status] = counts.get(status, 0) + 1
-        status_summary = ", ".join(f"{n} {status}" for status, n in counts.items())
+
+        # "takes" (process_session's snapshot — see get_session_detail's
+        # docstring) absent entirely means this session hasn't been
+        # through processing yet, same "pending" case _track_take_status
+        # reports per-track; present (even if every value is empty)
+        # means it has, so a plain count of every take actually filed —
+        # a track revisited more than once in the same session can have
+        # more than one — is the real answer.
+        if "takes" in data:
+            take_count = sum(len(v) for v in data.get("takes", {}).values())
+            status_summary = f"{take_count} completed take" + ("" if take_count == 1 else "s")
+        else:
+            status_summary = "Pending processing"
+
+        # events[-1]'s timestamp (seconds since session start — see
+        # _SessionEvent) rather than a wall-clock difference, so it's
+        # unaffected by the session spanning a DST change or similar.
+        duration = LocalBackend._format_duration(events[-1]["timestamp"]) if events else ""
+
         return {
             "session_dir": session_dir_name,
             # events[0]'s wall_time (real, human-typed timestamp) rather
@@ -1770,6 +1791,7 @@ class LocalBackend(Backend):
             "instrument": data.get("instrument", ""),
             "track_names": track_names,
             "status_summary": status_summary,
+            "duration": duration,
         }
 
     def get_session_detail(self, session_dir: str) -> dict:

@@ -89,20 +89,23 @@ class SessionsFrame(ttk.Frame):
         tree_frame = ttk.Frame(self)
         tree_frame.pack(fill="x")
         self.tree = ttk.Treeview(
-            tree_frame, columns=("date", "project", "instrument", "status"),
+            tree_frame, columns=("date", "duration", "project", "instrument", "status"),
             show="headings", height=10, selectmode="browse",
         )
         self.tree.heading("date", text="Date")
+        self.tree.heading("duration", text="Duration")
         self.tree.heading("project", text="Project")
         self.tree.heading("instrument", text="Instrument")
         self.tree.heading("status", text="Status")
         self.tree.column("date", width=150)
+        self.tree.column("duration", width=80, anchor="e")
         self.tree.column("project", width=140)
         self.tree.column("instrument", width=100)
-        self.tree.column("status", width=360)
+        self.tree.column("status", width=280)
         for session in self._sessions:
             self.tree.insert("", "end", iid=session["session_dir"], values=(
-                session["date"], session["project"], session["instrument"], session.get("status_summary", ""),
+                session["date"], session.get("duration", ""), session["project"], session["instrument"],
+                session.get("status_summary", ""),
             ))
         self.tree.pack(side="left", fill="x", expand=True)
         scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
