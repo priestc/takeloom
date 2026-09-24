@@ -228,7 +228,7 @@ class SessionsFrame(ttk.Frame):
     }
 
     _NAME_COLOR = "#000000"
-    _NAME_COLOR_SKIPPED = "#a0a0a0"
+    _NAME_COLOR_ABANDONED = "#a0a0a0"
 
     def _build_track_row(self, tracks_frame: ttk.Frame, grid_row: int, project_name: str, track: dict) -> None:
         """One song, one grid row in tracks_frame: name (column 0),
@@ -236,11 +236,13 @@ class SessionsFrame(ttk.Frame):
         this same row rather than rows of their own — see the module
         docstring's "one line per song")."""
         status = track.get("status", "not recorded")
-        skipped = status == "skipped"
-        # Greyed out, name included — a skipped song was passed over
-        # entirely, nothing about it (not even its title) is worth
-        # calling out the same as a song that was actually played.
-        name_color = self._NAME_COLOR_SKIPPED if skipped else self._NAME_COLOR
+        # Greyed out, name included — a skipped or stopped-early song
+        # never became a real take, so nothing about it (not even its
+        # title) is worth calling out the same as one that was actually
+        # completed. The status word itself keeps its own color either
+        # way, so the two are still tellable apart.
+        abandoned = status in ("skipped", "stopped early")
+        name_color = self._NAME_COLOR_ABANDONED if abandoned else self._NAME_COLOR
         ttk.Label(
             tracks_frame, text=track["track_name"], anchor="w", font=("TkDefaultFont", 10, "bold"),
             foreground=name_color,
