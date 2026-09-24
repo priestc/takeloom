@@ -182,17 +182,15 @@ class SessionsFrame(ttk.Frame):
         else:
             ttk.Label(tags_row, text="none of its own raw files locally", foreground="#888888").pack(side="left")
 
-        # One grid shared by every track and take row, not a separate grid
-        # per track — column 0 (track names) and column 1 (status text/
-        # take badges) each size to their widest cell across the *whole*
-        # session, so every badge lines up under the others regardless of
-        # how long any given track's own title is.
+        # One grid shared by every track — column 0 (track names) and
+        # column 1 (status text) each size to their widest cell across
+        # the *whole* session, so every status/take lines up under the
+        # others regardless of how long any given track's own title is.
         tracks_frame = ttk.Frame(self.detail_frame)
         tracks_frame.pack(fill="x")
         project_name = detail.get("project", "")
-        grid_row = 0
-        for track in detail.get("tracks", []):
-            grid_row = self._build_track_row(tracks_frame, grid_row, project_name, track)
+        for grid_row, track in enumerate(detail.get("tracks", [])):
+            self._build_track_row(tracks_frame, grid_row, project_name, track)
 
     @staticmethod
     def _session_info_lines(detail: dict) -> list[str]:
@@ -229,53 +227,63 @@ class SessionsFrame(ttk.Frame):
         "pending": ("Pending processing", "#2a6db0"),
     }
 
-    def _build_track_row(self, tracks_frame: ttk.Frame, grid_row: int, project_name: str, track: dict) -> int:
-        """Places this track (and each of its take rows) into tracks_frame's
-        shared grid starting at grid_row; returns the next free grid_row."""
+    _NAME_COLOR = "#000000"
+    _NAME_COLOR_SKIPPED = "#a0a0a0"
+
+    def _build_track_row(self, tracks_frame: ttk.Frame, grid_row: int, project_name: str, track: dict) -> None:
+        """One song, one grid row in tracks_frame: name (column 0),
+        status (column 1), every take it has, if any (column 2, all on
+        this same row rather than rows of their own — see the module
+        docstring's "one line per song")."""
+        status = track.get("status", "not recorded")
+        skipped = status == "skipped"
+        # Greyed out, name included — a skipped song was passed over
+        # entirely, nothing about it (not even its title) is worth
+        # calling out the same as a song that was actually played.
+        name_color = self._NAME_COLOR_SKIPPED if skipped else self._NAME_COLOR
         ttk.Label(
             tracks_frame, text=track["track_name"], anchor="w", font=("TkDefaultFont", 10, "bold"),
-        ).grid(row=grid_row, column=0, sticky="w", pady=(6, 0))
+            foreground=name_color,
+        ).grid(row=grid_row, column=0, sticky="w", pady=3)
 
+        status_text, status_color = self._STATUS_STYLES.get(status, ("", "#888888"))
         takes = track.get("takes", [])
-        status_text, status_color = self._STATUS_STYLES.get(track.get("status", "not recorded"), ("", "#888888"))
-        if track.get("status") == "completed" and len(takes) > 1:
+        if status == "completed" and len(takes) > 1:
             status_text = f"{status_text} ({len(takes)} takes)"
         ttk.Label(tracks_frame, text=status_text, foreground=status_color).grid(
-            row=grid_row, column=1, sticky="w", padx=(8, 0), pady=(6, 0)
+            row=grid_row, column=1, sticky="w", padx=(8, 0), pady=3
         )
-        grid_row += 1
 
-        # A track normally has one take per instrument that's actually
-        # recorded it — one row per (instrument, take) currently on file,
-        # so a track with takes under more than one instrument doesn't
-        # hide any of them.
-        for take in takes:
-            self._build_take_row(tracks_frame, grid_row, project_name, take)
-            grid_row += 1
-        return grid_row
+        if takes:
+            takes_row = ttk.Frame(tracks_frame)
+            takes_row.grid(row=grid_row, column=2, sticky="w", padx=(8, 0), pady=3)
+            # A track normally has one take per instrument that's
+            # actually recorded it — everything for one played more than
+            # once in the same session still fits on this one line, not
+            # hiding any of them.
+            for take in takes:
+                self._build_take_controls(takes_row, project_name, take)
 
-    def _build_take_row(self, tracks_frame: ttk.Frame, grid_row: int, project_name: str, take: dict) -> None:
+    def _build_take_controls(self, row: ttk.Frame, project_name: str, take: dict) -> None:
         old_instrument = take["instrument"]  # a label — takes are filed by label
-        # Gridded into tracks_frame's column 1 (see _build_track_row) so
-        # it lines up under every other track's own take rows, not just
-        # this track's own name in column 0; its own contents are still
-        # packed, same as before — grid/pack can mix freely as long as
-        # they're never both used directly on the same parent's children.
-        row = ttk.Frame(tracks_frame)
-        row.grid(row=grid_row, column=1, sticky="w", pady=1)
+        # Its own sub-frame per take, packed left within takes_row — more
+        # than one take on the same line still reads as separate groups
+        # rather than one run-on badge/number/button sequence.
+        cell = ttk.Frame(row)
+        cell.pack(side="left", padx=(0, 14))
         # Label called out as its own colored badge — this is what
         # actually answers "what was this filed under" at a glance,
         # including for a take pulled in from a filter-slot draw's shared
         # inspiration-take index — and the same color for a given label
         # everywhere it's shown (see instrument_colors.py) makes it a
         # fast visual scan across rows.
-        make_label_badge(row, old_instrument).pack(side="left", padx=(0, 6))
+        make_label_badge(cell, old_instrument).pack(side="left", padx=(0, 6))
         # Just "Take N", not the take's full filename — the badge already
         # gives the label, the track name is right there in column 0, and
         # the rest of the filename (source tag, inspiration id) is noise
         # nobody reads here; the actual file only matters to "▶ Play".
-        ttk.Label(row, text=f"Take {take['take_number']}", foreground="#666666").pack(side="left", padx=(0, 8))
-        self._build_play_controls(row, project_name, take["filename"], old_instrument)
+        ttk.Label(cell, text=f"Take {take['take_number']}", foreground="#666666").pack(side="left", padx=(0, 8))
+        self._build_play_controls(cell, project_name, take["filename"], old_instrument)
 
     def _build_play_controls(self, row: ttk.Frame, project_name: str, filename: str, label: str) -> None:
         # Read-only — opens the take in the OS's default player
