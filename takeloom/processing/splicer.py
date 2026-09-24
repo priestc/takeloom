@@ -29,6 +29,15 @@ discarded, except when it already ran past MIN_KEPT_TAKE_SECONDS — losing
 that much performance to a slip of the finger is worse than an extra
 unwanted take in the list.
 
+A clean shutdown always logs at least song_stopped/session_end, so a
+record_start/back_to_start with no closing event at all anywhere after
+it in the log means the process died mid-session instead (a crash, or
+power loss) — parse_session_log's total_frames closes that one out too,
+at whatever session.flac actually captured before it happened, under a
+much lower bar (MIN_RECOVERED_TAKE_SECONDS) than an ordinary abandoned
+segment: there was no decision to abandon it, so "recover as much as
+possible" wins over the same 10-minute rule.
+
 A setlist "filter slot" (TrackEntry.is_inspiration_filter) complicates
 `track_index` slightly: it still points at the slot's own (permanent)
 position in the setlist, but the take actually belongs to whichever song
@@ -64,6 +73,15 @@ from ..vault import record_inspiration_take, vault_root
 # An abandoned (skipped/stopped) play-through this long is kept as a take
 # anyway — see module docstring.
 MIN_KEPT_TAKE_SECONDS = 10 * 60
+# A segment recovered from a log that never closed it at all (see
+# parse_session_log's total_frames) is kept at a much lower bar than an
+# ordinary abandoned one — there was no decision to abandon it, just a
+# crash/power loss, so "recover as much as possible" means keeping
+# whatever got captured rather than applying the same 10-minute rule
+# meant for a genuinely walked-away-from take. Still not zero: a
+# fraction-of-a-second segment (the crash landing right at record_start)
+# isn't a take worth surfacing.
+MIN_RECOVERED_TAKE_SECONDS = 1.0
 
 
 @dataclass
@@ -99,9 +117,25 @@ class CompletedTake:
     synth_voice: str = ""
 
 
-def parse_session_log(data: dict) -> list[CompletedTake]:
+def parse_session_log(data: dict, total_frames: int | None = None) -> list[CompletedTake]:
     """Identify completed takes from a session log's events — see the
-    module docstring for the rules."""
+    module docstring for the rules.
+
+    `total_frames` (the actual number of frames captured in session.flac,
+    from a plain sf.info() query — process_session's own job, this
+    function never touches the filesystem) closes out whatever was still
+    open when the event log itself just stops, with no closing event at
+    all — track_skipped/song_stopped/session_end are always logged by a
+    clean shutdown (see backend.py's _end_session), so their total
+    absence after an open record_start/back_to_start means the app was
+    killed or lost power mid-session instead. Closed under the exact
+    same "kept only if it ran long enough" rule as any other abandoned
+    segment (never a guaranteed keep just because it's the crash-
+    recovery case) — and using the audio file's own real length, not
+    any frame number out of the log itself, which necessarily stops
+    before whatever was captured in the moments right before the crash.
+    None (the default) skips this entirely, e.g. for a log that's
+    already known to end cleanly."""
     sample_rate = data.get("sample_rate") or 48000
     completed: list[CompletedTake] = []
 
@@ -114,12 +148,12 @@ def parse_session_log(data: dict) -> list[CompletedTake]:
     input_label = ""
     synth_voice = ""
 
-    def close_segment(end_frame: int | None, natural_end: bool) -> None:
+    def close_segment(end_frame: int | None, natural_end: bool, min_seconds: float = MIN_KEPT_TAKE_SECONDS) -> None:
         nonlocal start_frame
         if start_frame is None or end_frame is None:
             start_frame = None
             return
-        long_enough = (end_frame - start_frame) / sample_rate >= MIN_KEPT_TAKE_SECONDS
+        long_enough = (end_frame - start_frame) / sample_rate >= min_seconds
         if natural_end or long_enough:
             completed.append(CompletedTake(
                 track_index=track_index, track_name=track_name,
@@ -150,6 +184,14 @@ def parse_session_log(data: dict) -> list[CompletedTake]:
             close_segment(frame, natural_end=True)
         elif etype in ("track_skipped", "song_stopped", "track_loaded", "session_end"):
             close_segment(frame, natural_end=False)
+
+    # See total_frames' own docstring above — nothing but an abrupt
+    # process death leaves a segment open with no closing event at all.
+    # MIN_RECOVERED_TAKE_SECONDS, not MIN_KEPT_TAKE_SECONDS — see that
+    # constant's own comment for why a crash gets a much lower bar than
+    # an ordinary abandoned segment.
+    if total_frames is not None:
+        close_segment(total_frames, natural_end=False, min_seconds=MIN_RECOVERED_TAKE_SECONDS)
 
     return completed
 
@@ -204,7 +246,19 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
     session_midi = session_dir / "session_midi.mid"
     have_midi = session_midi.exists()
 
-    completed = parse_session_log(data)
+    # A plain metadata query, not a full open — safe to attempt even on
+    # a file an abrupt process death may have left without a proper
+    # STREAMINFO finalization; None (rather than raising) if session.
+    # flac doesn't exist at all, or is corrupt enough that even this
+    # fails, either way just skipping the crash-recovery close below.
+    total_frames = None
+    if session_flac.exists():
+        try:
+            total_frames = sf.info(str(session_flac)).frames
+        except Exception:
+            total_frames = None
+
+    completed = parse_session_log(data, total_frames=total_frames)
     filter_slot_draws = data.get("filter_slot_draws", {})
 
     saved = 0

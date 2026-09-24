@@ -81,6 +81,8 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
         return {"sessions": backend.list_sessions()}
     if op == "get_session_detail":
         return backend.get_session_detail(args["session_dir"])
+    if op == "process_pending_session":
+        return {"summary": backend.process_pending_session(args["session_dir"])}
     if op == "correct_session_instrument":
         backend.correct_session_instrument(args["session_dir"], args["new_instrument"])
         return {}

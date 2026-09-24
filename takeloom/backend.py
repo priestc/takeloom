@@ -33,7 +33,7 @@ from .audio.pitch import effective_tuning, nearest_target
 from .audio.scarlett2_direct_monitor import FOCUSRITE_DEVICE_NAME, set_channel_gain
 from .config import DEFAULT_CONFIG_PATH, INSTRUMENT_LABELS, MAX_INSTRUMENT_VOLUME_PERCENT, Instrument, StudioConfig
 from .project import Project, Setlist, TakeInfo, TrackEntry
-from .utils import ensure_dir, sanitize_filename, timestamp_now, wall_timestamp
+from .utils import atomic_write_text, ensure_dir, sanitize_filename, timestamp_now, wall_timestamp
 
 
 class BackendError(Exception):
@@ -276,11 +276,36 @@ class Backend(ABC):
 
         Also adds `date_display` (the session's start time, spelled out —
         see _format_session_datetime), `duration` (m:ss/h:mm:ss, time
-        elapsed since it started), and `vault_tags` (which of this
-        session's own raw files — "flac"/"midi"/"video" — are still
-        present in the local vault right now; not the same question as a
-        take's own has_video/has_midi, which is about a file already
-        filed into a project)."""
+        elapsed since it started), `vault_tags` (which of this session's
+        own raw files — "flac"/"midi"/"video" — are still present in the
+        local vault right now; not the same question as a take's own
+        has_video/has_midi, which is about a file already filed into a
+        project), and `processed` (whether process_session has been run
+        on this session at all yet — the same thing every per-track
+        `status` above being "pending" would already tell you, just
+        answered once for the whole session rather than per track, for
+        deciding whether to show process_pending_session's button)."""
+        ...
+
+    @abstractmethod
+    def process_pending_session(self, session_dir: str) -> str:
+        """Run processing/splicer.py's process_session on `session_dir`
+        right now, synchronously, rather than waiting for whatever would
+        normally trigger it — the session having just ended live in this
+        same process (see backend.py's _end_session/_process_session).
+        Covers two cases: a session process_session simply hasn't reached
+        yet for any reason, and recovering one whose owning process died
+        mid-recording (a crash, power loss) before it ever got the
+        chance — parse_session_log tolerates a log that just stops with
+        no closing event at all for exactly this reason (see its
+        docstring), closing out whatever was still open using session.
+        flac's own actual length rather than losing it outright. Also
+        runs vault.sync_and_maybe_prune afterward, same as the live path,
+        so a "remote" vault session gets pushed off local disk the same
+        way it normally would once its takes are safely spliced out.
+        Raises BackendError if `session_dir` isn't available locally
+        (nothing to process from), or is the session currently actively
+        recording (wait for it to end first)."""
         ...
 
     @abstractmethod
@@ -1858,6 +1883,7 @@ class LocalBackend(Backend):
         return {
             **data, "session_dir": session_dir, "tracks": tracks,
             "date_display": date_display, "duration": duration, "vault_tags": vault_tags,
+            "processed": "takes" in data,
         }
 
     @staticmethod
@@ -1872,6 +1898,21 @@ class LocalBackend(Backend):
         except ValueError:
             return wall_time
         return dt.strftime("%A, %B %-d, %Y at %-I:%M %p")
+
+    def process_pending_session(self, session_dir: str) -> str:
+        config = self.get_config()
+        session_dir_path = self._local_session_dir_path(session_dir)
+        if session_dir_path is None:
+            raise BackendError(f"Session '{session_dir}' isn't available locally to process.")
+        with self._record_lock:
+            active = self._active_session
+            if active is not None and active.session_dir == session_dir_path:
+                raise BackendError("This session is still recording — wait for it to end first.")
+        from .processing.splicer import process_session
+        summary = process_session(session_dir=session_dir_path, config=config)
+        from .vault import sync_and_maybe_prune
+        sync_and_maybe_prune(config, session_dir_path)
+        return summary
 
     def correct_session_instrument(self, session_dir: str, new_instrument: str) -> None:
         config = self.get_config()
@@ -4148,6 +4189,17 @@ class LocalBackend(Backend):
             input_label=session.inst.input_label,
             synth_voice=synth_voice,
         ))
+        # Written to disk on every event, not just once at clean session
+        # end — session_log.json used to only exist at all once
+        # _end_session ran, so a crash (power loss, the process being
+        # killed) mid-session lost the *entire* event log, even though
+        # the audio itself was very likely still fine on disk: with
+        # nothing to replay, process_session had nothing to work from.
+        # Infrequent enough (song-transition-level events, never the
+        # audio callback) that writing here costs nothing that matters,
+        # and _save_session_log already builds its dict fresh from
+        # `session` every time, so it's already safe to call mid-session.
+        self._save_session_log(session)
 
     def begin_session(self, project_name: str, instrument_name: str) -> None:
         with self._record_lock:
@@ -4527,6 +4579,14 @@ class LocalBackend(Backend):
         return self._active_session is not None
 
     def _save_session_log(self, session: "_ActiveSession") -> Path | None:
+        """Write session_log.json fresh from `session`'s current state —
+        called after every event (see _log_session_event), not just once
+        at clean session end, so a crash mid-session leaves behind
+        whatever was true as of the last event rather than nothing at
+        all. atomic_write_text so a crash *during* this specific write
+        can't leave a truncated/corrupt JSON file behind either — the
+        previous, still-valid version stays in place until the new one
+        is fully written."""
         log_path = session.session_dir / "session_log.json"
         data = {
             "instrument": session.inst.full_name,
@@ -4554,5 +4614,5 @@ class LocalBackend(Backend):
             },
             "events": [e.to_dict() for e in session.events],
         }
-        log_path.write_text(json.dumps(data, indent=2))
+        atomic_write_text(log_path, json.dumps(data, indent=2))
         return log_path

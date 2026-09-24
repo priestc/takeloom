@@ -123,6 +123,15 @@ class RemoteBackend(Backend):
     def get_session_detail(self, session_dir: str) -> dict:
         return self._client.call("get_session_detail", {"session_dir": session_dir})
 
+    def process_pending_session(self, session_dir: str) -> str:
+        # DOWNLOAD_TIMEOUT, not LONG_TIMEOUT — splicing a long session
+        # (especially with video to mux) can genuinely take a while, the
+        # same "this is real work, not a quick lookup" category a
+        # download is in.
+        return self._client.call(
+            "process_pending_session", {"session_dir": session_dir}, timeout=DOWNLOAD_TIMEOUT,
+        )["summary"]
+
     def correct_session_instrument(self, session_dir: str, new_instrument: str) -> None:
         self._client.call(
             "correct_session_instrument", {"session_dir": session_dir, "new_instrument": new_instrument},
