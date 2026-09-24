@@ -272,7 +272,15 @@ class Backend(ABC):
         no take on file — abnormal once processing has run; usually
         means process_session raised partway through), or "pending"
         (this session hasn't been through process_session at all yet, so
-        nothing about its outcome is known — see _track_take_status)."""
+        nothing about its outcome is known — see _track_take_status).
+
+        Also adds `date_display` (the session's start time, spelled out —
+        see _format_session_datetime), `duration` (m:ss/h:mm:ss, time
+        elapsed since it started), and `vault_tags` (which of this
+        session's own raw files — "flac"/"midi"/"video" — are still
+        present in the local vault right now; not the same question as a
+        take's own has_video/has_midi, which is about a file already
+        filed into a project)."""
         ...
 
     @abstractmethod
@@ -1746,13 +1754,13 @@ class LocalBackend(Backend):
         return "not recorded"
 
     @staticmethod
-    def _format_duration(seconds: float) -> str:
-        total = max(0, int(round(seconds)))
-        hours, remainder = divmod(total, 3600)
-        minutes, secs = divmod(remainder, 60)
-        if hours:
-            return f"{hours}:{minutes:02d}:{secs:02d}"
-        return f"{minutes}:{secs:02d}"
+    def _format_session_duration(seconds: float) -> str:
+        """MM:SS, or utils.format_duration_hms's HH:MM:SS past an hour —
+        a session (unlike a single song, everything else in this app
+        uses utils.format_duration for) can run long enough to need it."""
+        from .utils import format_duration, format_duration_hms
+        seconds = max(0.0, seconds)
+        return format_duration_hms(seconds) if seconds >= 3600 else format_duration(seconds)
 
     @staticmethod
     def _session_summary(session_dir_name: str, data: dict) -> dict:
@@ -1779,7 +1787,7 @@ class LocalBackend(Backend):
         # events[-1]'s timestamp (seconds since session start — see
         # _SessionEvent) rather than a wall-clock difference, so it's
         # unaffected by the session spanning a DST change or similar.
-        duration = LocalBackend._format_duration(events[-1]["timestamp"]) if events else ""
+        duration = LocalBackend._format_session_duration(events[-1]["timestamp"]) if events else ""
 
         return {
             "session_dir": session_dir_name,
@@ -1821,7 +1829,49 @@ class LocalBackend(Backend):
                 "track_name": name, "is_filter_draw": is_filter_draw, "takes": takes, "status": status,
             })
 
-        return {**data, "session_dir": session_dir, "tracks": tracks}
+        events = data.get("events", [])
+        date_display = self._format_session_datetime(events[0]["wall_time"]) if events else ""
+        duration = self._format_session_duration(events[-1]["timestamp"]) if events else ""
+
+        # Which of this session's own raw vault files are still present
+        # on local disk right now — not the same question as a *take's*
+        # has_video/has_midi (project.py), which is about a take already
+        # filed into a project; this is about the session's own capture,
+        # before/regardless of whether it's ever been spliced into any.
+        # None of local/local-only if session_vault_mode "remote" already
+        # pruned it away after syncing (see vault.sync_and_maybe_prune) —
+        # not checked against the remote itself, so this only ever
+        # answers "is it here right now", same as has_video/has_midi.
+        vault_tags: list[str] = []
+        session_dir_path = self._local_session_dir_path(session_dir)
+        if session_dir_path is not None:
+            if (session_dir_path / "session.flac").exists():
+                vault_tags.append("flac")
+            if (session_dir_path / "session_midi.mid").exists():
+                vault_tags.append("midi")
+            if (
+                (session_dir_path / "session_video.mp4").exists()
+                or (session_dir_path / "session_video_raw.mp4").exists()
+            ):
+                vault_tags.append("video")
+
+        return {
+            **data, "session_dir": session_dir, "tracks": tracks,
+            "date_display": date_display, "duration": duration, "vault_tags": vault_tags,
+        }
+
+    @staticmethod
+    def _format_session_datetime(wall_time: str) -> str:
+        """wall_time (utils.wall_timestamp's "%Y-%m-%d %H:%M:%S") as
+        "Tuesday, September 23, 2026 at 5:14 PM" — falls back to
+        `wall_time` itself unparsed rather than raising, for a log
+        recorded before this format was in use."""
+        from datetime import datetime
+        try:
+            dt = datetime.strptime(wall_time, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return wall_time
+        return dt.strftime("%A, %B %-d, %Y at %-I:%M %p")
 
     def correct_session_instrument(self, session_dir: str, new_instrument: str) -> None:
         config = self.get_config()

@@ -149,10 +149,38 @@ class SessionsFrame(ttk.Frame):
         self._build_detail(detail)
 
     def _build_detail(self, detail: dict) -> None:
+        # Big — the session's start time, spelled out (day of week, date,
+        # time of day — see backend.py's _format_session_datetime), the
+        # one fact everything else here is organized under.
         ttk.Label(
-            self.detail_frame, text=f"Recorded as: {detail.get('instrument', '')}",
-            font=("TkDefaultFont", 11, "bold"),
-        ).pack(anchor="w", pady=(0, 10))
+            self.detail_frame, text=detail.get("date_display") or detail.get("date", ""),
+            font=("TkDefaultFont", 18, "bold"),
+        ).pack(anchor="w", pady=(0, 6))
+
+        # Everything else about the session, completionist — one line per
+        # fact, skipped entirely (not shown blank) when this particular
+        # session log doesn't have it.
+        info_frame = ttk.Frame(self.detail_frame)
+        info_frame.pack(anchor="w", pady=(0, 4))
+        instrument = detail.get("instrument", "")
+        if instrument:
+            label = detail.get("instrument_label", "")
+            text = f"Recorded as: {instrument} ({label})" if label else f"Recorded as: {instrument}"
+            ttk.Label(info_frame, text=text, font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        for line in self._session_info_lines(detail):
+            ttk.Label(info_frame, text=line, foreground="#444444").pack(anchor="w")
+
+        vault_tags = detail.get("vault_tags", [])
+        tags_row = ttk.Frame(self.detail_frame)
+        tags_row.pack(anchor="w", pady=(4, 12))
+        ttk.Label(tags_row, text="In vault: ", foreground="#444444").pack(side="left")
+        if vault_tags:
+            for tag in vault_tags:
+                ttk.Label(
+                    tags_row, text=f"[{tag}]", foreground="#2a6db0", font=("TkDefaultFont", 10, "bold"),
+                ).pack(side="left", padx=(0, 6))
+        else:
+            ttk.Label(tags_row, text="none of its own raw files locally", foreground="#888888").pack(side="left")
 
         # One grid shared by every track and take row, not a separate grid
         # per track — column 0 (track names) and column 1 (status text/
@@ -165,6 +193,29 @@ class SessionsFrame(ttk.Frame):
         grid_row = 0
         for track in detail.get("tracks", []):
             grid_row = self._build_track_row(tracks_frame, grid_row, project_name, track)
+
+    @staticmethod
+    def _session_info_lines(detail: dict) -> list[str]:
+        """Every other fact get_session_detail has about the session,
+        each its own line, skipped when this session log doesn't have
+        it — used right under the big date/instrument header."""
+        lines = []
+        if detail.get("musician"):
+            lines.append(f"Musician: {detail['musician']}")
+        studio_name = detail.get("studio_name", "")
+        studio_location = detail.get("studio_location", "")
+        if studio_name or studio_location:
+            studio = " — ".join(p for p in (studio_name, studio_location) if p)
+            lines.append(f"Studio: {studio}")
+        if detail.get("project"):
+            lines.append(f"Project: {detail['project']}")
+        if detail.get("duration"):
+            lines.append(f"Duration: {detail['duration']}")
+        if detail.get("sample_rate"):
+            lines.append(f"Sample rate: {detail['sample_rate']} Hz")
+        if detail.get("has_video"):
+            lines.append("Video: recorded")
+        return lines
 
     # Display text + color for each of get_session_detail's per-track
     # `status` values (see backend.py's _track_take_status for what each
