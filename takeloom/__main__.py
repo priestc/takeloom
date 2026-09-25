@@ -332,6 +332,31 @@ def server_command(disable_color: bool) -> None:
     backend = LocalBackend()
     listen_port = REMOTE_SERVER_PORT
 
+    # Same startup check as ui/app.py's _process_latest_session_if_pending
+    # (see its docstring): if the vault's own most recent session hasn't
+    # been through process_session yet — the ordinary case, or because
+    # the previous run was interrupted by a crash or power loss before it
+    # could finish — process it now. Blocking rather than backgrounded
+    # (unlike the GUI's version): this is a synchronous CLI startup with
+    # no event loop to keep responsive, and it has to finish before
+    # server.start() below so a connecting client never races a still-
+    # pending session. A failure is logged, never fatal to starting the
+    # server — recovering it stays possible later, it just doesn't block
+    # this launch either way.
+    try:
+        sessions = backend.list_sessions()
+    except BackendError as e:
+        log(f"Could not check for a pending session: {e}", err=True)
+    else:
+        latest = sessions[0] if sessions else None
+        if latest is not None and not latest.get("processed", True):
+            log(f"Processing last session ({latest.get('date', '')})...")
+            try:
+                summary = backend.process_pending_session(latest["session_dir"])
+                log(summary)
+            except BackendError as e:
+                log(f"Could not process last session '{latest['session_dir']}': {e}", err=True)
+
     # Deliberately no sleep_guard.track_backend(backend) here: a headless
     # server machine should be free to let its own screensaver/sleep kick
     # in regardless of recording state — only a UI actually being watched
