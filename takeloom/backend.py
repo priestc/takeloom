@@ -241,12 +241,15 @@ class Backend(ABC):
         `project`, `instrument`, `track_names` (deduplicated, from the
         session's logged events), `status_summary` ("N completed takes",
         or "Pending processing" before process_session has run — see
-        _session_summary), and `duration` (m:ss, or h:mm:ss past an
-        hour — the last logged event's timestamp, i.e. time elapsed
-        since the session started). Only sessions still present on local
-        disk — one already pruned to a remote-only vault (session_vault_
-        mode "remote", see vault.sync_and_maybe_prune) won't show up
-        here."""
+        _session_summary), `duration` (m:ss, or h:mm:ss past an hour —
+        the last logged event's timestamp, i.e. time elapsed since the
+        session started), and `processed` (the same thing status_summary
+        being "Pending processing" already tells you, as a plain bool —
+        see ui/app.py's startup check, which processes the vault's own
+        latest session automatically if this is ever False for it).
+        Only sessions still present on local disk — one already pruned
+        to a remote-only vault (session_vault_mode "remote", see vault.
+        sync_and_maybe_prune) won't show up here."""
         ...
 
     @abstractmethod
@@ -1825,6 +1828,7 @@ class LocalBackend(Backend):
             "track_names": track_names,
             "status_summary": status_summary,
             "duration": duration,
+            "processed": "takes" in data,
         }
 
     def get_session_detail(self, session_dir: str) -> dict:

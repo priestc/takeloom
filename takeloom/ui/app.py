@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
@@ -202,6 +203,64 @@ def handle_remote_disconnect(root: tk.Misc, app_state: AppState, host: str, port
         on_connected=lambda: _build_tabs(root, app_state, select_title="Record"),
         initial_status=f"Disconnected ({reason}) — reconnecting to {host}...",
     )
+
+
+def _process_latest_session_if_pending(root: tk.Misc, app_state: AppState, on_done: Callable[[], None]) -> None:
+    """Startup check, before the normal tabbed UI ever appears: if the
+    vault's own most recent session hasn't been through process_session
+    yet, do that now, with a placeholder screen up in the meantime.
+    Covers both the ordinary case (the app just hasn't gotten to it) and
+    recovering one left behind by a crash or power loss mid-recording —
+    nothing else ever retries a pending session on its own, so without
+    this it would just sit there until someone happened to notice (see
+    processing/splicer.py's total_frames for the recovery side of this).
+
+    Always local — `app_state.local_backend`, never a Remote connection:
+    "the vault" means this machine's own, and an "always connect" remote
+    terminal (see _run_always_remote) never reaches this function at all,
+    since it has no local recording of its own to have left pending.
+
+    Calls `on_done()` exactly once, unconditionally, whether a session
+    needed processing, processing succeeded, failed, or nothing was
+    found at all — this only ever delays reaching the normal UI, never
+    blocks it outright, since silently getting stuck here would be far
+    worse than a failed recovery attempt the operator can still retry
+    later from a still-pending session."""
+    backend = app_state.local_backend
+    placeholder = ttk.Frame(root)
+
+    def show_screen(latest: dict) -> None:
+        placeholder.pack(fill="both", expand=True, padx=16, pady=16)
+        ttk.Label(
+            placeholder, text="Processing last session...", font=("TkDefaultFont", 15, "bold"),
+        ).pack(pady=(120, 4))
+        ttk.Label(placeholder, text=latest.get("date", ""), foreground="#666666").pack()
+
+    def finish() -> None:
+        if placeholder.winfo_exists():
+            placeholder.destroy()
+        on_done()
+
+    def worker() -> None:
+        try:
+            sessions = backend.list_sessions()
+        except BackendError as e:
+            print(f"takeloom: could not check for a pending session: {e}")
+            root.after(0, finish)
+            return
+        latest = sessions[0] if sessions else None
+        if latest is None or latest.get("processed", True):
+            root.after(0, finish)
+            return
+        root.after(0, lambda: show_screen(latest))
+        try:
+            summary = backend.process_pending_session(latest["session_dir"])
+            print(f"takeloom: processed last session '{latest['session_dir']}': {summary}")
+        except BackendError as e:
+            print(f"takeloom: could not process last session '{latest['session_dir']}': {e}")
+        root.after(0, finish)
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def run(remote_ip: str | None = None) -> None:

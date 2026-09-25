@@ -16,7 +16,13 @@ at this tab, not the studio's.
 wrong instrument — removed once the underlying mis-filing causes were
 fixed at the source; backend.py's correct_session_instrument/
 reassign_take/analyze_take still exist and work if that's ever needed
-again, just nothing in this UI calls them anymore.)
+again, just nothing in this UI calls them anymore. It also used to offer
+a manual "Process now" button for a session get_session_detail's
+`processed` flag says hasn't been through process_session yet — replaced
+by ui/app.py automatically processing the vault's own latest session at
+startup if it's still pending, so a session never needs a person to
+notice and press something; this tab now only ever *shows* `processed`,
+never acts on it.)
 
 Everything here goes through app_state.backend, same as every other tab —
 works identically pointed at local hardware or a Remote connection.
@@ -182,9 +188,6 @@ class SessionsFrame(ttk.Frame):
         else:
             ttk.Label(tags_row, text="none of its own raw files locally", foreground="#888888").pack(side="left")
 
-        if not detail.get("processed"):
-            self._build_process_pending_row(detail)
-
         # One grid shared by every track — column 0 (track names) and
         # column 1 (status text) each size to their widest cell across
         # the *whole* session, so every status/take lines up under the
@@ -217,72 +220,6 @@ class SessionsFrame(ttk.Frame):
         if detail.get("has_video"):
             lines.append("Video: recorded")
         return lines
-
-    def _build_process_pending_row(self, detail: dict) -> None:
-        """A "Process now" button for a session get_session_detail says
-        hasn't been through process_session yet — the normal "just
-        hasn't gotten to it" case, and also how a session recovered from
-        a crash (the app killed, or power lost, mid-recording — see
-        backend.py's process_pending_session/processing/splicer.py's
-        total_frames) actually gets turned into real takes, since
-        nothing else ever retries it on its own."""
-        row = ttk.Frame(self.detail_frame)
-        row.pack(anchor="w", pady=(0, 12))
-        ttk.Button(
-            row, text="Process now", command=self._on_process_pending,
-        ).pack(side="left")
-        self.process_status_var = tk.StringVar(value="")
-        ttk.Label(row, textvariable=self.process_status_var, foreground="#666666").pack(
-            side="left", padx=(8, 0)
-        )
-
-    def _on_process_pending(self) -> None:
-        session_dir = self._selected_session_dir
-        if session_dir is None:
-            return
-        self.process_status_var.set("Processing...")
-        backend = self.app_state.backend
-        self._run_backend(
-            lambda: backend.process_pending_session(session_dir),
-            lambda result, error: self._on_process_pending_result(session_dir, result, error),
-        )
-
-    def _on_process_pending_result(self, session_dir: str, result: str | None, error: str | None) -> None:
-        if not self.winfo_exists() or self._selected_session_dir != session_dir:
-            return  # a different session was selected before this reply arrived
-        if error:
-            self.process_status_var.set("")
-            messagebox.showerror("Could not process session", error)
-            return
-        # Refreshes the whole detail pane, same as _on_detail_loaded would
-        # for a fresh selection — the button disappears once `processed`
-        # comes back true, and every track/take row now reflects whatever
-        # process_session actually found.
-        backend = self.app_state.backend
-        self._run_backend(
-            lambda: backend.get_session_detail(session_dir),
-            lambda detail, err: self._on_detail_loaded(session_dir, detail, err),
-        )
-        # And the top table's own Duration/Status columns for this same
-        # session — updates the one row in place rather than rebuilding
-        # the whole tree, so the current selection/scroll position isn't
-        # disturbed for what was, from the table's point of view, a
-        # one-row change.
-        self._run_backend(
-            lambda: backend.list_sessions(),
-            lambda sessions, err: self._on_sessions_refreshed(sessions, err),
-        )
-
-    def _on_sessions_refreshed(self, sessions: list[dict] | None, error: str | None) -> None:
-        if error or sessions is None or not self.winfo_exists() or not hasattr(self, "tree"):
-            return
-        for session in sessions:
-            iid = session["session_dir"]
-            if self.tree.exists(iid):
-                self.tree.item(iid, values=(
-                    session["date"], session.get("duration", ""), session["project"], session["instrument"],
-                    session.get("status_summary", ""),
-                ))
 
     # Display text + color for each of get_session_detail's per-track
     # `status` values (see backend.py's _track_take_status for what each
