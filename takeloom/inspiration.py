@@ -11,7 +11,7 @@ from typing import Callable
 
 from .config import StudioConfig
 from .net import terse_source_note
-from .project import TrackEntry
+from .project import Project, TrackEntry
 from .utils import format_duration
 
 ProgressCallback = Callable[[float | None, str], None]
@@ -118,6 +118,57 @@ def search_tracks_by_filter(config: StudioConfig, filter_criteria: dict) -> list
     return _post_track_query(config, [filter_criteria])
 
 
+def search_inspiration_tracks(config: StudioConfig, artist: str = "", title: str = "") -> list[dict]:
+    """Query radioserver directly by artist and/or title, independent of a
+    project's own configured inspiration filters — backs the Add to
+    Setlist dialog's "Inspiration" tab (add one exact track), as opposed
+    to search_tracks_by_filter's broader filter-slot browsing."""
+    filters = {k: v for k, v in {"artist": artist.strip(), "title": title.strip()}.items() if v}
+    if not filters:
+        raise InspirationError("Enter an artist and/or title to search.")
+    tracks = _post_track_query(config, [filters])
+    if not tracks:
+        raise InspirationError(f"No match found for {_describe(artist, title)}.")
+    return tracks
+
+
+def _describe(artist: str, title: str) -> str:
+    if artist and title:
+        return f'"{artist} - {title}"'
+    return f'"{artist or title}"'
+
+
+def select_best_match(tracks: list[dict], artist: str, title: str) -> dict:
+    """Pick the track that actually matches what was searched for, out of
+    whatever /library/api/tracks/'s filter search returned. That endpoint
+    is built for broad library-browsing filters (see search_tracks_by_
+    filter) rather than a precise "find this one song" lookup, so it can
+    return loosely-related tracks alongside — or instead of — an exact
+    hit (e.g. matching just the artist and ignoring an unmatched title).
+    Requiring an exact, case-insensitive match on whichever of
+    artist/title was actually given — and raising rather than guessing
+    when there isn't one — is what stops a search like "Bob Dylan" /
+    "Are You Ready" from silently adding some other Bob Dylan track
+    instead."""
+    artist_norm = artist.strip().lower()
+    title_norm = title.strip().lower()
+
+    def is_exact(t: dict) -> bool:
+        if artist_norm and t.get("artist", "").strip().lower() != artist_norm:
+            return False
+        if title_norm and t.get("title", "").strip().lower() != title_norm:
+            return False
+        return True
+
+    exact = [t for t in tracks if is_exact(t)]
+    if exact:
+        return exact[0]
+    raise InspirationError(
+        f"No exact match for {_describe(artist, title)} — the server returned "
+        f"{len(tracks)} similar track(s) instead. Try adjusting the artist/title."
+    )
+
+
 def average_duration(tracks: list[dict]) -> float:
     """Mean duration (seconds) across `tracks` (inspiration-server track
     dicts, as from search_tracks_by_filter) — a filter slot has no
@@ -180,6 +231,20 @@ def build_inspiration_track_entry(track_info: dict) -> TrackEntry:
         duration_seconds=duration,
         inspiration_track_id=track_id,
     )
+
+
+def find_or_add_inspiration_track(project: Project, track_info: dict) -> TrackEntry:
+    """Return the setlist entry for an inspiration track, creating it if
+    absent — so adding the same track twice (from the Add to Setlist
+    dialog, or across sessions) reuses the one existing entry rather than
+    duplicating it."""
+    track_id = track_info["id"]
+    for entry in project.setlist.tracks:
+        if entry.inspiration_track_id == track_id:
+            return entry
+    entry = build_inspiration_track_entry(track_info)
+    project.setlist.add_track(entry)
+    return entry
 
 
 _DOWNLOAD_CHUNK_SIZE = 65536

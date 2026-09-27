@@ -6,16 +6,19 @@ hosts a studio's music library and that Takeloom queries for backing
 tracks. It is written for whoever implements it in the inspiration
 server's own codebase; it assumes no prior familiarity with Takeloom.
 
-> **Superseded**: Takeloom no longer has a way to add one specific
-> inspiration-server track directly by artist/title — "inspiration
-> filter" setlist slots (which draw a random matching track fresh each
-> session, see `takeloom/inspiration.py`'s `search_tracks_by_filter`)
-> are the only way a project pulls in inspiration-server songs now. The
-> Titles autocomplete endpoint this doc originally specced (narrowing to
-> one exact track for a direct add) has no client left to call it and
-> can be skipped/removed if not already built — only the Artists
-> endpoint below is still live, backing an inspiration filter's Artist
-> field.
+> **Titles endpoint still not needed**: the Add to Setlist dialog's
+> "Inspiration" tab lets a musician add one exact inspiration-server
+> track directly by artist/title, in addition to "inspiration filter"
+> setlist slots (which draw a random matching track fresh each session,
+> see `takeloom/inspiration.py`'s `search_tracks_by_filter`). Direct add
+> resolves the exact track via the existing `/library/api/tracks/`
+> filter-search endpoint plus an exact-match check on the client side
+> (`search_inspiration_tracks`/`select_best_match` in
+> `takeloom/inspiration.py`), not via a dedicated Titles autocomplete —
+> so the Titles endpoint this doc originally specced still has no client
+> and can be skipped/removed if not already built. Only the Artists
+> endpoint below is live, backing both the Inspiration tab's Artist
+> field and an inspiration filter's Artist field.
 
 ## Background: what's calling this, and why
 

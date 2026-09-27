@@ -104,6 +104,18 @@ class RemoteBackend(Backend):
             "add_youtube_backing_track", {"project_name": project_name, "url": url}, timeout=DOWNLOAD_TIMEOUT,
         )
 
+    def add_inspiration_backing_track(
+        self, project_name: str, artist: str, title: str,
+        on_progress: Callable[[float | None, str], None] | None = None,
+    ) -> dict:
+        if on_progress:
+            on_progress(None, "Searching and downloading on the remote studio (live progress isn't available over Remote yet)...")
+        return self._client.call(
+            "add_inspiration_backing_track",
+            {"project_name": project_name, "artist": artist, "title": title},
+            timeout=DOWNLOAD_TIMEOUT,
+        )
+
     def add_inspiration_filter_slot(self, project_name: str, label: str, filter_criteria: dict) -> dict:
         return self._client.call(
             "add_inspiration_filter_slot",

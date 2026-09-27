@@ -1,10 +1,9 @@
 """Add to Setlist dialog: add one backing track to a project already
-selected on the Record tab, from a local file or a YouTube URL, or add
-a standing "inspiration filter" slot that draws a random inspiration-
-server track fresh each session — one tab per source, each embedded
-directly in this dialog rather than behind its own popup. Inspiration
-filters are the only way a song from the inspiration server enters a
-project now — there's no "add this exact track directly" path."""
+selected on the Record tab, from a local file, a YouTube URL, or the
+inspiration server (by exact artist/title search), or add a standing
+"inspiration filter" slot that draws a random inspiration-server track
+fresh each session — one tab per source, each embedded directly in this
+dialog rather than behind its own popup."""
 
 from __future__ import annotations
 
@@ -243,6 +242,7 @@ class AddToSetlistDialog(tk.Toplevel):
         self.notebook.pack(fill="both", expand=True)
         self._build_file_tab()
         self._build_youtube_tab()
+        self._build_inspiration_tab()
         self._build_inspiration_filter_tab()
 
         self.progress = ttk.Progressbar(frame, mode="determinate", maximum=100, length=400)
@@ -346,6 +346,28 @@ class AddToSetlistDialog(tk.Toplevel):
         entry.pack(fill="x")
         entry.bind("<Return>", lambda _e: self._on_add())
 
+    # --- Inspiration tab ---
+
+    def _build_inspiration_tab(self) -> None:
+        tab = ttk.Frame(self.notebook, padding=12)
+        self.notebook.add(tab, text="Inspiration")
+
+        def fetch_artists(text: str) -> list[tuple[str, None]]:
+            return [(name, None) for name in self._backend.search_inspiration_artists(text)]
+
+        ttk.Label(tab, text="Artist").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.inspiration_artist_field = _AutocompleteEntry(tab, fetch=fetch_artists)
+        self.inspiration_artist_field.grid(row=0, column=1, sticky="ew")
+
+        ttk.Label(tab, text="Title").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.inspiration_title_var = tk.StringVar()
+        title_entry = ttk.Entry(tab, textvariable=self.inspiration_title_var)
+        title_entry.grid(row=1, column=1, sticky="ew")
+        tab.columnconfigure(1, weight=1)
+
+        self.inspiration_artist_field.bind_return(lambda _e: self._on_add())
+        title_entry.bind("<Return>", lambda _e: self._on_add())
+
     # --- Inspiration Filter tab ---
 
     def _build_inspiration_filter_tab(self) -> None:
@@ -396,6 +418,19 @@ class AddToSetlistDialog(tk.Toplevel):
                 return backend.add_youtube_backing_track(project, url, on_progress=on_progress)
 
             self._start_add(do_youtube)
+        elif current == "Inspiration":
+            artist = self.inspiration_artist_field.get().strip()
+            title = self.inspiration_title_var.get().strip()
+            if not artist and not title:
+                messagebox.showerror("Cannot add", "Enter an artist and/or title.", parent=self)
+                return
+
+            def do_inspiration(backend: Backend, project: str) -> dict:
+                def on_progress(percent: float | None, message: str) -> None:
+                    self.after(0, lambda: self._update_progress(percent, message))
+                return backend.add_inspiration_backing_track(project, artist, title, on_progress=on_progress)
+
+            self._start_add(do_inspiration)
         else:
             filter_criteria = self.filter_fields.get_criteria()
             if filter_criteria is None:

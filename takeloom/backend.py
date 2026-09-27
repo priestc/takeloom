@@ -184,15 +184,34 @@ class Backend(ABC):
         ...
 
     @abstractmethod
+    def add_inspiration_backing_track(
+        self, project_name: str, artist: str, title: str,
+        on_progress: Callable[[float | None, str], None] | None = None,
+    ) -> dict:
+        """Search the inspiration server by artist and/or title and add the
+        exact match as a backing track — the Add to Setlist dialog's
+        "Inspiration" tab, as opposed to an "inspiration filter" slot
+        (add_inspiration_filter_slot) which draws a random matching track
+        fresh each session instead of one fixed song. Downloads the audio
+        immediately, so this leaves the track fully ready to record.
+        Raises BackendError if no exact artist/title match is found (see
+        inspiration.select_best_match).
+
+        If given, on_progress(percent, message) reports live download
+        progress — inspiration files are full-quality and can take a
+        while. RemoteBackend can't stream this live over its simple
+        request/response RPC, so it calls on_progress once with a
+        placeholder message instead, same as add_youtube_backing_track."""
+        ...
+
+    @abstractmethod
     def add_inspiration_filter_slot(self, project_name: str, label: str, filter_criteria: dict) -> dict:
         """Add a standing setlist "slot" that draws a random track matching
         `filter_criteria` (e.g. {"artist": "Miles Davis"} or {"genre":
         "Rock"}) fresh each session, instead of one fixed song — see
         TrackEntry's docstring and backend.py's _resolve_filter_slot_for_
         session. `label` is the slot's display name in the Setlist list.
-        This is the only way a project's setlist grows an inspiration-
-        sourced entry now — see FilterCriteriaFields/EditFilterDialog. The
-        entry's duration_seconds is set to the average across every
+        The entry's duration_seconds is set to the average across every
         currently-matching track (see inspiration.average_duration),
         since the slot has no single fixed song of its own."""
         ...
@@ -1576,6 +1595,31 @@ class LocalBackend(Backend):
         except YouTubeDownloadError as e:
             raise BackendError(str(e)) from e
         entry = project.add_backing_track(dest_path, track_name=title, duration_seconds=duration, source="youtube")
+        return entry.to_dict()
+
+    def add_inspiration_backing_track(
+        self, project_name: str, artist: str, title: str,
+        on_progress: Callable[[float | None, str], None] | None = None,
+    ) -> dict:
+        from .inspiration import InspirationError, find_or_add_inspiration_track, search_inspiration_tracks, select_best_match
+        project = self._open_project(project_name)
+        config = self.get_config()
+        if on_progress:
+            on_progress(None, f"Searching for {artist or title}...")
+        try:
+            matches = search_inspiration_tracks(config, artist=artist, title=title)
+            track_info = select_best_match(matches, artist, title)
+        except InspirationError as e:
+            raise BackendError(str(e)) from e
+        entry = find_or_add_inspiration_track(project, track_info)
+        project.save_setlist()
+        backing_path = project.backing_tracks_dir / entry.backing_track
+        if not backing_path.exists():
+            from .inspiration import download_inspiration_track
+            try:
+                download_inspiration_track(entry, backing_path, config, on_progress=on_progress)
+            except InspirationError as e:
+                raise BackendError(str(e)) from e
         return entry.to_dict()
 
     def add_inspiration_filter_slot(self, project_name: str, label: str, filter_criteria: dict) -> dict:
