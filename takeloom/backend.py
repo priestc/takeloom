@@ -530,6 +530,32 @@ class Backend(ABC):
         ...
 
     @abstractmethod
+    def search_inspiration_titles(self, partial: str, artist: str = "") -> list[dict]:
+        """Same as search_inspiration_artists, for the Add to Setlist
+        dialog's Inspiration tab Title field — narrowed to `artist`'s
+        tracks if given. Each result is a full track dict (id/artist/
+        title/year/format/duration), not just a title string, so picking
+        one off the dropdown can add that exact track directly (see
+        add_inspiration_track_by_id) instead of falling back to
+        add_inspiration_backing_track's fuzzier by-name search."""
+        ...
+
+    @abstractmethod
+    def add_inspiration_track_by_id(
+        self, project_name: str, track_info: dict,
+        on_progress: Callable[[float | None, str], None] | None = None,
+    ) -> dict:
+        """Add a specific, already-known inspiration track directly, with
+        no by-name search step — used when `track_info` came straight off
+        the Add to Setlist dialog's Title autocomplete (which returns full
+        track records — see search_inspiration_titles), so the exact
+        track the user picked in the dropdown is the exact track that
+        gets added, instead of add_inspiration_backing_track's fuzzier
+        search-then-guess. `track_info` is one of those track dicts
+        (id/artist/title/year/format/duration)."""
+        ...
+
+    @abstractmethod
     def search_inspiration_by_filter(self, filter_criteria: dict) -> list[dict]:
         """Every inspiration-server track matching `filter_criteria` (same
         shape as an inspiration filter slot's inspiration_filter — artist/
@@ -1601,7 +1627,7 @@ class LocalBackend(Backend):
         self, project_name: str, artist: str, title: str,
         on_progress: Callable[[float | None, str], None] | None = None,
     ) -> dict:
-        from .inspiration import InspirationError, find_or_add_inspiration_track, search_inspiration_tracks, select_best_match
+        from .inspiration import InspirationError, search_inspiration_tracks, select_best_match
         project = self._open_project(project_name)
         config = self.get_config()
         if on_progress:
@@ -1611,11 +1637,26 @@ class LocalBackend(Backend):
             track_info = select_best_match(matches, artist, title)
         except InspirationError as e:
             raise BackendError(str(e)) from e
+        return self._add_inspiration_entry(project, config, track_info, on_progress)
+
+    def add_inspiration_track_by_id(
+        self, project_name: str, track_info: dict,
+        on_progress: Callable[[float | None, str], None] | None = None,
+    ) -> dict:
+        project = self._open_project(project_name)
+        config = self.get_config()
+        return self._add_inspiration_entry(project, config, track_info, on_progress)
+
+    @staticmethod
+    def _add_inspiration_entry(
+        project: Project, config: StudioConfig, track_info: dict,
+        on_progress: Callable[[float | None, str], None] | None = None,
+    ) -> dict:
+        from .inspiration import InspirationError, download_inspiration_track, find_or_add_inspiration_track
         entry = find_or_add_inspiration_track(project, track_info)
         project.save_setlist()
         backing_path = project.backing_tracks_dir / entry.backing_track
         if not backing_path.exists():
-            from .inspiration import download_inspiration_track
             try:
                 download_inspiration_track(entry, backing_path, config, on_progress=on_progress)
             except InspirationError as e:
@@ -2282,6 +2323,10 @@ class LocalBackend(Backend):
     def search_inspiration_artists(self, partial: str) -> list[str]:
         from .inspiration import search_artist_suggestions
         return search_artist_suggestions(self.get_config(), partial)
+
+    def search_inspiration_titles(self, partial: str, artist: str = "") -> list[dict]:
+        from .inspiration import search_title_suggestions
+        return search_title_suggestions(self.get_config(), partial, artist=artist)
 
     def search_inspiration_by_filter(self, filter_criteria: dict) -> list[dict]:
         from .inspiration import InspirationError, search_tracks_by_filter

@@ -91,15 +91,25 @@ def _post_track_query(config: StudioConfig, filters: list[dict]) -> list[dict]:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        # A broad filter (e.g. just {"artist": "Bob Dylan"} against a large
+        # library) can measurably take the inspiration server 30+ seconds
+        # to answer — 15s used to cut that off mid-query with a confusing
+        # raw TimeoutError (see the except clause below) instead of ever
+        # getting a real answer.
+        with urllib.request.urlopen(req, timeout=60) as resp:
             data = json.loads(resp.read())
-    except urllib.error.URLError as e:
-        # Includes a plain socket timeout — urllib wraps that as a
-        # URLError(reason=socket.timeout(...)) rather than raising it bare.
-        # A stuck/unreachable inspiration server used to be able to hang
-        # this call forever (no timeout was set at all); over Remote that
-        # blocked the whole connection's request queue behind it — see
-        # remote/server.py's per-request threading, added for the same
+    except (urllib.error.URLError, OSError) as e:
+        # A timeout connecting is wrapped by urllib as URLError(reason=
+        # TimeoutError(...)), but a timeout (or dropped connection) while
+        # waiting on the response itself — after the connection succeeded
+        # — comes through as a bare OSError/TimeoutError instead (urllib
+        # only wraps failures from sending the request, not from
+        # h.getresponse()), so both must be caught here or a slow/stalled
+        # server crashes the calling thread instead of surfacing a clean
+        # error. A stuck/unreachable inspiration server used to be able to
+        # hang this call forever (no timeout was set at all); over Remote
+        # that blocked the whole connection's request queue behind it —
+        # see remote/server.py's per-request threading, added for the same
         # reason. Always name the URL — a bare "url failed" reason (e.g. a
         # DNS miss) is close to useless without knowing what was being hit
         # — and flag that the reason itself is as terse as it gets.
@@ -209,6 +219,22 @@ def _get_suggestions(config: StudioConfig, kind: str, params: dict) -> list:
 def search_artist_suggestions(config: StudioConfig, partial: str, limit: int = 10) -> list[str]:
     """Autocomplete suggestions for an inspiration filter's Artist field."""
     return _get_suggestions(config, "artists", {"q": partial.strip(), "limit": limit})
+
+
+def search_title_suggestions(config: StudioConfig, partial: str, artist: str = "", limit: int = 10) -> list[dict]:
+    """Autocomplete suggestions for the Add to Setlist dialog's Inspiration
+    tab Title field, optionally narrowed to a specific artist. Each result
+    is a track dict (id/artist/title/year/format/duration) — see
+    docs/inspiration-server-autocomplete-api.md — so selecting one can add
+    that exact track directly, with no secondary by-name search needed.
+    Tolerates an older server still returning bare title strings
+    (normalized here to a dict with no "id"), which just means the caller
+    falls back to the by-name search path for that selection."""
+    params = {"q": partial.strip(), "limit": limit}
+    if artist.strip():
+        params["artist"] = artist.strip()
+    raw = _get_suggestions(config, "titles", params)
+    return [item if isinstance(item, dict) else {"title": item} for item in raw]
 
 
 def build_inspiration_track_entry(track_info: dict) -> TrackEntry:

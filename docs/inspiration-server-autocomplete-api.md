@@ -6,19 +6,29 @@ hosts a studio's music library and that Takeloom queries for backing
 tracks. It is written for whoever implements it in the inspiration
 server's own codebase; it assumes no prior familiarity with Takeloom.
 
-> **Titles endpoint still not needed**: the Add to Setlist dialog's
-> "Inspiration" tab lets a musician add one exact inspiration-server
-> track directly by artist/title, in addition to "inspiration filter"
-> setlist slots (which draw a random matching track fresh each session,
-> see `takeloom/inspiration.py`'s `search_tracks_by_filter`). Direct add
-> resolves the exact track via the existing `/library/api/tracks/`
-> filter-search endpoint plus an exact-match check on the client side
-> (`search_inspiration_tracks`/`select_best_match` in
-> `takeloom/inspiration.py`), not via a dedicated Titles autocomplete —
-> so the Titles endpoint this doc originally specced still has no client
-> and can be skipped/removed if not already built. Only the Artists
-> endpoint below is live, backing both the Inspiration tab's Artist
-> field and an inspiration filter's Artist field.
+> **Titles endpoint confirmed live too**: this studio's server already
+> implements `GET /library/api/autocomplete/titles/` (returning full
+> track dicts, not bare strings) alongside the Artists endpoint spec'd
+> below — its own contract isn't repeated here since it already exists,
+> but `search_title_suggestions` in `takeloom/inspiration.py` calls it
+> the same way `search_artist_suggestions` calls the Artists endpoint.
+> Both back the Add to Setlist dialog's "Inspiration" tab, which lets a
+> musician add one exact inspiration-server track directly by artist/
+> title, in addition to "inspiration filter" setlist slots (which draw a
+> random matching track fresh each session, see `takeloom/inspiration.
+> py`'s `search_tracks_by_filter`). Picking a Title suggestion adds that
+> exact track by id (`add_inspiration_track_by_id`), no further search
+> needed. Typing a title without picking a suggestion instead falls back
+> to `search_inspiration_tracks`/`select_best_match`, resolving it via
+> the `/library/api/tracks/` filter-search endpoint below plus an
+> exact-match check client-side — **that fallback only works if the
+> target track is actually present in what that endpoint returns**, and
+> in practice it appears to ignore a `title` filter key entirely, just
+> returning an arbitrary (observed: capped at 100) set of tracks matching
+> `artist` alone — so it reliably fails to find a match for any artist
+> with a larger catalog than that. The Title autocomplete dropdown is
+> the reliable way to add a track; free-typing a title and not picking a
+> suggestion is best-effort only.
 
 ## Background: what's calling this, and why
 
@@ -73,9 +83,9 @@ Returns the raw audio file bytes for that track.
 
 ## Endpoint
 
-Only the Artists endpoint is still needed — see the "Superseded" note
-above regarding the Titles endpoint this section originally specced
-alongside it.
+The Artists endpoint below (and the already-live Titles endpoint — see
+the note at the top of this document) are both built and live on this
+studio's server.
 
 ### `GET /library/api/autocomplete/artists/`
 
@@ -179,5 +189,8 @@ Match the existing `/library/api/tracks/` endpoint's conventions:
 
 This side is already done and live in the Takeloom repo:
 `search_artist_suggestions` in `takeloom/inspiration.py` calls this
-endpoint, feeding an inspiration filter slot's Artist autocomplete field
-(`takeloom/ui/filter_fields.py`).
+endpoint, feeding both an inspiration filter slot's Artist autocomplete
+field (`takeloom/ui/filter_fields.py`) and the Add to Setlist dialog's
+Inspiration tab's Artist field (`takeloom/ui/add_to_setlist_dialog.py`).
+`search_title_suggestions` does the same against the Titles endpoint for
+that tab's Title field.

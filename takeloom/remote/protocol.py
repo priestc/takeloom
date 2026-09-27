@@ -105,6 +105,10 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
         return {}
     if op == "search_inspiration_artists":
         return {"suggestions": backend.search_inspiration_artists(args["partial"])}
+    if op == "search_inspiration_titles":
+        return {"suggestions": backend.search_inspiration_titles(args["partial"], args.get("artist", ""))}
+    if op == "add_inspiration_track_by_id":
+        return backend.add_inspiration_track_by_id(args["project_name"], args["track_info"])
     if op == "search_inspiration_by_filter":
         return {"tracks": backend.search_inspiration_by_filter(args["filter_criteria"])}
     if op == "start_recording":

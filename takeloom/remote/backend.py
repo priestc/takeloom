@@ -238,6 +238,26 @@ class RemoteBackend(Backend):
         except BackendError:
             return []  # autocomplete fires on every keystroke — a connection hiccup shouldn't surface as an error
 
+    def search_inspiration_titles(self, partial: str, artist: str = "") -> list[dict]:
+        try:
+            return self._client.call(
+                "search_inspiration_titles", {"partial": partial, "artist": artist},
+            )["suggestions"]
+        except BackendError:
+            return []  # same rationale as search_inspiration_artists above
+
+    def add_inspiration_track_by_id(
+        self, project_name: str, track_info: dict,
+        on_progress: Callable[[float | None, str], None] | None = None,
+    ) -> dict:
+        if on_progress:
+            on_progress(None, "Downloading on the remote studio (live progress isn't available over Remote yet)...")
+        return self._client.call(
+            "add_inspiration_track_by_id",
+            {"project_name": project_name, "track_info": track_info},
+            timeout=DOWNLOAD_TIMEOUT,
+        )
+
     def search_inspiration_by_filter(self, filter_criteria: dict) -> list[dict]:
         return self._client.call(
             "search_inspiration_by_filter", {"filter_criteria": filter_criteria}, timeout=LONG_TIMEOUT,

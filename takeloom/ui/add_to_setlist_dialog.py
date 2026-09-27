@@ -355,18 +355,31 @@ class AddToSetlistDialog(tk.Toplevel):
         def fetch_artists(text: str) -> list[tuple[str, None]]:
             return [(name, None) for name in self._backend.search_inspiration_artists(text)]
 
+        def fetch_titles(text: str) -> list[tuple[str, dict | None]]:
+            tracks = self._backend.search_inspiration_titles(text, artist=self.inspiration_artist_field.get().strip())
+            # A track dict only has an "id" once the inspiration server's
+            # Titles endpoint returns full records rather than bare title
+            # strings (see docs/inspiration-server-autocomplete-api.md) —
+            # until then, payload stays None and _on_add falls back to
+            # the by-name search path for that selection.
+            return [(self._format_title_suggestion(t), t if "id" in t else None) for t in tracks]
+
         ttk.Label(tab, text="Artist").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
         self.inspiration_artist_field = _AutocompleteEntry(tab, fetch=fetch_artists)
         self.inspiration_artist_field.grid(row=0, column=1, sticky="ew")
 
         ttk.Label(tab, text="Title").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.inspiration_title_var = tk.StringVar()
-        title_entry = ttk.Entry(tab, textvariable=self.inspiration_title_var)
-        title_entry.grid(row=1, column=1, sticky="ew")
+        self.inspiration_title_field = _AutocompleteEntry(tab, fetch=fetch_titles)
+        self.inspiration_title_field.grid(row=1, column=1, sticky="ew")
         tab.columnconfigure(1, weight=1)
 
         self.inspiration_artist_field.bind_return(lambda _e: self._on_add())
-        title_entry.bind("<Return>", lambda _e: self._on_add())
+        self.inspiration_title_field.bind_return(lambda _e: self._on_add())
+
+    @staticmethod
+    def _format_title_suggestion(track: dict) -> str:
+        year = track.get("year")
+        return f"{track.get('title', '')} ({year})" if year else track.get("title", "")
 
     # --- Inspiration Filter tab ---
 
@@ -420,14 +433,22 @@ class AddToSetlistDialog(tk.Toplevel):
             self._start_add(do_youtube)
         elif current == "Inspiration":
             artist = self.inspiration_artist_field.get().strip()
-            title = self.inspiration_title_var.get().strip()
+            title = self.inspiration_title_field.get().strip()
             if not artist and not title:
                 messagebox.showerror("Cannot add", "Enter an artist and/or title.", parent=self)
                 return
 
+            selected_track = self.inspiration_title_field.selected_payload
+
             def do_inspiration(backend: Backend, project: str) -> dict:
                 def on_progress(percent: float | None, message: str) -> None:
                     self.after(0, lambda: self._update_progress(percent, message))
+                if selected_track is not None:
+                    # Picked straight off the Title autocomplete, which
+                    # already told us exactly which track this is — no
+                    # need for add_inspiration_backing_track's fuzzier
+                    # search-by-name (and its "guess wrong" failure mode).
+                    return backend.add_inspiration_track_by_id(project, selected_track, on_progress=on_progress)
                 return backend.add_inspiration_backing_track(project, artist, title, on_progress=on_progress)
 
             self._start_add(do_inspiration)
