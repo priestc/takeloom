@@ -498,8 +498,8 @@ class Backend(ABC):
         non-filter inspiration-sourced track's take is written to both.
         Each dict: {"track_name": str, "instrument": str (a label),
         "filename": str, "take_number": int, "has_video": bool,
-        "volume": float, "recorded_at": float | None}, sorted by
-        track_name. A take superseded by a later reassign_take/re-record
+        "has_midi": bool, "volume": float, "recorded_at": float | None},
+        sorted by track_name. A take superseded by a later reassign_take/re-record
         no longer appears here, same as it wouldn't in any project's
         setlist — this reflects each track+label's *current* take, not
         every file ever written to completed_takes/.
@@ -515,6 +515,44 @@ class Backend(ABC):
         reassign_take rename (same-filesystem renames don't touch it),
         so this stays meaningful even for a take that's been re-filed
         under a different label since it was recorded."""
+        ...
+
+    @abstractmethod
+    def edit_backing_track(
+        self, take_filename: str, trim_start_seconds: float, trim_end_seconds: float,
+    ) -> dict:
+        """Permanently cut `trim_start_seconds` off the start and/or
+        `trim_end_seconds` off the end of a song's backing track — for a
+        long unwanted intro/outro — and apply that exact same cut to
+        every instrument's current completed take on the same song, so
+        everything stays in sync with the now-shorter backing track.
+        `take_filename` is any one current take's filename (a Completed
+        Takes row's `take["filename"]`) — used only to resolve *which*
+        song this is: every project's setlist is scanned for the
+        TrackEntry whose preferred_takes contains it, and the shared
+        vault-wide inspiration-take index (vault.py) is checked the same
+        way, so this also works for a song an inspiration filter slot
+        drew (which has no TrackEntry of its own — see TrackEntry's
+        docstring) as long as it has at least one take recorded. Whatever
+        record(s) are found that way are all updated to the trimmed
+        duration (an ordinary, inspiration-sourced track has both its own
+        setlist entry and a mirrored shared-index entry — see
+        reassign_take's docstring for that same split); the underlying
+        audio files are only ever physically trimmed once each, by
+        filename, no matter how many records reference them.
+
+        A take with a video or MIDI sidecar (has_video/has_midi) only has
+        its audio actually trimmed — the sidecar is left as-is and will
+        no longer line up with the trimmed audio; the caller is expected
+        to warn about this *before* calling (see "untouched_sidecars" in
+        the return value, meant for a confirmation prompt, not an
+        after-the-fact one).
+
+        Returns {"track_name": str, "new_duration_seconds": float,
+        "takes_trimmed": [{"instrument": str, "filename": str}, ...],
+        "untouched_sidecars": [{"instrument": str, "kind": "video"|"midi"}, ...]}.
+        Raises BackendError if no record references `take_filename`, or
+        if the trim amount would leave the backing track at ≤0 seconds."""
         ...
 
     # --- inspiration ---
@@ -2298,7 +2336,8 @@ class LocalBackend(Backend):
                 recorded_at = None
             by_filename[take.filename] = {
                 "track_name": track_name, "instrument": label, "filename": take.filename,
-                "take_number": take.take_number, "has_video": take.has_video, "volume": take.volume,
+                "take_number": take.take_number, "has_video": take.has_video, "has_midi": take.has_midi,
+                "volume": take.volume,
                 "recorded_at": recorded_at,
             }
 
@@ -2317,6 +2356,111 @@ class LocalBackend(Backend):
                 add(entry.name, label, take)
 
         return sorted(by_filename.values(), key=lambda d: d["track_name"].lower())
+
+    def edit_backing_track(
+        self, take_filename: str, trim_start_seconds: float, trim_end_seconds: float,
+    ) -> dict:
+        if trim_start_seconds < 0 or trim_end_seconds < 0:
+            raise BackendError("Trim amounts can't be negative.")
+        if trim_start_seconds == 0 and trim_end_seconds == 0:
+            raise BackendError("Enter a trim amount for the start and/or end.")
+
+        config = self.get_config()
+        root = Path(config.session_vault_path)
+        backing_dir = root / "backing_tracks"
+        completed_dir = root / "completed_takes"
+
+        from .vault import load_inspiration_index, save_inspiration_index
+
+        # Every record (a project's own TrackEntry, and/or the shared
+        # inspiration index's entry) referencing take_filename — see
+        # edit_backing_track's docstring for why there can be more than
+        # one for what's really the same song/files.
+        records: list[tuple[Project | None, TrackEntry]] = []
+        for path in Project.list_projects(Path(config.projects_dir)):
+            try:
+                project = Project.open(path, root)
+            except Exception:
+                continue
+            for track in project.setlist.tracks:
+                if any(t.filename == take_filename for t in track.preferred_takes.values()):
+                    records.append((project, track))
+
+        inspiration_index = load_inspiration_index(root)
+        shared_touched = False
+        for entry in inspiration_index.values():
+            if any(t.filename == take_filename for t in entry.preferred_takes.values()):
+                records.append((None, entry))
+                shared_touched = True
+                break
+
+        if not records:
+            raise BackendError(f"Could not find any project or record referencing take '{take_filename}'.")
+
+        track_name = records[0][1].name
+        backing_track = records[0][1].backing_track
+        if not backing_track:
+            raise BackendError(f"'{track_name}' has no backing track file to trim.")
+
+        # Union of every instrument's current take across every matched
+        # record, deduplicated by filename — an inspiration-sourced
+        # track's project entry and its shared-index mirror reference the
+        # exact same files, so a naive per-record trim would double-cut
+        # them.
+        takes_by_filename: dict[str, tuple[str, TakeInfo]] = {}
+        for _, entry in records:
+            for label, take in entry.preferred_takes.items():
+                takes_by_filename[take.filename] = (label, take)
+
+        from .audio.formats import get_duration, trim_audio_file
+
+        backing_path = backing_dir / backing_track
+        if not backing_path.exists():
+            raise BackendError(f"Backing track file not found: {backing_path}")
+
+        # Validate every file the trim would touch *before* touching any
+        # of them — a trim that fits the backing track but not some
+        # take's own (slightly different) length shouldn't leave the
+        # backing track trimmed while the takes it's supposed to stay in
+        # sync with are left alone.
+        to_trim = [backing_path] + [completed_dir / f for f in takes_by_filename]
+        for path in to_trim:
+            if not path.exists():
+                continue
+            duration = get_duration(path)
+            if trim_start_seconds + trim_end_seconds >= duration:
+                raise BackendError(
+                    f"Trim amount ({trim_start_seconds + trim_end_seconds:.1f}s) leaves nothing of "
+                    f"'{path.name}' ({duration:.1f}s long)."
+                )
+
+        new_duration = trim_audio_file(backing_path, trim_start_seconds, trim_end_seconds)
+
+        takes_trimmed = []
+        untouched_sidecars = []
+        for filename, (label, take) in takes_by_filename.items():
+            take_path = completed_dir / filename
+            if take_path.exists():
+                trim_audio_file(take_path, trim_start_seconds, trim_end_seconds)
+                takes_trimmed.append({"instrument": label, "filename": filename})
+            if take.has_video:
+                untouched_sidecars.append({"instrument": label, "kind": "video"})
+            if take.has_midi:
+                untouched_sidecars.append({"instrument": label, "kind": "midi"})
+
+        for project, entry in records:
+            entry.duration_seconds = new_duration
+            if project is not None:
+                project.save_setlist()
+        if shared_touched:
+            save_inspiration_index(root, inspiration_index)
+
+        return {
+            "track_name": track_name,
+            "new_duration_seconds": new_duration,
+            "takes_trimmed": takes_trimmed,
+            "untouched_sidecars": untouched_sidecars,
+        }
 
     # --- inspiration ---
 

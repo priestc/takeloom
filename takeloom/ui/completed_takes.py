@@ -43,6 +43,7 @@ from ..backend import BackendError
 from ..config import StudioConfig
 from ..inspiration import build_inspiration_track_entry
 from .app_state import AppState
+from .edit_backing_track_dialog import EditBackingTrackDialog
 from .instrument_colors import make_label_badge
 
 
@@ -255,7 +256,7 @@ class CompletedTakesFrame(ttk.Frame):
 
         if expanded:
             for take in takes_for_song:
-                self._build_take_row(take)
+                self._build_take_row(take, takes_for_song)
 
     def _toggle_expanded(self, track_name: str) -> None:
         if track_name in self._expanded:
@@ -264,7 +265,7 @@ class CompletedTakesFrame(ttk.Frame):
             self._expanded.add(track_name)
         self._apply_filter()
 
-    def _build_take_row(self, take: dict) -> None:
+    def _build_take_row(self, take: dict, takes_for_song: list[dict]) -> None:
         row = ttk.Frame(self.content)
         row.pack(fill="x", padx=(28, 0), pady=1)
         make_label_badge(row, take["instrument"]).pack(side="left", padx=(0, 8))
@@ -273,13 +274,17 @@ class CompletedTakesFrame(ttk.Frame):
             side="left"
         )
         ttk.Label(row, text="video" if take["has_video"] else "", foreground="#666666", width=6).pack(side="left")
-        self._build_play_controls(row, take)
+        self._build_play_controls(row, take, takes_for_song)
 
-    def _build_play_controls(self, row: ttk.Frame, take: dict) -> None:
+    def _build_play_controls(self, row: ttk.Frame, take: dict, takes_for_song: list[dict]) -> None:
         status_var = tk.StringVar(value="")
         ttk.Button(row, text="▶ Play", command=lambda: self._on_play_take(take, status_var)).pack(
             side="left", padx=(8, 4)
         )
+        ttk.Button(
+            row, text="✂ Edit backing track...",
+            command=lambda: self._on_edit_backing_track(take, takes_for_song),
+        ).pack(side="left", padx=(0, 4))
         ttk.Label(row, textvariable=status_var, foreground="#666666").pack(side="left")
 
     # --- play ---
@@ -314,3 +319,8 @@ class CompletedTakesFrame(ttk.Frame):
         status_var.set("")
         if error:
             messagebox.showerror("Could not play", error)
+
+    # --- edit backing track ---
+
+    def _on_edit_backing_track(self, take: dict, takes_for_song: list[dict]) -> None:
+        EditBackingTrackDialog(self, self.app_state.backend, take, takes_for_song, self._load)

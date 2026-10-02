@@ -167,6 +167,22 @@ class RemoteBackend(Backend):
     def list_completed_takes(self) -> list[dict]:
         return self._client.call("list_completed_takes", {})["takes"]
 
+    def edit_backing_track(
+        self, take_filename: str, trim_start_seconds: float, trim_end_seconds: float,
+    ) -> dict:
+        # Every file this touches already lives on the studio's own vault
+        # disk — unlike add_local_backing_track, there's no client-side
+        # path involved, so this is a plain RPC the same as e.g.
+        # add_inspiration_filter_slot.
+        return self._client.call(
+            "edit_backing_track",
+            {
+                "take_filename": take_filename, "trim_start_seconds": trim_start_seconds,
+                "trim_end_seconds": trim_end_seconds,
+            },
+            timeout=LONG_TIMEOUT,
+        )
+
     def ensure_take_local(self, project_name: str, filename: str) -> str:
         raise BackendError(
             "ensure_take_local downloads to whichever machine runs it — over Remote that's the "
