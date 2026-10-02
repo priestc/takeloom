@@ -92,6 +92,19 @@ class TrackEntry:
     source: str = "upload"  # "upload" or "youtube" — only meaningful when
     # inspiration_track_id is 0; see source_label(). Existing entries
     # from before this field existed default to "upload".
+    # Non-destructive "edit backing track" trim (backend.py's
+    # edit_backing_track): seconds to skip at the very start, and to stop
+    # before the very end, of backing_track *and* every take in
+    # preferred_takes, every time any of those files is loaded for
+    # playback or recording — never applied to the files themselves.
+    # duration_seconds above is already net of these (the *effective*
+    # length), while the files on disk keep their full original length
+    # forever; re-deriving the original from duration_seconds + these two
+    # fields is never needed since nothing ever reads it back out that
+    # way — only backend.py's edit_backing_track, which always measures
+    # the untouched file directly instead.
+    trim_start_seconds: float = 0.0
+    trim_end_seconds: float = 0.0
 
     def set_preferred_take(self, instrument: str, take: TakeInfo) -> None:
         self.preferred_takes[instrument] = take
@@ -130,6 +143,8 @@ class TrackEntry:
             cached_matches=data.get("cached_matches", []),
             preferred_takes=takes,
             source=data.get("source", "upload"),
+            trim_start_seconds=data.get("trim_start_seconds", 0.0),
+            trim_end_seconds=data.get("trim_end_seconds", 0.0),
         )
 
 

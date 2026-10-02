@@ -35,12 +35,23 @@ class Mixer:
         self._playing: bool = False
 
     def add_source(
-        self, name: str, path: Path, volume: float = 1.0, trim_frames: int = 0,
+        self, name: str, path: Path, volume: float = 1.0, trim_frames: int = 0, trim_end_frames: int = 0,
         compressor_settings: CompressorSettings | None = None,
     ) -> None:
         """Load an audio file and add it as a mix source.
 
-        trim_frames: number of frames to skip from the start (for latency compensation).
+        trim_frames: number of frames to skip from the start (for latency
+        compensation, and/or a song's non-destructive "edit backing
+        track" start trim — backend.py's edit_backing_track — added
+        together when both apply).
+
+        trim_end_frames: number of frames to drop off the end the same
+        way (only ever a song's own trim — there's no "end latency" to
+        compensate for). Since duration_frames/is_finished are derived
+        from the trimmed data actually loaded here, shortening a
+        "backing" source's tail this way is also what makes a session's
+        natural song-end fire earlier, without needing any other code to
+        know trimming happened at all.
 
         compressor_settings, if given, is applied once here (offline,
         whole-file — see filters.apply_compressor) rather than live per
@@ -62,6 +73,8 @@ class Mixer:
         original = data
         if trim_frames > 0 and trim_frames < len(data):
             data = data[trim_frames:]
+        if trim_end_frames > 0 and trim_end_frames < len(data):
+            data = data[:len(data) - trim_end_frames]
         self.sources.append(MixSource(name=name, data=data, volume=volume, original_data=original))
 
     def clear(self) -> None:

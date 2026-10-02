@@ -498,8 +498,14 @@ class Backend(ABC):
         non-filter inspiration-sourced track's take is written to both.
         Each dict: {"track_name": str, "instrument": str (a label),
         "filename": str, "take_number": int, "has_video": bool,
-        "has_midi": bool, "volume": float, "recorded_at": float | None},
-        sorted by track_name. A take superseded by a later reassign_take/re-record
+        "has_midi": bool, "volume": float, "recorded_at": float | None,
+        "trim_start_seconds": float, "trim_end_seconds": float}, sorted by
+        track_name. The last two are the song's current non-destructive
+        "edit backing track" trim (see edit_backing_track) — 0.0/0.0 if
+        it's never been trimmed — carried here so a caller (play_song_
+        takes, or the edit dialog reopening on an already-trimmed song)
+        doesn't need a second lookup just to read them back. A take
+        superseded by a later reassign_take/re-record
         no longer appears here, same as it wouldn't in any project's
         setlist — this reflects each track+label's *current* take, not
         every file ever written to completed_takes/.
@@ -521,11 +527,26 @@ class Backend(ABC):
     def edit_backing_track(
         self, take_filename: str, trim_start_seconds: float, trim_end_seconds: float,
     ) -> dict:
-        """Permanently cut `trim_start_seconds` off the start and/or
-        `trim_end_seconds` off the end of a song's backing track — for a
-        long unwanted intro/outro — and apply that exact same cut to
-        every instrument's current completed take on the same song, so
-        everything stays in sync with the now-shorter backing track.
+        """Non-destructively crop a song's backing track — for a long
+        unwanted intro/outro — by `trim_start_seconds` off the start
+        and/or `trim_end_seconds` off the end. No audio file is ever
+        touched: this only sets TrackEntry.trim_start_seconds/
+        trim_end_seconds (replacing, not adding to, whatever was set
+        before), which every current and future consumer of this song's
+        backing_track/preferred_takes applies as a virtual playback
+        window instead — see _load_track_locked (a session recording a
+        new take, or layering an existing one in), the Video Check path,
+        _resolve_filter_slot (an inspiration filter slot redrawing this
+        same song later inherits the trim from the shared index), and
+        play_song_takes. A newly recorded take is therefore already
+        exactly the trimmed length with nothing further to do; an
+        existing take recorded before the trim was set gets the identical
+        window applied at playback/mix time instead, so it stays in sync
+        with the now-"shorter" backing track without its file ever being
+        rewritten. (A take's video/MIDI sidecar isn't windowed this way
+        yet — only its audio is — so review playback of either still
+        includes the untrimmed footage/performance for now.)
+
         `take_filename` is any one current take's filename (a Completed
         Takes row's `take["filename"]`) — used only to resolve *which*
         song this is: every project's setlist is scanned for the
@@ -533,26 +554,23 @@ class Backend(ABC):
         vault-wide inspiration-take index (vault.py) is checked the same
         way, so this also works for a song an inspiration filter slot
         drew (which has no TrackEntry of its own — see TrackEntry's
-        docstring) as long as it has at least one take recorded. Whatever
-        record(s) are found that way are all updated to the trimmed
-        duration (an ordinary, inspiration-sourced track has both its own
-        setlist entry and a mirrored shared-index entry — see
-        reassign_take's docstring for that same split); the underlying
-        audio files are only ever physically trimmed once each, by
-        filename, no matter how many records reference them.
-
-        A take with a video or MIDI sidecar (has_video/has_midi) only has
-        its audio actually trimmed — the sidecar is left as-is and will
-        no longer line up with the trimmed audio; the caller is expected
-        to warn about this *before* calling (see "untouched_sidecars" in
-        the return value, meant for a confirmation prompt, not an
-        after-the-fact one).
+        docstring) as long as it has at least one take recorded. Every
+        record found that way is updated (an ordinary, inspiration-
+        sourced track has both its own setlist entry and a mirrored
+        shared-index entry — see reassign_take's docstring for that same
+        split) — trim_start_seconds/trim_end_seconds and duration_seconds
+        (the *effective*, trimmed length — always re-measured from the
+        untouched backing track file, not derived from whatever was
+        previously stored) are kept identical across every one of them.
 
         Returns {"track_name": str, "new_duration_seconds": float,
-        "takes_trimmed": [{"instrument": str, "filename": str}, ...],
-        "untouched_sidecars": [{"instrument": str, "kind": "video"|"midi"}, ...]}.
-        Raises BackendError if no record references `take_filename`, or
-        if the trim amount would leave the backing track at ≤0 seconds."""
+        "affected_takes": [{"instrument": str, "filename": str}, ...]}
+        (every instrument currently on file for this song, across every
+        matched record, deduplicated by filename — these are what will
+        now play back cropped, not files that were just changed). Raises
+        BackendError if no record references `take_filename`, the trim
+        amounts are negative, or they'd leave the backing track at ≤0
+        seconds (measured against its real, untouched duration)."""
         ...
 
     # --- inspiration ---
@@ -1406,7 +1424,10 @@ def _compressed_playback_path(path: Path, settings: CompressorSettings) -> Path:
     return out_path
 
 
-def _mixed_playback_path(song_name: str, files_and_labels: list[tuple[Path, str]], config: StudioConfig) -> Path:
+def _mixed_playback_path(
+    song_name: str, files_and_labels: list[tuple[Path, str]], config: StudioConfig,
+    trim_start_frames: int = 0, trim_end_frames: int = 0,
+) -> Path:
     """Mix every (take_path, instrument_label) in `files_and_labels`
     together — one song's every instrument overlaid on top of each
     other, each first passed through its *own* label's compressor
@@ -1417,6 +1438,13 @@ def _mixed_playback_path(song_name: str, files_and_labels: list[tuple[Path, str]
     _sum_sources), and the sum is clipped to prevent overflow. Used by
     play_song_takes for a quick "everyone's take on this song, played
     together" preview without needing a real session.
+
+    trim_start_frames/trim_end_frames: the song's non-destructive "edit
+    backing track" trim (edit_backing_track), in frames — applied to
+    every take here the same way _load_track_locked applies it to a live
+    session's mixer sources, so a take recorded before the trim was set
+    stays in sync with the others instead of sticking out past where the
+    (now virtually-shorter) backing track would have ended.
 
     Raises BackendError if `files_and_labels` is empty."""
     if not files_and_labels:
@@ -1429,7 +1457,12 @@ def _mixed_playback_path(song_name: str, files_and_labels: list[tuple[Path, str]
     processed = []
     for path, label in files_and_labels:
         data, sr = read_audio(path, sample_rate)
-        processed.append(apply_compressor(data, sr, config.compressor_for_label(label)))
+        data = apply_compressor(data, sr, config.compressor_for_label(label))
+        if trim_start_frames > 0 and trim_start_frames < len(data):
+            data = data[trim_start_frames:]
+        if trim_end_frames > 0 and trim_end_frames < len(data):
+            data = data[:len(data) - trim_end_frames]
+        processed.append(data)
 
     max_len = max(len(d) for d in processed)
     channels = max(d.shape[1] for d in processed)
@@ -2319,7 +2352,12 @@ class LocalBackend(Backend):
             files_and_labels.append((local_path, take["instrument"]))
         if not files_and_labels:
             raise BackendError("None of this song's takes are available right now.")
-        mixed_path = _mixed_playback_path(takes[0]["track_name"], files_and_labels, self.get_config())
+        config = self.get_config()
+        trim_start = round(takes[0].get("trim_start_seconds", 0.0) * config.sample_rate)
+        trim_end = round(takes[0].get("trim_end_seconds", 0.0) * config.sample_rate)
+        mixed_path = _mixed_playback_path(
+            takes[0]["track_name"], files_and_labels, config, trim_start, trim_end,
+        )
         from .video.capture import open_in_default_player
         open_in_default_player(mixed_path)
 
@@ -2329,16 +2367,23 @@ class LocalBackend(Backend):
         completed_dir = vault_root / "completed_takes"
         by_filename: dict[str, dict] = {}
 
-        def add(track_name: str, label: str, take: TakeInfo) -> None:
+        def add(entry: TrackEntry, label: str, take: TakeInfo) -> None:
             try:
                 recorded_at = (completed_dir / take.filename).stat().st_mtime
             except OSError:
                 recorded_at = None
             by_filename[take.filename] = {
-                "track_name": track_name, "instrument": label, "filename": take.filename,
+                "track_name": entry.name, "instrument": label, "filename": take.filename,
                 "take_number": take.take_number, "has_video": take.has_video, "has_midi": take.has_midi,
                 "volume": take.volume,
                 "recorded_at": recorded_at,
+                # Non-destructive "edit backing track" trim (see
+                # edit_backing_track) — already-affected takes carry this
+                # along to wherever a take dict ends up used for playback
+                # (play_song_takes) or re-edit (EditBackingTrackDialog
+                # pre-filling its current values) without a second lookup.
+                "trim_start_seconds": entry.trim_start_seconds,
+                "trim_end_seconds": entry.trim_end_seconds,
             }
 
         for path in Project.list_projects(Path(config.projects_dir)):
@@ -2348,34 +2393,33 @@ class LocalBackend(Backend):
                 continue
             for track in project.setlist.tracks:
                 for label, take in track.preferred_takes.items():
-                    add(track.name, label, take)
+                    add(track, label, take)
 
         from .vault import load_inspiration_index
         for entry in load_inspiration_index(vault_root).values():
             for label, take in entry.preferred_takes.items():
-                add(entry.name, label, take)
+                add(entry, label, take)
 
         return sorted(by_filename.values(), key=lambda d: d["track_name"].lower())
 
-    def edit_backing_track(
-        self, take_filename: str, trim_start_seconds: float, trim_end_seconds: float,
-    ) -> dict:
-        if trim_start_seconds < 0 or trim_end_seconds < 0:
-            raise BackendError("Trim amounts can't be negative.")
-        if trim_start_seconds == 0 and trim_end_seconds == 0:
-            raise BackendError("Enter a trim amount for the start and/or end.")
-
-        config = self.get_config()
+    def _find_track_records(
+        self, config: StudioConfig, take_filename: str,
+    ) -> tuple[list[tuple[Project | None, TrackEntry]], dict[str, TrackEntry]]:
+        """Every record (a project's own TrackEntry, and/or the shared
+        vault-wide inspiration-take index's entry — vault.py) referencing
+        `take_filename` in its preferred_takes — the same vault-wide scan
+        list_completed_takes does, just stopping at "which record(s)" and
+        returned with each project object alongside its entry, rather
+        than flattening into plain dicts, so a caller can both read and
+        write them back (project.save_setlist() / save_inspiration_index
+        with the second return value). A project entry pairs with that
+        Project; the shared index's own entry (if any — the only place a
+        take drawn from a filter slot ever lives, see TrackEntry's
+        docstring) pairs with None instead, since there's no Project to
+        save it through. Used by edit_backing_track (resolve what to
+        update) and list_completed_takes (read trim_start_seconds/
+        trim_end_seconds onto each take row)."""
         root = Path(config.session_vault_path)
-        backing_dir = root / "backing_tracks"
-        completed_dir = root / "completed_takes"
-
-        from .vault import load_inspiration_index, save_inspiration_index
-
-        # Every record (a project's own TrackEntry, and/or the shared
-        # inspiration index's entry) referencing take_filename — see
-        # edit_backing_track's docstring for why there can be more than
-        # one for what's really the same song/files.
         records: list[tuple[Project | None, TrackEntry]] = []
         for path in Project.list_projects(Path(config.projects_dir)):
             try:
@@ -2386,14 +2430,25 @@ class LocalBackend(Backend):
                 if any(t.filename == take_filename for t in track.preferred_takes.values()):
                     records.append((project, track))
 
+        from .vault import load_inspiration_index
         inspiration_index = load_inspiration_index(root)
-        shared_touched = False
         for entry in inspiration_index.values():
             if any(t.filename == take_filename for t in entry.preferred_takes.values()):
                 records.append((None, entry))
-                shared_touched = True
                 break
+        return records, inspiration_index
 
+    def edit_backing_track(
+        self, take_filename: str, trim_start_seconds: float, trim_end_seconds: float,
+    ) -> dict:
+        if trim_start_seconds < 0 or trim_end_seconds < 0:
+            raise BackendError("Trim amounts can't be negative.")
+
+        config = self.get_config()
+        root = Path(config.session_vault_path)
+        backing_dir = root / "backing_tracks"
+
+        records, inspiration_index = self._find_track_records(config, take_filename)
         if not records:
             raise BackendError(f"Could not find any project or record referencing take '{take_filename}'.")
 
@@ -2401,65 +2456,49 @@ class LocalBackend(Backend):
         backing_track = records[0][1].backing_track
         if not backing_track:
             raise BackendError(f"'{track_name}' has no backing track file to trim.")
-
-        # Union of every instrument's current take across every matched
-        # record, deduplicated by filename — an inspiration-sourced
-        # track's project entry and its shared-index mirror reference the
-        # exact same files, so a naive per-record trim would double-cut
-        # them.
-        takes_by_filename: dict[str, tuple[str, TakeInfo]] = {}
-        for _, entry in records:
-            for label, take in entry.preferred_takes.items():
-                takes_by_filename[take.filename] = (label, take)
-
-        from .audio.formats import get_duration, trim_audio_file
-
         backing_path = backing_dir / backing_track
         if not backing_path.exists():
             raise BackendError(f"Backing track file not found: {backing_path}")
 
-        # Validate every file the trim would touch *before* touching any
-        # of them — a trim that fits the backing track but not some
-        # take's own (slightly different) length shouldn't leave the
-        # backing track trimmed while the takes it's supposed to stay in
-        # sync with are left alone.
-        to_trim = [backing_path] + [completed_dir / f for f in takes_by_filename]
-        for path in to_trim:
-            if not path.exists():
-                continue
-            duration = get_duration(path)
-            if trim_start_seconds + trim_end_seconds >= duration:
-                raise BackendError(
-                    f"Trim amount ({trim_start_seconds + trim_end_seconds:.1f}s) leaves nothing of "
-                    f"'{path.name}' ({duration:.1f}s long)."
-                )
+        # Always measured fresh from the untouched file — never derived
+        # from a previously-stored duration_seconds, which may already
+        # reflect an earlier trim (this call replaces, not adds to, the
+        # trim amounts, so re-trimming from scratch needs the real,
+        # original length every time).
+        from .audio.formats import get_duration
+        full_duration = get_duration(backing_path)
+        if trim_start_seconds + trim_end_seconds >= full_duration:
+            raise BackendError(
+                f"Trim amount ({trim_start_seconds + trim_end_seconds:.1f}s) leaves nothing of "
+                f"'{track_name}' ({full_duration:.1f}s long)."
+            )
+        new_duration = full_duration - trim_start_seconds - trim_end_seconds
 
-        new_duration = trim_audio_file(backing_path, trim_start_seconds, trim_end_seconds)
-
-        takes_trimmed = []
-        untouched_sidecars = []
-        for filename, (label, take) in takes_by_filename.items():
-            take_path = completed_dir / filename
-            if take_path.exists():
-                trim_audio_file(take_path, trim_start_seconds, trim_end_seconds)
-                takes_trimmed.append({"instrument": label, "filename": filename})
-            if take.has_video:
-                untouched_sidecars.append({"instrument": label, "kind": "video"})
-            if take.has_midi:
-                untouched_sidecars.append({"instrument": label, "kind": "midi"})
-
+        # Union of every instrument's current take across every matched
+        # record, deduplicated by filename — an inspiration-sourced
+        # track's project entry and its shared-index mirror reference the
+        # exact same files, so this just reports each one once.
+        affected_takes: dict[str, str] = {}  # filename -> instrument label
+        shared_touched = False
         for project, entry in records:
+            entry.trim_start_seconds = trim_start_seconds
+            entry.trim_end_seconds = trim_end_seconds
             entry.duration_seconds = new_duration
+            for label, take in entry.preferred_takes.items():
+                affected_takes[take.filename] = label
             if project is not None:
                 project.save_setlist()
+            else:
+                shared_touched = True
+
         if shared_touched:
+            from .vault import save_inspiration_index
             save_inspiration_index(root, inspiration_index)
 
         return {
             "track_name": track_name,
             "new_duration_seconds": new_duration,
-            "takes_trimmed": takes_trimmed,
-            "untouched_sidecars": untouched_sidecars,
+            "affected_takes": [{"instrument": label, "filename": f} for f, label in affected_takes.items()],
         }
 
     # --- inspiration ---
@@ -2988,8 +3027,22 @@ class LocalBackend(Backend):
         track.volume = self._backing_volume
         track.takes_volume = self._takes_volume
 
+        # Non-destructive "edit backing track" trim (edit_backing_track) —
+        # a virtual playback window applied here (never to the files
+        # themselves) to both the backing track and every already-
+        # recorded take layered in below, so a new take recorded this
+        # session is already exactly this length with nothing further to
+        # do, while an existing take recorded before the trim was set
+        # stays in sync with the now-"shorter" backing track instead of
+        # replaying its own copy of the trimmed-off intro/outro.
+        song_trim_start = round(track.trim_start_seconds * config.sample_rate)
+        song_trim_end = round(track.trim_end_seconds * config.sample_rate)
+
         if backing_path.exists():
-            engine.mixer.add_source("backing", backing_path, volume=track.volume / 100.0)
+            engine.mixer.add_source(
+                "backing", backing_path, volume=track.volume / 100.0,
+                trim_frames=song_trim_start, trim_end_frames=song_trim_end,
+            )
 
         # For an inspiration-sourced track, an *other* project could have
         # recorded a take on this exact song too — merged in from the
@@ -3026,7 +3079,8 @@ class LocalBackend(Backend):
             if take_path.exists():
                 effective_vol = take_info.volume * (track.takes_volume / 100.0)
                 engine.mixer.add_source(
-                    f"take:{other_inst}", take_path, volume=effective_vol, trim_frames=trim,
+                    f"take:{other_inst}", take_path, volume=effective_vol,
+                    trim_frames=trim + song_trim_start, trim_end_frames=song_trim_end,
                     compressor_settings=config.compressor_for_label(other_inst),
                 )
 
@@ -3079,7 +3133,23 @@ class LocalBackend(Backend):
         index = load_inspiration_index(vault_root(config))
         label = config.label_for_instrument(instrument_name)
         chosen = self._pick_filter_match(matches, label, index, exclude_id=exclude_id)
-        return build_inspiration_track_entry(chosen)
+        entry = build_inspiration_track_entry(chosen)
+
+        # build_inspiration_track_entry only knows the raw inspiration-
+        # server record — if this same song already has a shared-index
+        # entry (e.g. some other instrument/project already recorded it,
+        # or it's been through edit_backing_track), carry its trim over
+        # too, so a filter slot redrawing a previously-trimmed song keeps
+        # getting the trimmed version rather than silently reverting to
+        # the untrimmed original the moment it's drawn fresh.
+        shared = index.get(str(chosen.get("id")))
+        if shared is not None and (shared.trim_start_seconds or shared.trim_end_seconds):
+            entry.trim_start_seconds = shared.trim_start_seconds
+            entry.trim_end_seconds = shared.trim_end_seconds
+            entry.duration_seconds = max(
+                0.0, entry.duration_seconds - shared.trim_start_seconds - shared.trim_end_seconds,
+            )
+        return entry
 
     @staticmethod
     def _pick_filter_match(
@@ -4293,8 +4363,16 @@ class LocalBackend(Backend):
             )
             self._apply_hardware_direct_monitor(input_info, True, 100)
 
+            # Same non-destructive trim treatment as _load_track_locked —
+            # see that method's comment for why.
+            song_trim_start = round(track.trim_start_seconds * config.sample_rate)
+            song_trim_end = round(track.trim_end_seconds * config.sample_rate)
+
             if backing_path.exists():
-                engine.mixer.add_source("backing", backing_path, volume=self._backing_volume / 100.0)
+                engine.mixer.add_source(
+                    "backing", backing_path, volume=self._backing_volume / 100.0,
+                    trim_frames=song_trim_start, trim_end_frames=song_trim_end,
+                )
 
             trim = int(config.latency_compensation_ms / 1000.0 * config.sample_rate)
             for other_inst, take_info in track.preferred_takes.items():
@@ -4304,7 +4382,8 @@ class LocalBackend(Backend):
                 if take_path.exists():
                     effective_vol = take_info.volume * (self._takes_volume / 100.0)
                     engine.mixer.add_source(
-                        f"take:{other_inst}", take_path, volume=effective_vol, trim_frames=trim,
+                        f"take:{other_inst}", take_path, volume=effective_vol,
+                        trim_frames=trim + song_trim_start, trim_end_frames=song_trim_end,
                         compressor_settings=config.compressor_for_label(other_inst),
                     )
 

@@ -1,7 +1,8 @@
-"""Edit Backing Track dialog: permanently trim a long intro/outro off a
-song's backing track, from the Completed Takes tab — see backend.py's
-edit_backing_track for the actual operation (every instrument's current
-take on the same song gets the identical cut, to stay in sync)."""
+"""Edit Backing Track dialog: non-destructively crop a long intro/outro
+off a song's backing track, from the Completed Takes tab — see backend.
+py's edit_backing_track for the actual operation. No audio file is ever
+touched; every instrument's current take, and every future session that
+loads this song, plays back the same virtual window instead."""
 
 from __future__ import annotations
 
@@ -35,8 +36,9 @@ class EditBackingTrackDialog(tk.Toplevel):
         instruments = ", ".join(sorted({t["instrument"] for t in takes_for_song}))
         ttk.Label(
             frame,
-            text=f"Trimming the backing track also trims every current take of this song "
-                 f"to match ({instruments}), so everything stays in sync.",
+            text="Non-destructive: no audio file is changed. Cropping the backing track also crops "
+                 f"every current take of this song to match ({instruments}), and any future session "
+                 "that loads this song plays the cropped version too.",
             foreground="#666666", wraplength=380, justify="left",
         ).pack(anchor="w", pady=(4, 10))
 
@@ -45,23 +47,27 @@ class EditBackingTrackDialog(tk.Toplevel):
             kinds = ", ".join(sorted({"video" if t.get("has_video") else "MIDI" for t in sidecar_takes}))
             ttk.Label(
                 frame,
-                text=f"Note: {len(sidecar_takes)} take(s) here have a {kinds} file — only their audio "
-                     "gets trimmed; the video/MIDI file is left as-is and will no longer line up.",
+                text=f"Note: {len(sidecar_takes)} take(s) here have a {kinds} file — only audio playback "
+                     "reflects this crop for now, so reviewing the video/MIDI directly still includes "
+                     "the untrimmed intro/outro.",
                 foreground="#9a6a00", wraplength=380, justify="left",
             ).pack(anchor="w", pady=(0, 10))
 
         fields = ttk.Frame(frame)
         fields.pack(fill="x")
         ttk.Label(fields, text="Trim from start (seconds):").grid(row=0, column=0, sticky="w", pady=4)
-        self.start_var = tk.StringVar(value="0")
+        self.start_var = tk.StringVar(value=_format_seconds(take.get("trim_start_seconds", 0.0)))
         ttk.Entry(fields, textvariable=self.start_var, width=10).grid(row=0, column=1, sticky="w", padx=(8, 0))
         ttk.Label(fields, text="Trim from end (seconds):").grid(row=1, column=0, sticky="w", pady=4)
-        self.end_var = tk.StringVar(value="0")
+        self.end_var = tk.StringVar(value=_format_seconds(take.get("trim_end_seconds", 0.0)))
         ttk.Entry(fields, textvariable=self.end_var, width=10).grid(row=1, column=1, sticky="w", padx=(8, 0))
 
-        ttk.Label(
-            frame, text="This cannot be undone.", foreground="#b00020",
-        ).pack(anchor="w", pady=(10, 0))
+        if take.get("trim_start_seconds") or take.get("trim_end_seconds"):
+            ttk.Label(
+                frame, text="Already trimmed — shown above. Change the values and click Save to adjust, "
+                            "or set both to 0 to remove the trim entirely.",
+                foreground="#666666", wraplength=380, justify="left",
+            ).pack(anchor="w", pady=(8, 0))
 
         self.status_var = tk.StringVar(value="")
         ttk.Label(frame, textvariable=self.status_var, foreground="#666666", wraplength=380).pack(
@@ -72,7 +78,7 @@ class EditBackingTrackDialog(tk.Toplevel):
         footer.pack(fill="x", pady=(12, 0))
         self.cancel_button = ttk.Button(footer, text="Cancel", command=self.destroy)
         self.cancel_button.pack(side="right")
-        self.trim_button = ttk.Button(footer, text="Trim", command=self._on_trim)
+        self.trim_button = ttk.Button(footer, text="Save", command=self._on_trim)
         self.trim_button.pack(side="right", padx=(0, 8))
 
     def _on_trim(self) -> None:
@@ -87,21 +93,11 @@ class EditBackingTrackDialog(tk.Toplevel):
         if trim_start < 0 or trim_end < 0:
             messagebox.showerror("Invalid trim amount", "Trim amounts can't be negative.", parent=self)
             return
-        if trim_start == 0 and trim_end == 0:
-            messagebox.showerror("Nothing to trim", "Enter a trim amount for the start and/or end.", parent=self)
-            return
-        if not messagebox.askyesno(
-            "Trim backing track",
-            f"Trim {trim_start:g}s from the start and {trim_end:g}s from the end of "
-            f"“{self._take['track_name']}” and every current take of it?\n\nThis cannot be undone.",
-            parent=self,
-        ):
-            return
 
         self._working = True
         self.trim_button.state(["disabled"])
         self.cancel_button.state(["disabled"])
-        self.status_var.set("Trimming...")
+        self.status_var.set("Saving...")
         backend = self._backend
         filename = self._take["filename"]
 
@@ -122,14 +118,19 @@ class EditBackingTrackDialog(tk.Toplevel):
             self.status_var.set("")
             self.trim_button.state(["!disabled"])
             self.cancel_button.state(["!disabled"])
-            messagebox.showerror("Could not trim", error, parent=self)
+            messagebox.showerror("Could not edit backing track", error, parent=self)
             return
         self._on_trimmed()
         self.destroy()
-        count = len(result["takes_trimmed"])
+        count = len(result["affected_takes"])
+        new_duration = result["new_duration_seconds"]
         messagebox.showinfo(
-            "Trimmed",
-            f"Trimmed the backing track and {count} take{'s' if count != 1 else ''} of "
-            f"“{result['track_name']}”. New duration: "
-            f"{int(result['new_duration_seconds']) // 60}:{int(result['new_duration_seconds']) % 60:02d}.",
+            "Saved",
+            f"“{result['track_name']}” now plays back at {int(new_duration) // 60}:{int(new_duration) % 60:02d} "
+            f"— {count} take{'s' if count != 1 else ''} will reflect this the next time "
+            "it's played or recorded.",
         )
+
+
+def _format_seconds(value: float) -> str:
+    return "0" if not value else f"{value:g}"

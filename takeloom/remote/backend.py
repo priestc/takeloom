@@ -241,8 +241,13 @@ class RemoteBackend(Backend):
             files_and_labels.append((local_path, take["instrument"]))
         if not files_and_labels:
             raise BackendError("None of this song's takes are available right now.")
+        config = self.get_config()
+        trim_start = round(takes[0].get("trim_start_seconds", 0.0) * config.sample_rate)
+        trim_end = round(takes[0].get("trim_end_seconds", 0.0) * config.sample_rate)
         from ..backend import _mixed_playback_path
-        mixed_path = _mixed_playback_path(takes[0]["track_name"], files_and_labels, self.get_config())
+        mixed_path = _mixed_playback_path(
+            takes[0]["track_name"], files_and_labels, config, trim_start, trim_end,
+        )
         from ..video.capture import open_in_default_player
         open_in_default_player(mixed_path)
 
