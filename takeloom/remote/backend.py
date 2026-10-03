@@ -122,6 +122,16 @@ class RemoteBackend(Backend):
             {"project_name": project_name, "label": label, "filter_criteria": filter_criteria},
         )
 
+    def add_song_set_slot(self, project_name: str, label: str, songs: list[dict]) -> dict:
+        return self._client.call(
+            "add_song_set_slot", {"project_name": project_name, "label": label, "songs": songs},
+        )
+
+    def find_inspiration_track(self, artist: str, title: str) -> dict:
+        return self._client.call(
+            "find_inspiration_track", {"artist": artist, "title": title}, timeout=LONG_TIMEOUT,
+        )["track"]
+
     def get_filter_slot_previews(self, project_name: str) -> list[dict | None]:
         return self._client.call(
             "get_filter_slot_previews", {"project_name": project_name}, timeout=LONG_TIMEOUT,

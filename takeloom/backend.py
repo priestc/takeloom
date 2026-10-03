@@ -217,6 +217,24 @@ class Backend(ABC):
         ...
 
     @abstractmethod
+    def add_song_set_slot(self, project_name: str, label: str, songs: list[dict]) -> dict:
+        """Add a "song set" slot: like add_inspiration_filter_slot, but
+        each session draws from `songs` — a fixed list of inspiration-
+        server track dicts (as from search_inspiration_titles/
+        find_inspiration_track/search_inspiration_by_filter) — rather than
+        from a live filter query. See TrackEntry.song_set."""
+        ...
+
+    @abstractmethod
+    def find_inspiration_track(self, artist: str, title: str) -> dict:
+        """The one inspiration-server track exactly matching artist/
+        title (see inspiration.select_best_match), without downloading or
+        adding anything — for typing a song into a song set by hand when
+        it wasn't picked off the Title autocomplete. Raises BackendError
+        if there's no exact match."""
+        ...
+
+    @abstractmethod
     def get_filter_slot_previews(self, project_name: str) -> list[dict | None]:
         """Read-only preview of what each inspiration-filter slot in
         project_name's setlist would currently draw, one entry per
@@ -1767,6 +1785,37 @@ class LocalBackend(Backend):
         )
         return entry.to_dict()
 
+    def add_song_set_slot(self, project_name: str, label: str, songs: list[dict]) -> dict:
+        songs = [s for s in songs if s.get("id")]
+        if not songs:
+            raise BackendError("Add at least one song to the set.")
+        label = label.strip() or f"Song set ({len(songs)} songs)"
+        from .inspiration import average_duration
+        project = self._open_project(project_name)
+        entry = project.add_song_set_slot(label, songs, duration_seconds=average_duration(songs))
+        return entry.to_dict()
+
+    def find_inspiration_track(self, artist: str, title: str) -> dict:
+        from .inspiration import (
+            InspirationError, search_inspiration_tracks, search_title_suggestions, select_best_match,
+        )
+        config = self.get_config()
+        # Title autocomplete first: it's a precise title lookup returning
+        # full track dicts, whereas the filter search below is a loose
+        # library browse capped at 100 results — confirmed to bury an
+        # exact "Miles Davis - So What" under 100 other Miles Davis tracks
+        # and never return it at all.
+        suggestions = [t for t in search_title_suggestions(config, title, artist=artist, limit=50) if t.get("id")]
+        try:
+            return select_best_match(suggestions, artist, title)
+        except InspirationError:
+            pass
+        try:
+            tracks = search_inspiration_tracks(config, artist, title)
+            return select_best_match(tracks, artist, title)
+        except InspirationError as e:
+            raise BackendError(str(e)) from e
+
     def get_filter_slot_previews(self, project_name: str) -> list[dict | None]:
         config = self.get_config()
         project = self._open_project(project_name)
@@ -1802,7 +1851,9 @@ class LocalBackend(Backend):
                 "filter_preview_status",
                 {"project_name": project_name, "index": checked, "total": total, "label": track.name},
             )
-            if track.cached_matches:
+            if track.song_set:
+                matches = track.song_set  # fixed list — nothing to query
+            elif track.cached_matches:
                 # Reuses the last search_tracks_by_filter result cached on
                 # this slot (see TrackEntry.cached_matches) instead of
                 # re-querying the inspiration server — cleared by record.
@@ -3182,10 +3233,13 @@ class LocalBackend(Backend):
         if not track.is_inspiration_filter:
             return track
         from .inspiration import InspirationError, build_inspiration_track_entry, search_tracks_by_filter
-        try:
-            matches = search_tracks_by_filter(config, track.inspiration_filter)
-        except InspirationError as e:
-            raise BackendError(str(e)) from e
+        if track.song_set:
+            matches = list(track.song_set)  # a song set draws from its own fixed list — no server query
+        else:
+            try:
+                matches = search_tracks_by_filter(config, track.inspiration_filter)
+            except InspirationError as e:
+                raise BackendError(str(e)) from e
         if not matches:
             raise BackendError(f"No inspiration tracks match the filter for '{track.name}'.")
 

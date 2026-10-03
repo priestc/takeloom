@@ -112,7 +112,7 @@ class CompletedTakesFrame(ttk.Frame):
                 setlist = backend.get_setlist(current_project)
                 for t in setlist.get("tracks", []):
                     if t.get("is_inspiration_filter"):
-                        for match in t.get("cached_matches", []):
+                        for match in t.get("song_set") or t.get("cached_matches", []):
                             current_track_names.add(build_inspiration_track_entry(match).name)
                     else:
                         current_track_names.add(t["name"])

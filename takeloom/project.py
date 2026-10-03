@@ -84,6 +84,15 @@ class TrackEntry:
     # so a stale list under new criteria can't linger; empty for an
     # ordinary track or a filter slot never yet previewed.
     cached_matches: list[dict] = field(default_factory=list)
+    # A "song set": a filter slot (is_inspiration_filter=True) whose
+    # candidates are this fixed, hand-picked list of inspiration-server
+    # track dicts (id/artist/title/year/format/duration) instead of
+    # whatever inspiration_filter currently matches on the server. Drawn
+    # from exactly like a filter slot every session (same reuse-preferring
+    # pick — see backend.py's _pick_filter_match); inspiration_filter is
+    # {} and cached_matches unused. Empty for everything else. See
+    # is_song_set.
+    song_set: list[dict] = field(default_factory=list)
     preferred_takes: dict[str, TakeInfo] = field(default_factory=dict)
     # key = instrument label (not full_name — a Stratocaster and a
     # Telecaster take of the same song share one "electric-guitar" key
@@ -105,6 +114,10 @@ class TrackEntry:
     # the untouched file directly instead.
     trim_start_seconds: float = 0.0
     trim_end_seconds: float = 0.0
+
+    @property
+    def is_song_set(self) -> bool:
+        return self.is_inspiration_filter and bool(self.song_set)
 
     def set_preferred_take(self, instrument: str, take: TakeInfo) -> None:
         self.preferred_takes[instrument] = take
@@ -141,6 +154,7 @@ class TrackEntry:
             is_inspiration_filter=data.get("is_inspiration_filter", False),
             inspiration_filter=data.get("inspiration_filter", {}),
             cached_matches=data.get("cached_matches", []),
+            song_set=data.get("song_set", []),
             preferred_takes=takes,
             source=data.get("source", "upload"),
             trim_start_seconds=data.get("trim_start_seconds", 0.0),
@@ -258,6 +272,18 @@ class Project:
         entry = TrackEntry(
             name=label, backing_track="", is_inspiration_filter=True, inspiration_filter=dict(filter_criteria),
             duration_seconds=duration_seconds, cached_matches=list(cached_matches or []),
+        )
+        self.setlist.add_track(entry)
+        self.save_setlist()
+        return entry
+
+    def add_song_set_slot(self, label: str, songs: list[dict], duration_seconds: float = 0.0) -> TrackEntry:
+        """Add a "song set" slot — like add_inspiration_filter_slot, but
+        drawing from a fixed list of hand-picked inspiration tracks
+        instead of a live filter. See TrackEntry.song_set."""
+        entry = TrackEntry(
+            name=label, backing_track="", is_inspiration_filter=True,
+            song_set=[dict(s) for s in songs], duration_seconds=duration_seconds,
         )
         self.setlist.add_track(entry)
         self.save_setlist()

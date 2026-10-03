@@ -26,7 +26,7 @@ from ..inspiration import average_duration, derive_filter_label
 from ..project import Setlist, TrackEntry
 from ..recording_driver import RecordingDeckDriver
 from ..utils import format_duration
-from .add_to_setlist_dialog import AddToSetlistDialog
+from .add_to_setlist_chooser import AddToSetlistChooser
 from .app_state import AppState
 from .filter_slot_dialogs import EditFilterDialog, ShowTracksDialog
 from .instrument_colors import color_for_label
@@ -34,6 +34,7 @@ from .level_meter import LevelMeter
 from .tuner_meter import TunerMeter
 from .new_project_dialog import NewProjectDialog
 from .setlist_row import SetlistRow
+from .song_set_dialog import SongSetDialog
 from .streamdeck_emulator import StreamDeckEmulator
 from .video_check_dialog import VideoCheckDialog
 
@@ -727,7 +728,9 @@ class RecordFrame(ttk.Frame):
             # (see inspiration.derive_filter_label). duration_seconds is
             # the average across every currently-matching track (see
             # inspiration.average_duration) rather than one fixed song's.
-            return f"🎲 {track.name}  (~{dur})"
+            # A song set (TrackEntry.song_set) draws the same way, from its
+            # own fixed list.
+            return f"{'🎵' if track.is_song_set else '🎲'} {track.name}  (~{dur})"
         # Takes are filed by label, not by which specific instrument
         # played them — a Telecaster take should still check off a song
         # for the Stratocaster too, since both are "electric-guitar"
@@ -764,7 +767,10 @@ class RecordFrame(ttk.Frame):
             if preview is None:
                 return "Checking matches...", ""
             count = preview.get("match_count", 0)
-            stats = f"{count} matching track{'s' if count != 1 else ''}"
+            if track.is_song_set:
+                stats = f"{count} song{'s' if count != 1 else ''} in set"
+            else:
+                stats = f"{count} matching track{'s' if count != 1 else ''}"
             next_up = preview.get("next_up") or {}
             detected_label = self.config_obj.label_for_instrument(inst_name) if inst_name and self.config_obj else ""
             if detected_label and detected_label in labels:
@@ -859,7 +865,7 @@ class RecordFrame(ttk.Frame):
         if not self._project_name:
             messagebox.showerror("Cannot add", "Select a project first.")
             return
-        AddToSetlistDialog(self, self.app_state.backend, self._project_name, self._refresh_setlist_from_server)
+        AddToSetlistChooser(self, self.app_state.backend, self._project_name, self._refresh_setlist_from_server)
 
     def _on_project_created(self, project_name: str) -> None:
         backend = self.app_state.backend
@@ -1207,7 +1213,9 @@ class RecordFrame(ttk.Frame):
 
         track = self._setlist.tracks[index]
         menu = tk.Menu(self, tearoff=0)
-        if track.is_inspiration_filter:
+        if track.is_song_set:
+            menu.add_command(label="Edit songs...", command=lambda: self._on_edit_song_set(index))
+        elif track.is_inspiration_filter:
             menu.add_command(label="Edit...", command=lambda: self._on_edit_filter(index))
             menu.add_command(label="Show tracks...", command=lambda: self._on_show_filter_tracks(index))
         else:
@@ -1241,6 +1249,27 @@ class RecordFrame(ttk.Frame):
             )
 
         EditFilterDialog(self, self.app_state.backend, track.inspiration_filter, on_save)
+
+    def _on_edit_song_set(self, index: int) -> None:
+        if not self._setlist or index >= len(self._setlist.tracks):
+            return
+        track = self._setlist.tracks[index]
+
+        def on_saved(name: str, songs: list[dict]) -> None:
+            if not self._setlist or index >= len(self._setlist.tracks) or self._setlist.tracks[index] is not track:
+                return  # setlist reloaded/reordered while the dialog was open
+            track.song_set = songs
+            track.name = name or track.name
+            track.duration_seconds = average_duration(songs)
+            if self._selected_track_index == index:
+                self.selection_var.set(f"Selected: {track.name}")
+            # The slot's "next up" previews were picked from the old list.
+            self._save_setlist_and_refresh(refresh_filter_previews=True)
+
+        SongSetDialog(
+            self, self.app_state.backend, title="Edit Song Set", on_saved=on_saved,
+            initial_name=track.name, initial_songs=track.song_set,
+        )
 
     def _apply_filter_slot_duration(self, index: int, avg_duration: float) -> None:
         if not self._setlist or index >= len(self._setlist.tracks):
