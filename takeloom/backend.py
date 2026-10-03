@@ -1500,6 +1500,13 @@ class LocalBackend(Backend):
         # starts each launch in "production" (hear the full produced mix).
         # Video Check ignores this entirely and always runs "recording".
         self._monitoring_mode: str = "production"
+        # Set by set_audio_hardware_present(False) — the always-running
+        # server's hardware watcher (rig_watcher.py) saw the audio interface
+        # get powered off. Keeps _start_monitoring_locked() — which every
+        # session/scan/test teardown calls to resume ambient monitoring —
+        # from trying to reopen a device that isn't there any more (PortAudio
+        # still lists it until it's re-initialized).
+        self._audio_hardware_absent = False
         self._preview = _CameraPreviewManager(self._current_camera_device, on_error=self._on_preview_error)
         # "Sticky" mixer levels: once the operator nudges backing/takes volume,
         # that level carries forward to every track loaded afterward (like a
@@ -1629,6 +1636,13 @@ class LocalBackend(Backend):
             sd._initialize()
         except Exception:
             pass
+        self._preview.restart()
+
+    def refresh_camera_preview(self) -> None:
+        """Just the camera half of refresh_devices() — for the server's
+        hardware watcher (rig_watcher.py) when the webcam powers on. Leaves
+        PortAudio alone, which is never safe to re-initialize under an open
+        stream."""
         self._preview.restart()
 
     # --- projects / setlists ---
@@ -2897,7 +2911,8 @@ class LocalBackend(Backend):
         self._record_lock (the teardown of any other engine, so ambient
         monitoring resumes right after)."""
         if (
-            self._active_latency_test is not None
+            self._audio_hardware_absent
+            or self._active_latency_test is not None
             or self._active_video_check is not None
             or self._active_session is not None
             or self._active_instrument_test is not None
@@ -2933,6 +2948,51 @@ class LocalBackend(Backend):
             if self._active_monitor.midi_input is not None:
                 self._active_monitor.midi_input.close()
             self._active_monitor = None
+
+    def set_audio_hardware_present(self, present: bool) -> bool:
+        """The always-running `takeloom server`'s hardware watcher (see
+        rig_watcher.py) saw the configured audio interface get powered on
+        (`present`) or off. Returns whether ambient monitoring is open
+        afterwards.
+
+        Off: end whatever's using the hardware — a still-open session is
+        ended normally (stop_recording(), so everything captured up to that
+        point is kept and post-processed), an in-progress auto-detect scan
+        is cancelled, and the ambient monitor stream is closed — and stop
+        any of their teardowns from reopening monitoring on the vanished
+        device.
+
+        On: re-initialize PortAudio so it can see the device at all (it
+        snapshots its device list at initialization — see refresh_devices),
+        then open ambient monitoring, which also sets the Scarlett's
+        hardware direct monitor (see _apply_hardware_direct_monitor). The
+        re-init is skipped if any stream is somehow still open, since
+        terminating PortAudio under an open stream isn't safe."""
+        if not present:
+            self._audio_hardware_absent = True
+            self.stop_auto_detect_instrument()
+            self.stop_recording()
+            with self._record_lock:
+                self._close_active_monitor()
+            return False
+        with self._record_lock:
+            self._audio_hardware_absent = False
+            busy = any(a is not None for a in (
+                self._active_latency_test, self._active_video_check, self._active_session,
+                self._active_instrument_test, self._active_detect_all, self._active_auto_detect,
+                self._active_monitor,
+            ))
+            if not busy:
+                try:
+                    import sounddevice as sd
+                    sd._terminate()
+                    sd._initialize()
+                except Exception:
+                    pass
+            self._start_monitoring_locked()
+            monitoring = self._active_monitor is not None
+        self._preview.restart()
+        return monitoring
 
     def restart_monitoring(self) -> bool:
         with self._record_lock:

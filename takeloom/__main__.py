@@ -303,10 +303,10 @@ def server_command(disable_color: bool) -> None:
     only accepts connections from the local network.
     """
     from .backend import BackendError, LocalBackend, StartRecordingRequest
-    from .device_check import check_configured_devices
     from .recording_driver import RecordingDeckDriver
     from .remote.protocol import REMOTE_SERVER_PORT
     from .remote.server import RemoteServer
+    from .rig_watcher import RigWatcher
 
     def log(msg: str, err: bool = False) -> None:
         # Errors print in red so they stand out in a scrolling headless log;
@@ -398,19 +398,6 @@ def server_command(disable_color: bool) -> None:
         raise SystemExit(1)
 
     log(f"takeloom server listening on port {listen_port} (host: {backend.hostname()}, ip: {backend.ip_address()})")
-    # StreamDeck is checked separately below, via the real connection attempt
-    # (driver.connect()), which reports a more specific error than a plain
-    # not-found when a device is selected but fails to open.
-    for warning in check_configured_devices(backend, include_streamdeck=False):
-        log(warning, err=True)
-
-    # Best-effort: open live monitoring for the last-used instrument right
-    # away, so the operator can hear themselves in headphones immediately —
-    # not only once a take/session/video-check actually starts. See
-    # LocalBackend.start_monitoring().
-    if backend.start_monitoring():
-        log(f"Live-monitoring '{backend.get_config().last_selected_instrument}'.")
-
     # Instrument auto-detect is no longer kicked off automatically on every
     # idle transition — that briefly existed here and caused a burst of
     # redundant, overlapping start_auto_detect_instrument() calls every
@@ -462,10 +449,16 @@ def server_command(disable_color: bool) -> None:
         backend, resolve_start_request=_resolve_headless_request,
         on_video_check_result=_open_video_check_result, log=log,
     )
-    if driver.connect():
-        log("StreamDeck connected.")
-    elif driver.streamdeck.last_error:
-        log(f"StreamDeck: found a device but could not connect — {driver.streamdeck.last_error}", err=True)
+    # The server is meant to stay up permanently, with the recording
+    # hardware (audio interface, webcam, Stream Deck — all on one switched
+    # USB hub) powered on only for a session. RigWatcher replaces the old
+    # one-shot startup device check/live monitoring/Stream Deck connect: it
+    # brings each of them up whenever the hub is switched on and tears them
+    # down when it's switched off, for as long as the server runs. Its
+    # first poll runs inline, so the startup state is logged right here.
+    driver.listen()
+    watcher = RigWatcher(backend, driver, log=log)
+    watcher.start()
 
     log("Press Ctrl+C to stop.\n")
 
@@ -476,6 +469,7 @@ def server_command(disable_color: bool) -> None:
         pass
     finally:
         log("\nStopping server...")
+        watcher.stop()
         server.stop()
         driver.disconnect()
         try:

@@ -168,6 +168,14 @@ class RecordingDeckDriver:
             self._backend.off_event(self._on_backend_event)
             self._events_subscribed = False
 
+    def listen(self) -> None:
+        """Start tracking backend events (phase etc.) without opening any
+        Stream Deck — for the always-running server, where the deck is
+        connected later, whenever it's powered on (see rig_watcher.py), and
+        the driver needs to already know the session phase by then.
+        connect() does this too; calling both is harmless."""
+        self._subscribe_backend_events()
+
     def connect(self, key_callback: Callable[[str], None] | None = None) -> bool:
         """Start listening for backend events — this drives phase tracking
         and hooks like on_video_check_result() regardless of whether a
@@ -201,6 +209,25 @@ class RecordingDeckDriver:
     def disconnect(self) -> None:
         self._unsubscribe_backend_events()
         self.streamdeck.disconnect()
+
+    def release_deck(self) -> None:
+        """The Stream Deck went away (powered off with the rest of the rig —
+        see rig_watcher.py): drop its handle, but unlike disconnect() keep
+        listening to backend events so phase stays accurate for whenever it
+        comes back. Also abandon any half-finished identify cycle (cancelling
+        its scan), so the deck comes back up on Start Local/Start Streaming
+        rather than a stale Re-identify/Play from before it went off."""
+        self.streamdeck.disconnect()
+        if self.identify_state != "idle":
+            try:
+                self._backend.stop_auto_detect_instrument()
+            except BackendError:
+                pass
+        self.identify_state = "idle"
+        self._pending_streaming = False
+        self.detected_instrument = None
+        self.tuner_note = None
+        self._tuner_smoother.reset()
 
     def rebind_backend(self, backend: Backend) -> None:
         """Point this driver at a different backend (e.g. the Tk UI

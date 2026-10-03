@@ -109,6 +109,20 @@ def list_streamdecks() -> list[tuple[str, str]]:
     return results
 
 
+def any_streamdeck_attached() -> bool:
+    """Cheap presence check — is any Stream Deck on the USB bus right now?
+    Enumerates without opening anything (unlike list_streamdecks()), so
+    it's fine to poll every couple of seconds — see rig_watcher.py."""
+    if not _HAVE_STREAMDECK:
+        return False
+    try:
+        decks = DeviceManager().enumerate()
+        _skip_hidapi_exit_crash()
+    except Exception:
+        return False
+    return bool(decks)
+
+
 # Button tuple: (key_index, icon_name, label, key_char, active_state_name, active_color, dim_color)
 # active_state_name=None → always shown in active color.
 _INSPIRATION_BUTTONS: list[tuple] = [
@@ -580,6 +594,20 @@ class StreamDeckController:
     def connected(self) -> bool:
         return self._deck is not None
 
+    def still_attached(self) -> bool:
+        """Whether the deck we hold open is still physically there. Once
+        it's unplugged/powered off, the library's read thread hits a
+        TransportError and closes the handle itself, so is_open() alone
+        usually answers this; connected() (a fresh HID enumerate) catches
+        the rest."""
+        deck = self._deck
+        if deck is None:
+            return False
+        try:
+            return deck.is_open() and deck.connected()
+        except Exception:
+            return False
+
     def connect(self, key_callback: Callable[[str], None], device_id: str = "") -> bool:
         """Open the Stream Deck whose serial number matches device_id (from
         list_streamdecks(), stored as StudioConfig.streamdeck_id). Returns
@@ -957,18 +985,24 @@ class StreamDeckController:
                 self._update_touchscreen()
 
     def disconnect(self) -> None:
-        if self._deck:
-            if self._device_key is not None:
-                with _open_by_id_lock:
-                    _open_by_id.pop(self._device_key, None)
-            try:
-                self._deck.reset()
-                self._deck.close()
-            except Exception:
-                pass
-            self._deck = None
-            self._device_key = None
-            self._key_faces.clear()
+        # Under self._lock so a redraw already in flight on another thread
+        # (a backend event, the touchscreen revert timer) finishes before
+        # the handle goes away instead of racing it to None — matters now
+        # that the always-running server releases a powered-off deck from
+        # its watcher thread (see rig_watcher.py).
+        with self._lock:
+            if self._deck:
+                if self._device_key is not None:
+                    with _open_by_id_lock:
+                        _open_by_id.pop(self._device_key, None)
+                try:
+                    self._deck.reset()
+                    self._deck.close()
+                except Exception:
+                    pass
+                self._deck = None
+                self._device_key = None
+                self._key_faces.clear()
 
     def _make_key_image(self, icon: str | None, label: str | None, color: tuple) -> bytes:
         img = PILHelper.create_image(self._deck, background=color)
