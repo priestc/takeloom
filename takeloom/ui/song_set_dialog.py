@@ -21,6 +21,9 @@ from .filter_fields import FilterCriteriaFields
 # Adding more matches than this from one filter asks first — an artist- or
 # genre-wide filter can match hundreds of songs.
 _BULK_CONFIRM_THRESHOLD = 100
+# radioserver's track search (library/views.py search_tracks) returns at
+# most this many results, randomly sampled, however many actually match.
+_SERVER_RESULT_CAP = 100
 
 
 class SongSetDialog(tk.Toplevel):
@@ -226,6 +229,14 @@ class SongSetDialog(tk.Toplevel):
             if not self.name_var.get().strip() and not self._songs:
                 self.name_var.set(derive_filter_label(criteria))
             self._append_songs(tracks)
+            if len(tracks) >= _SERVER_RESULT_CAP:
+                # radioserver's /library/api/tracks/ stops at 100, picked at
+                # random — so this isn't every match, and searching again
+                # can turn up different ones.
+                self.status_var.set(
+                    self.status_var.get() + f" The server returns at most {_SERVER_RESULT_CAP} random matches "
+                    "per search — narrow the filter, or search again for others."
+                )
 
         self._run("Searching...", lambda: backend.search_inspiration_by_filter(criteria), on_found)
 
