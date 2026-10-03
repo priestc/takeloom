@@ -630,12 +630,15 @@ class Backend(ABC):
         ...
 
     @abstractmethod
-    def search_inspiration_by_filter(self, filter_criteria: dict) -> list[dict]:
-        """Every inspiration-server track matching `filter_criteria` (same
+    def search_inspiration_by_filter(self, filter_criteria: dict, all_matches: bool = False) -> list[dict]:
+        """Inspiration-server tracks matching `filter_criteria` (same
         shape as an inspiration filter slot's inspiration_filter — artist/
         genre/year_min/year_max/duration_min/duration_max) — backs the
         setlist's "Show tracks..." context menu action, so an operator can
-        see exactly what a filter slot might draw before recording."""
+        see exactly what a filter slot might draw before recording. A
+        random sample of at most 100 unless `all_matches` (the song set
+        builder), which asks for every match — see inspiration.
+        _post_track_query."""
         ...
 
     # --- recording ---
@@ -1800,11 +1803,12 @@ class LocalBackend(Backend):
             InspirationError, search_inspiration_tracks, search_title_suggestions, select_best_match,
         )
         config = self.get_config()
-        # Title autocomplete first: it's a precise title lookup returning
-        # full track dicts, whereas the filter search below is a loose
-        # library browse capped at 100 results — confirmed to bury an
-        # exact "Miles Davis - So What" under 100 other Miles Davis tracks
-        # and never return it at all.
+        # Title autocomplete first: a cheap, precise title lookup returning
+        # full track dicts. The filter search below is the fallback — only
+        # exact on radioserver 41eda00+ (title filter + all matches); an
+        # older server ignores the title and returns a random 100 of the
+        # artist's tracks, which once buried "Miles Davis - So What"
+        # entirely.
         suggestions = [t for t in search_title_suggestions(config, title, artist=artist, limit=50) if t.get("id")]
         try:
             return select_best_match(suggestions, artist, title)
@@ -2576,10 +2580,10 @@ class LocalBackend(Backend):
         from .inspiration import search_title_suggestions
         return search_title_suggestions(self.get_config(), partial, artist=artist)
 
-    def search_inspiration_by_filter(self, filter_criteria: dict) -> list[dict]:
+    def search_inspiration_by_filter(self, filter_criteria: dict, all_matches: bool = False) -> list[dict]:
         from .inspiration import InspirationError, search_tracks_by_filter
         try:
-            return search_tracks_by_filter(self.get_config(), filter_criteria)
+            return search_tracks_by_filter(self.get_config(), filter_criteria, all_matches=all_matches)
         except InspirationError as e:
             raise BackendError(str(e)) from e
 

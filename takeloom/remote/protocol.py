@@ -118,7 +118,9 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
     if op == "add_inspiration_track_by_id":
         return backend.add_inspiration_track_by_id(args["project_name"], args["track_info"])
     if op == "search_inspiration_by_filter":
-        return {"tracks": backend.search_inspiration_by_filter(args["filter_criteria"])}
+        return {"tracks": backend.search_inspiration_by_filter(
+            args["filter_criteria"], all_matches=bool(args.get("all_matches")),
+        )}
     if op == "start_recording":
         req = StartRecordingRequest(
             project_name=args["project_name"],

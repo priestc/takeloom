@@ -75,7 +75,11 @@ def derive_filter_label(filter_criteria: dict) -> str:
     return "Inspiration Filter"
 
 
-def _post_track_query(config: StudioConfig, filters: list[dict]) -> list[dict]:
+def _post_track_query(config: StudioConfig, filters: list[dict], all_matches: bool = False) -> list[dict]:
+    """POST /library/api/tracks/. By default radioserver answers with a
+    radio-style random sample of at most 100 matches; `all_matches` asks
+    for every match instead (radioserver 41eda00+ — an older server just
+    ignores it and samples as before)."""
     if not config.inspiration_server or not config.inspiration_api_key:
         raise InspirationError(
             "inspiration_server and inspiration_api_key must be set (takeloom setup-studio)."
@@ -83,7 +87,10 @@ def _post_track_query(config: StudioConfig, filters: list[dict]) -> list[dict]:
 
     server = config.inspiration_server.rstrip("/")
     url = f"{server}/library/api/tracks/"
-    payload = json.dumps({"filters": filters}).encode()
+    body: dict = {"filters": filters}
+    if all_matches:
+        body["all"] = True
+    payload = json.dumps(body).encode()
     req = urllib.request.Request(
         url,
         data=payload,
@@ -117,7 +124,7 @@ def _post_track_query(config: StudioConfig, filters: list[dict]) -> list[dict]:
     return data.get("tracks", [])
 
 
-def search_tracks_by_filter(config: StudioConfig, filter_criteria: dict) -> list[dict]:
+def search_tracks_by_filter(config: StudioConfig, filter_criteria: dict, all_matches: bool = False) -> list[dict]:
     """Query the inspiration server for every track matching one arbitrary
     filter dict (e.g. {"artist": "Miles Davis"} or {"genre": "Rock"}).
     Backs both a setlist "inspiration filter" slot's random draw each
@@ -125,7 +132,7 @@ def search_tracks_by_filter(config: StudioConfig, filter_criteria: dict) -> list
     tracks..." preview of what a slot currently matches."""
     if not filter_criteria:
         raise InspirationError("This filter slot has no filter criteria set.")
-    return _post_track_query(config, [filter_criteria])
+    return _post_track_query(config, [filter_criteria], all_matches=all_matches)
 
 
 def search_inspiration_tracks(config: StudioConfig, artist: str = "", title: str = "") -> list[dict]:
@@ -136,7 +143,9 @@ def search_inspiration_tracks(config: StudioConfig, artist: str = "", title: str
     filters = {k: v for k, v in {"artist": artist.strip(), "title": title.strip()}.items() if v}
     if not filters:
         raise InspirationError("Enter an artist and/or title to search.")
-    tracks = _post_track_query(config, [filters])
+    # all_matches: an exact lookup must see every artist/title match, not a
+    # random 100 of them (which could leave out the very song asked for).
+    tracks = _post_track_query(config, [filters], all_matches=True)
     if not tracks:
         raise InspirationError(f"No match found for {_describe(artist, title)}.")
     return tracks

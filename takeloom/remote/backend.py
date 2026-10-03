@@ -289,10 +289,11 @@ class RemoteBackend(Backend):
             timeout=DOWNLOAD_TIMEOUT,
         )
 
-    def search_inspiration_by_filter(self, filter_criteria: dict) -> list[dict]:
-        return self._client.call(
-            "search_inspiration_by_filter", {"filter_criteria": filter_criteria}, timeout=LONG_TIMEOUT,
-        )["tracks"]
+    def search_inspiration_by_filter(self, filter_criteria: dict, all_matches: bool = False) -> list[dict]:
+        args: dict = {"filter_criteria": filter_criteria}
+        if all_matches:
+            args["all_matches"] = True  # omitted otherwise, so an older server never sees an unknown arg
+        return self._client.call("search_inspiration_by_filter", args, timeout=LONG_TIMEOUT)["tracks"]
 
     # --- recording ---
 
