@@ -46,6 +46,7 @@ class SongSetDialog(tk.Toplevel):
         self._commit = commit
         self._songs: list[dict] = [dict(s) for s in (initial_songs or [])]
         self._working = False
+        self._artist_cache: dict[str, list[dict]] = {}  # see _artist_tracks
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         frame = ttk.Frame(self, padding=16)
@@ -115,11 +116,28 @@ class SongSetDialog(tk.Toplevel):
             return [(name, None) for name in self._backend.search_inspiration_artists(text)]
 
         def fetch_titles(text: str) -> list[tuple[str, dict | None]]:
-            tracks = self._backend.search_inspiration_titles(text, artist=self.artist_field.get().strip())
+            artist = self.artist_field.get().strip()
+            needle = text.strip().lower()
+            # With an artist entered, suggest from that artist's own songs
+            # first, matched locally on any substring: the server's title
+            # autocomplete needs 2+ characters and only knows the exact
+            # artist spelling picked, so a chosen spelling with only a song
+            # or two filed under it (e.g. "Lil' Jimmie Dickens" vs. the
+            # 100+ under "Little Jimmy Dickens", which the artist filter
+            # search does find) left the Title box suggesting nothing.
+            tracks = [t for t in self._artist_tracks(artist) if needle in (t.get("title") or "").lower()]
+            tracks.sort(key=lambda t: not (t.get("title") or "").lower().startswith(needle))  # prefix matches first
+            have = {t.get("id") for t in tracks}
+            tracks += [
+                t for t in self._backend.search_inspiration_titles(text, artist=artist)
+                if t.get("id") not in have or "id" not in t
+            ]
             out = []
             for t in tracks:
                 year = t.get("year")
                 display = f"{t.get('title', '')} ({year})" if year else t.get("title", "")
+                if artist and t.get("artist") and t["artist"].lower() != artist.lower():
+                    display += f" — {t['artist']}"
                 out.append((display, t if "id" in t else None))
             return out
 
@@ -134,6 +152,22 @@ class SongSetDialog(tk.Toplevel):
         self.add_song_button.grid(row=2, column=1, sticky="e", pady=(6, 0))
         self.artist_field.bind_return(lambda _e: self._on_add_song())
         self.title_field.bind_return(lambda _e: self._on_add_song())
+
+    def _artist_tracks(self, artist: str) -> list[dict]:
+        """Every library track the artist filter search finds for
+        `artist`, fetched once per artist per dialog (called from the
+        autocomplete's worker thread, never the Tk thread). [] with no
+        artist, or if the search fails — suggestions just fall back to the
+        server's own title autocomplete."""
+        if not artist:
+            return []
+        key = artist.lower()
+        if key not in self._artist_cache:
+            try:
+                self._artist_cache[key] = self._backend.search_inspiration_by_filter({"artist": artist})
+            except BackendError:
+                return []
+        return self._artist_cache[key]
 
     def _on_add_song(self) -> None:
         if self._working:
