@@ -3049,6 +3049,13 @@ class LocalBackend(Backend):
         self._preview.restart()
         return monitoring
 
+    def stop_monitoring(self) -> None:
+        """Close start_monitoring()'s ambient stream, if open — e.g. when
+        the UI switches to a remote backend, so this machine stops holding
+        its own audio/MIDI hardware for no reason."""
+        with self._record_lock:
+            self._close_active_monitor()
+
     def restart_monitoring(self) -> bool:
         with self._record_lock:
             config = self.get_config()

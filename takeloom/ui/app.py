@@ -305,6 +305,11 @@ def run(remote_ip: str | None = None) -> None:
     initial_title = "Studio Setup" if not config.studio_name else "Record"
     _build_tabs(root, app_state, select_title=initial_title)
 
+    # Local live monitoring only for a genuinely local launch — never one
+    # about to connect to a remote (see AppState.start_local_monitoring).
+    if not remote_ip:
+        app_state.start_local_monitoring()
+
     if remote_ip:
         from ..remote.protocol import REMOTE_SERVER_PORT
         from .remote import connect_async, remember_remote_token

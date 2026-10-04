@@ -29,9 +29,19 @@ class AppState:
         self.remote_name: str = ""  # hostname of the connected remote; "" when backend is local
         self._recording_active: bool = False
         self._listeners: list[Listener] = []
-        # Best-effort — see LocalBackend.start_monitoring(). Off the main
-        # thread so a slow/misbehaving audio device can't delay the window
-        # from appearing.
+        # Local live monitoring is deliberately NOT started here — see
+        # start_local_monitoring(). This object is created before app.py
+        # knows whether this launch is a remote-control terminal, and a
+        # remote terminal (the laptop) must never touch its own audio/MIDI
+        # hardware: it only sends commands; the server does all recording
+        # and sound.
+
+    def start_local_monitoring(self) -> None:
+        """Best-effort live monitoring of this machine's own hardware (see
+        LocalBackend.start_monitoring()) — only for when this machine is
+        actually being used in local mode: a plain local launch, or an
+        explicit Disconnect back to local. Off the main thread so a slow/
+        misbehaving audio device can't delay the window."""
         threading.Thread(target=self.local_backend.start_monitoring, daemon=True).start()
 
     @property
@@ -61,6 +71,10 @@ class AppState:
         self.remote_name = remote_name
         if old is not backend:
             old.close()
+        if backend.is_remote():
+            # Remote mode only relays commands — release any local audio/
+            # MIDI monitoring this machine had open from local mode.
+            threading.Thread(target=self.local_backend.stop_monitoring, daemon=True).start()
         self._notify()
 
     def _notify(self) -> None:

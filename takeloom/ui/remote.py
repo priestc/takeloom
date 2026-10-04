@@ -356,6 +356,10 @@ class RemoteFrame(ttk.Frame):
         if not self.app_state.backend.is_remote():
             return
         self.app_state.set_backend(self.app_state.local_backend)
+        # Deliberately back in local mode — resume monitoring this
+        # machine's own hardware (unlike app.py's handle_remote_disconnect,
+        # which only drops to local momentarily while reconnecting).
+        self.app_state.start_local_monitoring()
         self._refresh_connect_status()
 
     def _load_local_config(self) -> None:
