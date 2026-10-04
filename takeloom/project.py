@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import secrets
 import shutil
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, fields, asdict
 from pathlib import Path
 
 from .utils import atomic_write_text, ensure_dir, sanitize_filename
@@ -142,8 +142,14 @@ class TrackEntry:
     @classmethod
     def from_dict(cls, data: dict) -> TrackEntry:
         takes = {}
+        known = {f.name for f in fields(TakeInfo)}
         for inst, take_data in data.get("preferred_takes", {}).items():
-            takes[inst] = TakeInfo(**take_data)
+            # Unknown keys dropped, not passed through: a client running an
+            # older takeloom than the server it's connected to (e.g. the
+            # laptop when its auto-update has failed) gets setlists with
+            # fields it's never heard of — crashing on them (TypeError:
+            # unexpected keyword 'has_midi') took the whole Record tab down.
+            takes[inst] = TakeInfo(**{k: v for k, v in take_data.items() if k in known})
         return cls(
             name=data["name"],
             backing_track=data["backing_track"],
