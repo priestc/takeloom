@@ -8,8 +8,9 @@ default output device via sounddevice.
 
 Plays on the machine looking at the UI — over a Remote connection that's
 the laptop's own speakers, same as VLC used to — never the studio's
-interface. Lives on a non-persistent tab, so switching tabs tears it down
-(destroy() closes the stream) and playback stops with it.
+interface. On Completed Takes (a persistent tab) playback keeps going
+across tab switches; on Sessions (rebuilt on every switch) leaving the tab
+tears it down — destroy() closes the stream — and playback stops with it.
 """
 
 from __future__ import annotations

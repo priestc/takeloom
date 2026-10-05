@@ -39,6 +39,12 @@ class RemoteBackend(Backend):
         self._preview_subscribed = False
         self._video_check_result_buffer = bytearray()
         self._take_file_buffer = bytearray()
+        # Take files already downloaded by _fetch_take_file this connection
+        # — a completed take's file never changes under the same name, so a
+        # repeat Play reuses the local copy instead of re-streaming it from
+        # the studio. Cleared by clear_playback_cache (Completed Takes'
+        # Reload button).
+        self._fetched_takes: dict[str, Path] = {}
         client._on_event = self._on_raw_event
 
     def is_remote(self) -> bool:
@@ -49,6 +55,12 @@ class RemoteBackend(Backend):
 
     def close(self) -> None:
         self._client.close()
+
+    def clear_playback_cache(self) -> None:
+        import shutil
+        super().clear_playback_cache()
+        self._fetched_takes.clear()
+        shutil.rmtree(Path(tempfile.gettempdir()) / "takeloom_remote_takes", ignore_errors=True)
 
     # --- config ---
 
@@ -214,7 +226,11 @@ class RemoteBackend(Backend):
         call() returns, every chunk has already been received and
         appended to self._take_file_buffer by _on_raw_event — no extra
         wait/Event needed here. Raises BackendError if nothing came
-        back (the file isn't available anywhere on the studio end)."""
+        back (the file isn't available anywhere on the studio end).
+        Reuses an earlier download of the same file (see _fetched_takes)."""
+        cached = self._fetched_takes.get(filename)
+        if cached is not None and cached.exists():
+            return cached
         self._take_file_buffer = bytearray()
         self._client.call(
             "fetch_take_file", {"project_name": project_name, "filename": filename}, timeout=DOWNLOAD_TIMEOUT,
@@ -225,6 +241,7 @@ class RemoteBackend(Backend):
         work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_remote_takes")
         local_path = work_dir / filename
         local_path.write_bytes(data)
+        self._fetched_takes[filename] = local_path
         return local_path
 
     def get_take_playback_path(self, project_name: str, filename: str, label: str) -> str:

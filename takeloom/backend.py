@@ -80,6 +80,15 @@ class Backend(ABC):
     def close(self) -> None:
         pass
 
+    def clear_playback_cache(self) -> None:
+        """Forget every cached playback file (see _playback_cache) and
+        delete the scratch copies — the Completed Takes tab's Reload
+        button. Purely client-side: these files live on whichever machine
+        the UI runs on, so RemoteBackend extends rather than forwards it."""
+        import shutil
+        _playback_cache.clear()
+        shutil.rmtree(Path(tempfile.gettempdir()) / "takeloom_playback", ignore_errors=True)
+
     # --- config ---
 
     @abstractmethod
@@ -1424,6 +1433,23 @@ class _ActiveAutoDetect:
     stop_event: threading.Event
 
 
+# Scratch playback file -> the inputs it was last rendered from. Lets
+# _compressed_playback_path/_mixed_playback_path hand back the same file on
+# a repeat Play instead of re-decoding/compressing/mixing every time — keyed
+# on each source's size+mtime and the compressor/trim settings, so changing
+# any of those re-renders on its own. Backend.clear_playback_cache empties it.
+_playback_cache: dict[Path, tuple] = {}
+
+
+def _file_signature(path: Path) -> tuple:
+    st = path.stat()
+    return (str(path), st.st_size, st.st_mtime_ns)
+
+
+def _playback_cache_hit(out_path: Path, key: tuple) -> bool:
+    return _playback_cache.get(out_path) == key and out_path.exists()
+
+
 def _compressed_playback_path(path: Path, settings: CompressorSettings) -> Path:
     """If `settings` is enabled, run `path`'s audio through the compressor
     and write the result to a scratch temp copy, returning that instead of
@@ -1436,13 +1462,17 @@ def _compressed_playback_path(path: Path, settings: CompressorSettings) -> Path:
     when disabled — no reason to make a redundant copy nobody asked for."""
     if not settings.enabled:
         return path
+    work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_playback")
+    out_path = work_dir / path.name
+    key = (_file_signature(path), repr(settings))
+    if _playback_cache_hit(out_path, key):
+        return out_path
     from .audio.filters import apply_compressor
     from .audio.formats import read_audio, write_flac
     data, sr = read_audio(path)
     processed = apply_compressor(data, sr, settings)
-    work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_playback")
-    out_path = work_dir / path.name
     write_flac(out_path, processed, sr)
+    _playback_cache[out_path] = key
     return out_path
 
 
@@ -1471,6 +1501,14 @@ def _mixed_playback_path(
     Raises BackendError if `files_and_labels` is empty."""
     if not files_and_labels:
         raise BackendError("No takes to mix.")
+    work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_playback")
+    out_path = work_dir / f"{sanitize_filename(song_name) or 'mix'}_mix.flac"
+    key = (
+        tuple((_file_signature(path), repr(config.compressor_for_label(label))) for path, label in files_and_labels),
+        config.sample_rate, trim_start_frames, trim_end_frames,
+    )
+    if _playback_cache_hit(out_path, key):
+        return out_path
     import numpy as np
     from .audio.filters import apply_compressor
     from .audio.formats import read_audio, write_flac
@@ -1495,9 +1533,8 @@ def _mixed_playback_path(
         mix[:len(data), :data.shape[1]] += data
     np.clip(mix, -1.0, 1.0, out=mix)
 
-    work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_playback")
-    out_path = work_dir / f"{sanitize_filename(song_name) or 'mix'}_mix.flac"
     write_flac(out_path, mix, sample_rate)
+    _playback_cache[out_path] = key
     return out_path
 
 

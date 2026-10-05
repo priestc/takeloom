@@ -26,15 +26,16 @@ from .studio_setup import StudioSetupFrame
 # (title, frame class, persistent). Persistent tabs are built once and never
 # torn down on tab switches — needed for Record, which holds a live audio
 # stream / ffmpeg process / camera handle that a rebuild would kill outright;
-# for Latency, which holds the same during a camera latency test; and for
-# Remote, which holds the connected RemoteClient.
+# for Latency, which holds the same during a camera latency test; for
+# Remote, which holds the connected RemoteClient; and for Completed Takes,
+# which is slow to rebuild and keeps its player bar playing across switches.
 TABS = [
     ("Record", RecordFrame, True),
     ("Studio Setup", StudioSetupFrame, False),
     ("Recording Devices", RecordingDevicesFrame, False),
     ("Streaming", StreamingFrame, False),
     ("Sessions", SessionsFrame, False),
-    ("Completed Takes", CompletedTakesFrame, False),
+    ("Completed Takes", CompletedTakesFrame, True),
     ("Latency", LatencyFrame, True),
     ("Remote", RemoteFrame, True),
 ]

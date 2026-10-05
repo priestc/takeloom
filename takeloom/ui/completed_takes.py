@@ -74,7 +74,17 @@ def _format_time_ago(recorded_at: float | None) -> str:
     return f"{int(years)}y ago"
 
 
+_PACK_BATCH = 15  # song groups packed per event-loop turn — see _pack_in_batches
+
+
 class CompletedTakesFrame(ttk.Frame):
+    """Persistent tab (see ui/app.py's TABS): built once on first visit and
+    kept, so coming back to it is instant and whatever the player bar is
+    playing keeps going. The data it shows is therefore a cache — "⟳
+    Reload" refetches it (and clears the backend's cached playback files,
+    see Backend.clear_playback_cache), as does connecting to/disconnecting
+    from a Remote studio or saving an "Edit backing track" change."""
+
     def __init__(self, master: tk.Misc, app_state: AppState) -> None:
         super().__init__(master)
         self.app_state = app_state
@@ -84,9 +94,24 @@ class CompletedTakesFrame(ttk.Frame):
         self._current_project: str = ""
         self._current_track_names: set[str] = set()
         self._expanded: set[str] = set()  # track_names currently showing their per-take detail lines
+        # track_name -> {"frame", "toggle", "detail" (built on first expand), "takes"}
+        self._songs: dict[str, dict] = {}
+        self._pack_generation = 0  # see _pack_in_batches
+        self._current_backend = app_state.backend
 
-        ttk.Label(self, text="Loading...").pack(anchor="w")
+        self._build()
+        self.app_state.add_listener(self._on_app_state_changed)
+        self.bind("<Destroy>", self._on_destroy)
         self._load()
+
+    def _on_app_state_changed(self) -> None:
+        if self.app_state.backend is not self._current_backend:
+            self._current_backend = self.app_state.backend
+            self.after(0, self._load)
+
+    def _on_destroy(self, event: tk.Event) -> None:
+        if event.widget is self:
+            self.app_state.remove_listener(self._on_app_state_changed)
 
     # --- loading ---
 
@@ -100,10 +125,17 @@ class CompletedTakesFrame(ttk.Frame):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _load(self) -> None:
+    def _on_reload(self) -> None:
+        self._load(clear_playback_cache=True)
+
+    def _load(self, clear_playback_cache: bool = False) -> None:
         backend = self.app_state.backend
+        self._reload_button.state(["disabled"])
+        self._load_status_var.set("Loading...")
 
         def fetch():
+            if clear_playback_cache:
+                backend.clear_playback_cache()
             config = backend.get_config()
             takes = backend.list_completed_takes()
             projects = backend.list_projects()
@@ -125,10 +157,9 @@ class CompletedTakesFrame(ttk.Frame):
     def _on_loaded(self, result: tuple | None, error: str | None) -> None:
         if not self.winfo_exists():
             return
-        for child in self.winfo_children():
-            child.destroy()
+        self._reload_button.state(["!disabled"])
         if error or result is None:
-            ttk.Label(self, text=error or "Could not load completed takes.", foreground="#b00020").pack(anchor="w")
+            self._load_status_var.set(error or "Could not load completed takes.")
             return
         config, takes, current_project, current_track_names, play_project = result
         self.config_obj = config
@@ -136,12 +167,29 @@ class CompletedTakesFrame(ttk.Frame):
         self._current_project = current_project
         self._current_track_names = current_track_names
         self._play_project = play_project
-        self._build()
+        self._load_status_var.set(f"Loaded {time.strftime('%-I:%M %p')}")
+
+        self._project_check.configure(
+            text=f"Filter by this project ({current_project})" if current_project
+            else "Filter by this project (none loaded)",
+        )
+        self._project_check.state(["!disabled"] if current_project else ["disabled"])
+        if not current_project:
+            self.project_only_var.set(False)
+        self._build_songs()
 
     # --- build ---
 
     def _build(self) -> None:
-        ttk.Label(self, text="Completed Takes", font=("TkDefaultFont", 14, "bold")).pack(anchor="w", pady=(0, 4))
+        """The page's fixed chrome — built once; only the song list below
+        it is rebuilt on (re)load (see _build_songs)."""
+        title_row = ttk.Frame(self)
+        title_row.pack(fill="x", pady=(0, 4))
+        ttk.Label(title_row, text="Completed Takes", font=("TkDefaultFont", 14, "bold")).pack(side="left")
+        self._reload_button = ttk.Button(title_row, text="⟳ Reload", command=self._on_reload)
+        self._reload_button.pack(side="left", padx=(12, 6))
+        self._load_status_var = tk.StringVar(value="")
+        ttk.Label(title_row, textvariable=self._load_status_var, foreground="#666666").pack(side="left")
         ttk.Label(
             self,
             text="Every completed take across the whole vault, not just one project or session — grouped by song.",
@@ -156,21 +204,16 @@ class CompletedTakesFrame(ttk.Frame):
         ttk.Entry(filter_row, textvariable=self.title_var, width=30).pack(side="left", padx=(6, 16))
 
         self.project_only_var = tk.BooleanVar(value=False)
-        project_check = ttk.Checkbutton(
-            filter_row,
-            text=f"Filter by this project ({self._current_project})" if self._current_project
-            else "Filter by this project (none loaded)",
-            variable=self.project_only_var, command=self._apply_filter,
+        self._project_check = ttk.Checkbutton(
+            filter_row, text="Filter by this project", variable=self.project_only_var, command=self._apply_filter,
         )
-        project_check.pack(side="left")
-        if not self._current_project:
-            project_check.state(["disabled"])
+        self._project_check.pack(side="left")
+        self._project_check.state(["disabled"])
 
         self.player = AudioPlayerBar(self)
         self.player.pack(fill="x", pady=(0, 8))
 
         self._build_scroll_container()
-        self._apply_filter()
 
     def _build_scroll_container(self) -> None:
         """A scrollable canvas for the song/take list — plain widgets, not
@@ -207,38 +250,59 @@ class CompletedTakesFrame(ttk.Frame):
         for child in widget.winfo_children():
             self._bind_mousewheel(child)
 
+    def _build_songs(self) -> None:
+        """(Re)create one group per song from self._takes. Expanding and
+        filtering afterwards only show/hide these existing widgets —
+        destroying and recreating the whole list on every click/keystroke
+        is what made this tab slow (Tk relayout of hundreds of widgets)."""
+        for child in self.content.winfo_children():
+            child.destroy()
+        self._songs = {}
+        # self._takes is already sorted by track_name (see backend.py's
+        # list_completed_takes), so groupby's usual "only groups
+        # consecutive runs" caveat doesn't apply here — every take for a
+        # given song is already adjacent.
+        for track_name, group in groupby(self._takes, key=lambda t: t["track_name"]):
+            self._build_song_group(track_name, list(group))
+        self._bind_mousewheel(self.content)
+        self._apply_filter()
+
     # --- filtering ---
 
     def _apply_filter(self) -> None:
         title = self.title_var.get().strip().lower()
         project_only = self.project_only_var.get()
-        filtered = [
-            take for take in self._takes
-            if (not title or title in take["track_name"].lower())
-            and (not project_only or take["track_name"] in self._current_track_names)
+        for song in self._songs.values():
+            song["frame"].pack_forget()
+        visible = [
+            song["frame"] for track_name, song in self._songs.items()
+            if (not title or title in track_name.lower())
+            and (not project_only or track_name in self._current_track_names)
         ]
+        self._canvas.yview_moveto(0)
+        self._pack_generation += 1
+        self._pack_in_batches(visible, self._pack_generation)
 
-        for child in self.content.winfo_children():
-            child.destroy()
+    def _pack_in_batches(self, frames: list[ttk.Frame], generation: int) -> None:
+        """Pack `frames` a batch at a time, yielding to the event loop in
+        between. Mapping a widget for the first time inside the canvas
+        costs ~1ms on macOS and a full list is hundreds of them — done in
+        one go that froze the window for seconds. This way the first
+        screenful shows immediately and the rest fills in behind it. A
+        newer _apply_filter (bumping _pack_generation) abandons this run."""
+        if generation != self._pack_generation or not self.winfo_exists():
+            return
+        for frame in frames[:_PACK_BATCH]:
+            frame.pack(fill="x")
+        if len(frames) > _PACK_BATCH:
+            self.after(1, lambda: self._pack_in_batches(frames[_PACK_BATCH:], generation))
 
-        # self._takes is already sorted by track_name (see backend.py's
-        # list_completed_takes) and filtering above preserves order, so
-        # groupby's usual "only groups consecutive runs" caveat doesn't
-        # apply here — every take for a given song is already adjacent.
-        for track_name, group in groupby(filtered, key=lambda t: t["track_name"]):
-            self._build_song_header(track_name, list(group))
-
-        self._bind_mousewheel(self._canvas)
-
-    def _build_song_header(self, track_name: str, takes_for_song: list[dict]) -> None:
-        expanded = track_name in self._expanded
-        header = ttk.Frame(self.content)
+    def _build_song_group(self, track_name: str, takes_for_song: list[dict]) -> None:
+        frame = ttk.Frame(self.content)
+        header = ttk.Frame(frame)
         header.pack(fill="x", pady=(10, 1))
 
-        toggle = tk.Label(
-            header, text=("\N{BLACK DOWN-POINTING TRIANGLE}" if expanded else "\N{BLACK RIGHT-POINTING TRIANGLE}"),
-            font=("TkDefaultFont", 9), cursor="hand2",
-        )
+        toggle = tk.Label(header, text="\N{BLACK RIGHT-POINTING TRIANGLE}", font=("TkDefaultFont", 9), cursor="hand2")
         toggle.pack(side="left", padx=(0, 6))
         title = ttk.Label(header, text=track_name, font=("TkDefaultFont", 11, "bold"), cursor="hand2")
         title.pack(side="left", padx=(0, 8))
@@ -258,19 +322,35 @@ class CompletedTakesFrame(ttk.Frame):
         ).pack(side="left", padx=(10, 4))
         ttk.Label(header, textvariable=status_var, foreground="#666666").pack(side="left")
 
-        if expanded:
-            for take in takes_for_song:
-                self._build_take_row(take, takes_for_song)
+        self._songs[track_name] = {"frame": frame, "toggle": toggle, "detail": None, "takes": takes_for_song}
+        if track_name in self._expanded:
+            self._set_expanded(track_name, True)
 
     def _toggle_expanded(self, track_name: str) -> None:
-        if track_name in self._expanded:
-            self._expanded.discard(track_name)
-        else:
-            self._expanded.add(track_name)
-        self._apply_filter()
+        self._set_expanded(track_name, track_name not in self._expanded)
 
-    def _build_take_row(self, take: dict, takes_for_song: list[dict]) -> None:
-        row = ttk.Frame(self.content)
+    def _set_expanded(self, track_name: str, expanded: bool) -> None:
+        song = self._songs.get(track_name)
+        if song is None:
+            return
+        if expanded:
+            self._expanded.add(track_name)
+            if song["detail"] is None:
+                song["detail"] = ttk.Frame(song["frame"])
+                for take in song["takes"]:
+                    self._build_take_row(song["detail"], take, song["takes"])
+                self._bind_mousewheel(song["detail"])
+            song["detail"].pack(fill="x")
+        else:
+            self._expanded.discard(track_name)
+            if song["detail"] is not None:
+                song["detail"].pack_forget()
+        song["toggle"].configure(
+            text="\N{BLACK DOWN-POINTING TRIANGLE}" if expanded else "\N{BLACK RIGHT-POINTING TRIANGLE}"
+        )
+
+    def _build_take_row(self, parent: ttk.Frame, take: dict, takes_for_song: list[dict]) -> None:
+        row = ttk.Frame(parent)
         row.pack(fill="x", padx=(28, 0), pady=1)
         make_label_badge(row, take["instrument"]).pack(side="left", padx=(0, 8))
         ttk.Label(row, text=f"take {take['take_number']}", width=10).pack(side="left")
