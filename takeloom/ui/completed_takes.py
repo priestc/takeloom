@@ -6,15 +6,16 @@ Two panes: on the left a mixer (ui/song_mixer.py), on the right the song
 list. Clicking a song loads all of its takes into the mixer — a volume
 slider (plus Mute/Solo) per instrument, played together live — where
 "Save mix" stores those settings in the vault and they're re-applied
-whenever that song is loaded again.
+whenever that song is loaded again. Below the mixer, a backing-track trim
+editor (ui/backing_trim_editor.py) crops the song's intro/outro.
 
 Takes are grouped by song, one grid row per track name with three
 columns: Name (behind a collapse/expand triangle), Backing source
 (Inspiration / YouTube / Direct upload — TrackEntry.source_label()), and
 Instruments — every instrument that has a take on it as a row of colored
 badges (instrument_colors.py). Once expanded, one line per take appears
-below it with its own date and "Edit backing track..." button. takes["track_name"] is already the
-group key list_completed_takes sorts by, so grouping here is just a
+below it with its take number and date. takes["track_name"] is already
+the group key list_completed_takes sorts by, so grouping here is just a
 consecutive-run split, not a re-sort.
 
 Built from plain widgets in a scrollable canvas rather than a
@@ -49,7 +50,6 @@ from ..backend import BackendError
 from ..config import StudioConfig
 from ..inspiration import build_inspiration_track_entry
 from .app_state import AppState
-from .edit_backing_track_dialog import EditBackingTrackDialog
 from .instrument_colors import make_label_badge
 from .song_mixer import SongMixer
 
@@ -94,7 +94,7 @@ class CompletedTakesFrame(ttk.Frame):
     playing keeps going. The data it shows is therefore a cache — "⟳
     Reload" refetches it (and clears the backend's cached playback files,
     see Backend.clear_playback_cache), as does connecting to/disconnecting
-    from a Remote studio or saving an "Edit backing track" change."""
+    from a Remote studio or saving a backing-track trim."""
 
     def __init__(self, master: tk.Misc, app_state: AppState) -> None:
         super().__init__(master)
@@ -220,7 +220,7 @@ class CompletedTakesFrame(ttk.Frame):
 
         panes = ttk.PanedWindow(self, orient="horizontal")
         panes.pack(fill="both", expand=True)
-        self.mixer = SongMixer(panes, self.app_state)
+        self.mixer = SongMixer(panes, self.app_state, on_trim_saved=self._load)
         right = ttk.Frame(panes)
         panes.add(self.mixer, weight=0)
         panes.add(right, weight=1)
@@ -402,7 +402,7 @@ class CompletedTakesFrame(ttk.Frame):
                 song["detail"] = ttk.Frame(self.content)
                 song["detail"].grid(row=song["row"] + 1, column=0, columnspan=3, sticky="w")
                 for take in song["takes"]:
-                    self._build_take_row(song["detail"], take, song["takes"])
+                    self._build_take_row(song["detail"], take)
                 self._bind_mousewheel(song["detail"])
                 song["detail"].grid_remove()
             if song["cells"][0].winfo_manager():  # only if the song itself is currently shown
@@ -415,7 +415,7 @@ class CompletedTakesFrame(ttk.Frame):
             text="\N{BLACK DOWN-POINTING TRIANGLE}" if expanded else "\N{BLACK RIGHT-POINTING TRIANGLE}"
         )
 
-    def _build_take_row(self, parent: ttk.Frame, take: dict, takes_for_song: list[dict]) -> None:
+    def _build_take_row(self, parent: ttk.Frame, take: dict) -> None:
         row = ttk.Frame(parent)
         row.pack(fill="x", padx=(28, 0), pady=1)
         make_label_badge(row, take["instrument"]).pack(side="left", padx=(0, 8))
@@ -424,13 +424,6 @@ class CompletedTakesFrame(ttk.Frame):
             side="left"
         )
         ttk.Label(row, text="video" if take["has_video"] else "", foreground="#666666", width=6).pack(side="left")
-        self._build_play_controls(row, take, takes_for_song)
-
-    def _build_play_controls(self, row: ttk.Frame, take: dict, takes_for_song: list[dict]) -> None:
-        ttk.Button(
-            row, text="✂ Edit backing track...",
-            command=lambda: self._on_edit_backing_track(take, takes_for_song),
-        ).pack(side="left", padx=(8, 4))
 
     # --- mixer ---
 
@@ -447,8 +440,3 @@ class CompletedTakesFrame(ttk.Frame):
     def _highlight_selected(self) -> None:
         for name, song in self._songs.items():
             song["title"].configure(foreground="#2a6db0" if name == self.mixer.track_name else "")
-
-    # --- edit backing track ---
-
-    def _on_edit_backing_track(self, take: dict, takes_for_song: list[dict]) -> None:
-        EditBackingTrackDialog(self, self.app_state.backend, take, takes_for_song, self._load)

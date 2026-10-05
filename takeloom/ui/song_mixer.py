@@ -17,19 +17,22 @@ import threading
 import time
 import tkinter as tk
 from tkinter import ttk
+from typing import Callable
 
 from ..backend import BackendError
 from .app_state import AppState
 from .audio_player import AudioPlayerBar
+from .backing_trim_editor import BackingTrimEditor
 from .instrument_colors import make_label_badge
 
 _MAX_GAIN = 2.0  # slider top = 200%
 
 
 class SongMixer(ttk.Frame):
-    def __init__(self, master: tk.Misc, app_state: AppState) -> None:
+    def __init__(self, master: tk.Misc, app_state: AppState, on_trim_saved: Callable[[], None]) -> None:
         super().__init__(master)
         self.app_state = app_state
+        self._on_trim_saved = on_trim_saved
         self.track_name: str | None = None
         self.trim: tuple[float, float] = (0.0, 0.0)  # the loaded song's trim, see CompletedTakesFrame._on_loaded
         self._load_token = 0
@@ -49,7 +52,7 @@ class SongMixer(ttk.Frame):
         self.player.pack(fill="x", pady=(4, 10))
 
         self._strips_frame = ttk.Frame(self)
-        self._strips_frame.pack(fill="both", expand=True)
+        self._strips_frame.pack(fill="x")
         self._placeholder = ttk.Label(
             self._strips_frame, text="Click a song on the right to load its takes here.", foreground="#666666",
         )
@@ -67,6 +70,11 @@ class SongMixer(ttk.Frame):
         )
         self._set_buttons_enabled(False)
 
+        self.trim_editor = BackingTrimEditor(
+            self, lambda: self.app_state.backend, self.player, on_saved=self._on_trim_editor_saved,
+        )
+        self.trim_editor.pack(fill="x", pady=(16, 0))
+
     # --- loading ---
 
     def load_song(self, track_name: str, takes: list[dict], play_project: str, autoplay: bool = True) -> None:
@@ -80,6 +88,7 @@ class SongMixer(ttk.Frame):
         self.trim = (takes[0].get("trim_start_seconds", 0.0), takes[0].get("trim_end_seconds", 0.0)) if takes else (0.0, 0.0)
         self._title_var.set(track_name)
         self._status_var.set("Loading takes...")
+        self.trim_editor.clear()
         self._set_buttons_enabled(False)
         backend = self.app_state.backend
 
@@ -140,10 +149,23 @@ class SongMixer(ttk.Frame):
         self._status_var.set(self._base_status)
         self._set_buttons_enabled(True)
 
+        loaded_takes = [take for take, _path in loaded]
         self.player.load_tracks(
             [path for _take, path in loaded], track_name, gains=self._effective_gains(),
             trim_start_seconds=self.trim[0], trim_end_seconds=self.trim[1], autoplay=autoplay,
+            on_loaded=lambda full: self._on_audio_loaded(token, track_name, loaded_takes, full),
         )
+
+    def _on_audio_loaded(self, token: int, track_name: str, takes: list[dict], full_length: float) -> None:
+        if token == self._load_token:
+            self.trim_editor.set_song(track_name, takes, full_length)
+
+    def _on_trim_editor_saved(self, trim_start: float, trim_end: float) -> None:
+        # The player is already playing the new window (the editor moved
+        # it live), so just record it — CompletedTakesFrame's reload then
+        # sees the loaded song's trim already matches and doesn't reload it.
+        self.trim = (trim_start, trim_end)
+        self._on_trim_saved()
 
     def _build_strip(self, column: int, key: str, take: dict, gain: float, muted: bool) -> None:
         strip = ttk.Frame(self._strips_frame)

@@ -512,7 +512,8 @@ class Backend(ABC):
         "filename": str, "take_number": int, "has_video": bool,
         "has_midi": bool, "volume": float, "recorded_at": float | None,
         "trim_start_seconds": float, "trim_end_seconds": float,
-        "backing_source": str}, sorted by
+        "backing_source": str, "backing_duration_seconds": float | None},
+        sorted by
         track_name. The last two are the song's current non-destructive
         "edit backing track" trim (see edit_backing_track) — 0.0/0.0 if
         it's never been trimmed — carried here so a caller (play_song_
@@ -520,6 +521,9 @@ class Backend(ABC):
         doesn't need a second lookup just to read them back.
         backing_source is TrackEntry.source_label() — "inspiration",
         "youtube", or "upload" — where the song's backing track came from.
+        backing_duration_seconds is the backing track's full, untrimmed
+        length (None if never measured) — the range the Completed Takes
+        tab's trim editor (ui/backing_trim_editor.py) lets you crop within.
         A take
         superseded by a later reassign_take/re-record
         no longer appears here, same as it wouldn't in any project's
@@ -2401,14 +2405,21 @@ class LocalBackend(Backend):
             by_filename[take.filename] = {
                 "track_name": entry.name, "instrument": label, "filename": take.filename,
                 "backing_source": entry.source_label(),
+                # Full, untrimmed backing-track length — duration_seconds is
+                # already net of the trim (see TrackEntry). None if unknown.
+                "backing_duration_seconds": (
+                    entry.duration_seconds + entry.trim_start_seconds + entry.trim_end_seconds
+                    if entry.duration_seconds > 0 else None
+                ),
                 "take_number": take.take_number, "has_video": take.has_video, "has_midi": take.has_midi,
                 "volume": take.volume,
                 "recorded_at": recorded_at,
                 # Non-destructive "edit backing track" trim (see
                 # edit_backing_track) — already-affected takes carry this
                 # along to wherever a take dict ends up used for playback
-                # (the Completed Takes mixer) or re-edit (EditBackingTrackDialog
-                # pre-filling its current values) without a second lookup.
+                # (the Completed Takes mixer) or re-edit (its trim editor,
+                # ui/backing_trim_editor.py, showing the current values)
+                # without a second lookup.
                 "trim_start_seconds": entry.trim_start_seconds,
                 "trim_end_seconds": entry.trim_end_seconds,
             }

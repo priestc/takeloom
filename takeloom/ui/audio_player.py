@@ -21,6 +21,7 @@ import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk
+from typing import Callable
 
 import numpy as np
 
@@ -45,6 +46,11 @@ class AudioPlayerBar(ttk.Frame):
         self._applied_gains: list[float] = []  # what the callback last used — ramped toward _gains
         self._sample_rate = 0
         self._position = 0  # frame index, advanced by the audio callback
+        # Playback window [start, end) in frames — the song's non-destructive
+        # backing-track trim. The full audio stays loaded so the trim editor
+        # (ui/backing_trim_editor.py) can move it live, earlier or later.
+        self._win_start = 0
+        self._win_end = 0
         self._playing = False
         self._stream = None
         self._seeking = False  # user is dragging the slider — don't fight them
@@ -82,13 +88,16 @@ class AudioPlayerBar(ttk.Frame):
     def load_tracks(
         self, paths: list[str | Path], title: str, gains: list[float] | None = None,
         trim_start_seconds: float = 0.0, trim_end_seconds: float = 0.0, autoplay: bool = True,
+        on_loaded: Callable[[float], None] | None = None,
     ) -> None:
         """Decode every file in `paths` off the UI thread (resampled to the
-        first one's rate), trim each by the song's non-destructive "edit
-        backing track" trim — the same way backend.py's
-        live session's _load_track_locked does, so takes stay in sync with each other —
-        zero-pad to a common length, and play their sum with `gains`
-        (default 1.0 each; see set_gains). Replaces whatever was loaded."""
+        first one's rate), zero-pad to a common length, and play their sum
+        with `gains` (default 1.0 each; see set_gains) — only within the
+        song's non-destructive "edit backing track" window (trim applied to
+        every take alike, the same way a live session's _load_track_locked
+        does, so takes stay in sync with each other; see set_window).
+        Replaces whatever was loaded. `on_loaded` gets the full, untrimmed
+        length in seconds once decoding finishes."""
         self._close_stream()
         self._playing = False
         self._play_button.configure(text="▶")
@@ -106,12 +115,6 @@ class AudioPlayerBar(ttk.Frame):
                 for path in paths:
                     data, sr_read = read_audio(Path(path), sr or None)
                     sr = sr or sr_read
-                    start = round(trim_start_seconds * sr)
-                    end = round(trim_end_seconds * sr)
-                    if 0 < start < len(data):
-                        data = data[start:]
-                    if 0 < end < len(data):
-                        data = data[:len(data) - end]
                     tracks.append(data)
                 length = max((len(t) for t in tracks), default=0)
                 tracks = [
@@ -121,7 +124,9 @@ class AudioPlayerBar(ttk.Frame):
                 result, error = (tracks, sr, length), None
             except Exception as e:  # noqa: BLE001 — any decode failure is shown, not raised
                 result, error = None, f"{type(e).__name__}: {e}"
-            self.after(0, lambda: self._on_loaded(token, title, paths, gains, autoplay, result, error))
+            self.after(0, lambda: self._on_loaded(
+                token, title, paths, gains, (trim_start_seconds, trim_end_seconds), autoplay, on_loaded, result, error,
+            ))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -131,6 +136,36 @@ class AudioPlayerBar(ttk.Frame):
         drag doesn't click."""
         with self._lock:
             self._gains = list(gains)
+
+    def set_window(self, start_seconds: float, end_seconds: float) -> None:
+        """Play only [start_seconds, end_seconds) of the loaded audio
+        (absolute times in the untrimmed takes) — live, mid-playback."""
+        if self._tracks is None or not self._sample_rate:
+            return
+        sr = self._sample_rate
+        with self._lock:
+            start = min(max(round(start_seconds * sr), 0), self._length)
+            end = min(max(round(end_seconds * sr), start + 1), self._length)
+            self._win_start, self._win_end = start, end
+            if not start <= self._position < end:
+                self._position = start
+        self._scale.configure(to=max((end - start) / sr, 0.001))
+        self._refresh_position()
+
+    def play_from(self, absolute_seconds: float) -> None:
+        """Seek to `absolute_seconds` (clamped into the window) and play."""
+        if self._tracks is None or not self._sample_rate:
+            return
+        with self._lock:
+            frame = round(absolute_seconds * self._sample_rate)
+            self._position = min(max(frame, self._win_start), max(self._win_end - 1, self._win_start))
+        self._refresh_position()
+        if not self._playing:
+            self._play()
+
+    @property
+    def full_length_seconds(self) -> float:
+        return self._length / self._sample_rate if self._tracks is not None and self._sample_rate else 0.0
 
     def show_error(self, message: str) -> None:
         self._title_var.set(message)
@@ -146,7 +181,7 @@ class AudioPlayerBar(ttk.Frame):
     def stop(self) -> None:
         self._pause()
         with self._lock:
-            self._position = 0
+            self._position = self._win_start
         self._refresh_position()
 
     def destroy(self) -> None:
@@ -159,7 +194,8 @@ class AudioPlayerBar(ttk.Frame):
     # --- loading ---
 
     def _on_loaded(
-        self, token: int, title: str, paths: list, gains: list[float], autoplay: bool, result, error: str | None,
+        self, token: int, title: str, paths: list, gains: list[float], trim: tuple[float, float],
+        autoplay: bool, on_loaded: Callable[[float], None] | None, result, error: str | None,
     ) -> None:
         if token != self._load_token or not self.winfo_exists():
             return  # superseded by a newer load(), or the tab is gone
@@ -174,10 +210,12 @@ class AudioPlayerBar(ttk.Frame):
             self._position = 0
             self._gains = list(gains)
             self._applied_gains = list(gains)
-        self._scale.configure(to=max(length / sr, 0.001) if sr else 0.001)
+            self._win_start, self._win_end = 0, length
+        self.set_window(trim[0], length / sr - trim[1] if sr else 0.0)
         self._title_var.set(title)
         self._set_controls_enabled(True)
-        self._refresh_position()
+        if on_loaded is not None:
+            on_loaded(self.full_length_seconds)
         if autoplay:
             self._play()
 
@@ -187,8 +225,8 @@ class AudioPlayerBar(ttk.Frame):
         if self._tracks is None:
             return
         with self._lock:
-            if self._position >= self._length:
-                self._position = 0
+            if not self._win_start <= self._position < self._win_end:
+                self._position = self._win_start
         if self._stream is None:
             try:
                 import sounddevice as sd
@@ -226,9 +264,9 @@ class AudioPlayerBar(ttk.Frame):
         with self._lock:
             tracks = self._tracks
             start = self._position
-            if tracks is None or start >= self._length:
+            if tracks is None or start >= self._win_end:
                 return
-            n = min(frames, self._length - start)
+            n = min(frames, self._win_end - start)
             for i, data in enumerate(tracks):
                 old, new = self._applied_gains[i], self._gains[i]
                 if old == new == 0.0:
@@ -252,7 +290,7 @@ class AudioPlayerBar(ttk.Frame):
         self._refresh_position()
         if self._playing:
             with self._lock:
-                finished = self._tracks is None or self._position >= self._length
+                finished = self._tracks is None or self._position >= self._win_end
             if finished:
                 self.stop()
             else:
@@ -262,8 +300,8 @@ class AudioPlayerBar(ttk.Frame):
         if self._tracks is None or not self._sample_rate:
             return
         with self._lock:
-            pos_s = self._position / self._sample_rate
-        total_s = self._length / self._sample_rate
+            pos_s = (self._position - self._win_start) / self._sample_rate
+        total_s = (self._win_end - self._win_start) / self._sample_rate
         if not self._seeking:
             self._pos_var.set(pos_s)
         self._time_var.set(f"{_format_seconds(pos_s)} / {_format_seconds(total_s)}")
@@ -275,9 +313,9 @@ class AudioPlayerBar(ttk.Frame):
         self._seeking = False
         if self._tracks is None:
             return
-        frame = int(self._pos_var.get() * self._sample_rate)
+        frame = self._win_start + int(self._pos_var.get() * self._sample_rate)
         with self._lock:
-            self._position = min(max(frame, 0), self._length)
+            self._position = min(max(frame, self._win_start), self._win_end)
         self._refresh_position()
 
     def _set_controls_enabled(self, enabled: bool) -> None:
