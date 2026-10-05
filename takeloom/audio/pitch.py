@@ -140,6 +140,16 @@ def effective_tuning(instrument) -> list[str]:
     return DEFAULT_TUNING_BY_LABEL.get(instrument.label, [])
 
 
+# nearest_target's octave-error correction (see its body): only when a
+# reading is more than _OCTAVE_FIX_FAR_CENTS from every string in the
+# tuning, and an octave-shifted reading lands within _OCTAVE_FIX_NEAR_CENTS
+# of one. Far is well past any plausibly out-of-tune string being tuned up
+# (strings sit 400-500 cents apart); near is tight enough that a string
+# that's simply badly out of tune is never "corrected" into a different one.
+_OCTAVE_FIX_FAR_CENTS = 100.0
+_OCTAVE_FIX_NEAR_CENTS = 50.0
+
+
 def nearest_target(freq_hz: float, tuning: list[str]) -> tuple[str, float, float]:
     """(note_name, target_hz, cents_off) for freq_hz — snapped to the
     closest note in `tuning` if any of it parses, otherwise the nearest
@@ -152,7 +162,22 @@ def nearest_target(freq_hz: float, tuning: list[str]) -> tuple[str, float, float
         assert target_hz is not None  # hz_to_note_name always produces a parseable name
         return name, target_hz, cents_between(freq_hz, target_hz)
     name, target_hz = min(targets, key=lambda nt: abs(cents_between(freq_hz, nt[1])))
-    return name, target_hz, cents_between(freq_hz, target_hz)
+    cents = cents_between(freq_hz, target_hz)
+    if abs(cents) > _OCTAVE_FIX_FAR_CENTS:
+        # Far from every string — before snapping to whichever is least far,
+        # check whether the reading is really a string heard an octave off.
+        # A plucked string with a weak fundamental and strong even harmonics
+        # (an acoustic B string through a mic, confirmed for real) can be
+        # genuinely periodic at half its true period, so any pitch detector
+        # reads it an octave up: B3 came through as ~494Hz, which the plain
+        # nearest-string snap called high E, +700 cents. An octave error is
+        # an exact 2:1, so the cents reading stays right once folded back.
+        for factor in (0.5, 2.0, 0.25):
+            alt_name, alt_hz = min(targets, key=lambda nt: abs(cents_between(freq_hz * factor, nt[1])))
+            alt_cents = cents_between(freq_hz * factor, alt_hz)
+            if abs(alt_cents) < _OCTAVE_FIX_NEAR_CENTS:
+                return alt_name, alt_hz, alt_cents
+    return name, target_hz, cents
 
 
 class TunerSmoother:

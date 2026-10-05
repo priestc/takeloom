@@ -226,51 +226,93 @@ def classify_audio_file(path: Path, instruments: list) -> tuple[str | None, floa
     return best_name, votes[best_name] / total_windows
 
 
-# Autocorrelation peak must retain at least this fraction of the signal's
-# zero-lag energy to count as "periodic enough to be a note" — below this,
-# it's more likely noise/silence/an indistinct pluck than a held pitch.
-_PITCH_CONFIDENCE_THRESHOLD = 0.3
+# The chosen NSDF peak (see estimate_pitch) must reach at least this value
+# — 1.0 is a perfectly periodic signal — to count as "periodic enough to
+# be a note"; below it, it's more likely noise/silence/an indistinct pluck
+# than a held pitch.
+_PITCH_CONFIDENCE_THRESHOLD = 0.5
+
+# McLeod's "key maximum" rule: the period is the *first* (shortest-lag)
+# NSDF peak reaching this fraction of the highest one. Close to 1 on
+# purpose: a plucked string with a strong 2nd harmonic (an acoustic B
+# string through a mic, confirmed for real) has a sizeable peak at half
+# its true period too — accept that one too readily and B3 reads as B4,
+# which the tuner then snapped to the nearest string, high E. The true
+# period's peak is the highest (or within a whisker of it — a pluck
+# decaying across the window costs longer lags a little), while a half-
+# period peak sits well below it, since the fundamental itself cancels
+# there.
+_PITCH_KEY_MAX_RATIO = 0.97
 
 
 def estimate_pitch(samples: np.ndarray, sample_rate: int, fmin: float = 30.0, fmax: float = 2000.0) -> float | None:
     """Best-effort fundamental-frequency estimate for one (assumed
-    monophonic) played note, via normalized autocorrelation — used by
-    NoteCapture for Studio Setup's "Train" flow ("play your highest/
-    lowest note" -> an actual Hz value). Returns None below the silence
-    threshold, or when no confident periodicity is found in [fmin, fmax]
-    (e.g. nothing was played, or what came through wasn't tonal)."""
-    samples = samples.astype(np.float64)
-    samples = samples - samples.mean()
-    if float(np.max(np.abs(samples))) < SILENCE_THRESHOLD:
+    monophonic) played note — the Record tab's live tuner (TunerTracker)
+    and Studio Setup's "Train" flow (NoteCapture). Returns None below the
+    silence threshold, or when no confident periodicity is found in
+    [fmin, fmax] (e.g. nothing was played, or what came through wasn't
+    tonal).
+
+    McLeod Pitch Method: the normalized square difference function (NSDF,
+    autocorrelation scaled per lag by the energy actually overlapping at
+    that lag, so a decaying pluck doesn't skew it toward short lags), the
+    period taken as the first peak within _PITCH_KEY_MAX_RATIO of the
+    highest (octave-safe — see that constant), refined to a fractional lag
+    by parabolic interpolation. The refinement matters for a tuner: the
+    previous plain integer-lag autocorrelation could only report
+    sample_rate / whole_number, e.g. a perfectly tuned high E at 48kHz as
+    4.5 cents flat (lag 146 instead of the true 145.6), never 0."""
+    x = samples.astype(np.float64)
+    x = x - x.mean()
+    if len(x) < 4 or float(np.max(np.abs(x))) < SILENCE_THRESHOLD:
         return None
-    corr = np.correlate(samples, samples, mode="full")
-    corr = corr[len(corr) // 2:]  # keep zero and positive lags only
-    if corr[0] <= 0:
-        return None
-    min_lag = max(1, int(sample_rate / fmax))
-    max_lag = min(int(sample_rate / fmin), len(corr) - 1)
+    n = len(x)
+    max_lag = min(int(sample_rate / fmin) + 1, n - 2)
+    min_lag = max(2, int(sample_rate / fmax))
     if min_lag >= max_lag:
         return None
-    # The correlation naturally decays from its lag-0 peak just from the
-    # waveform's own smoothness, independent of periodicity — for a low
-    # note that decay can still be higher at a short lag than the true
-    # period's peak (e.g. an 80Hz tone's lag-24 point outranks its actual
-    # 600-sample period). Skip past that initial slope to the first local
-    # minimum before searching for the real peak, same trick real pitch
-    # trackers (e.g. YIN) use.
-    search_start = min_lag
-    for lag in range(min_lag, max_lag):
-        if corr[lag + 1] > corr[lag]:
-            search_start = lag
-            break
-    else:
-        search_start = min_lag
-    segment = corr[search_start:max_lag + 1]
-    peak_offset = int(np.argmax(segment))
-    peak_lag = search_start + peak_offset
-    if corr[peak_lag] / corr[0] < _PITCH_CONFIDENCE_THRESHOLD:
+
+    # r(t) = sum_j x[j] x[j+t] via FFT; m(t) = sum_j x[j]^2 + x[j+t]^2 via
+    # cumulative sums of x^2 from either end.
+    size = 1 << (2 * n - 1).bit_length()
+    spectrum = np.fft.rfft(x, size)
+    r = np.fft.irfft(spectrum * np.conj(spectrum), size)[: max_lag + 2]
+    sq = x * x
+    head = np.concatenate(([0.0], np.cumsum(sq)))        # head[k] = sum of the first k squares
+    total = head[-1]
+    lags = np.arange(max_lag + 2)
+    m = head[n - lags] + (total - head[lags])            # first n-t samples + last n-t samples
+    nsdf = np.where(m > 0, 2.0 * r / np.where(m > 0, m, 1.0), 0.0)
+
+    # Key maxima: the highest point of each positive region after the
+    # NSDF first dips below zero (skips the trivial peak around lag 0).
+    peaks: list[int] = []
+    lag = 1
+    while lag <= max_lag and nsdf[lag] > 0:
+        lag += 1
+    while lag <= max_lag:
+        while lag <= max_lag and nsdf[lag] <= 0:
+            lag += 1
+        best = None
+        while lag <= max_lag and nsdf[lag] > 0:
+            if best is None or nsdf[lag] > nsdf[best]:
+                best = lag
+            lag += 1
+        if best is not None and best >= min_lag and 0 < best < max_lag + 1:
+            peaks.append(best)
+    if not peaks:
         return None
-    return sample_rate / peak_lag
+    highest = max(nsdf[p] for p in peaks)
+    if highest < _PITCH_CONFIDENCE_THRESHOLD:
+        return None
+    chosen = next(p for p in peaks if nsdf[p] >= _PITCH_KEY_MAX_RATIO * highest)
+
+    # Parabolic interpolation through the peak and its two neighbors.
+    y0, y1, y2 = nsdf[chosen - 1], nsdf[chosen], nsdf[chosen + 1]
+    denom = y0 - 2.0 * y1 + y2
+    offset = 0.5 * (y0 - y2) / denom if denom != 0 else 0.0
+    period = chosen + max(-0.5, min(0.5, offset))
+    return sample_rate / period
 
 
 class InstrumentClassifier:
