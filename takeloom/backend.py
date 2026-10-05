@@ -33,7 +33,7 @@ from .audio.pitch import effective_tuning, nearest_target
 from .audio.scarlett2_direct_monitor import FOCUSRITE_DEVICE_NAME, set_channel_gain
 from .config import DEFAULT_CONFIG_PATH, INSTRUMENT_LABELS, MAX_INSTRUMENT_VOLUME_PERCENT, Instrument, StudioConfig
 from .project import Project, Setlist, TakeInfo, TrackEntry
-from .utils import atomic_write_text, ensure_dir, sanitize_filename, timestamp_now, wall_timestamp
+from .utils import atomic_write_text, ensure_dir, timestamp_now, wall_timestamp
 
 
 class BackendError(Exception):
@@ -497,22 +497,6 @@ class Backend(ABC):
         ...
 
     @abstractmethod
-    def get_song_playback_path(self, project_name: str, takes: list[dict]) -> str:
-        """Like get_take_playback_path, but for every take in `takes` (each a
-        Completed Takes row dict — needs at least "filename",
-        "instrument", and "track_name") at once, mixed together — one
-        song's every instrument overlaid on top of each other, each
-        passed through its own label's compressor settings first (see
-        get_take_playback_path's docstring for the single-take version of the same
-        reasoning), and the mixed result's path returned (a scratch
-        temp file). Best-effort per take: one that isn't available (locally,
-        or via the backup server) is skipped rather than failing the
-        whole mix, so a song missing one instrument's take still plays
-        the rest. Raises BackendError only if `takes` is empty or *none*
-        of them could be made available."""
-        ...
-
-    @abstractmethod
     def list_completed_takes(self) -> list[dict]:
         """Every completed take currently on file, vault-wide — behind
         the Completed Takes tab, which (unlike Sessions) isn't scoped to
@@ -552,6 +536,21 @@ class Backend(ABC):
         ...
 
     @abstractmethod
+    def get_song_mix(self, track_name: str) -> dict | None:
+        """The Completed Takes mixer's saved settings for `track_name` —
+        {"track_name", "volumes": {label: gain}, "muted": [label, ...],
+        "saved_at"} — or None if none has been saved. See vault.py's
+        load_song_mix."""
+        ...
+
+    @abstractmethod
+    def save_song_mix(self, track_name: str, volumes: dict[str, float], muted: list[str]) -> dict:
+        """Save the Completed Takes mixer's settings for `track_name` into
+        the vault (mixes/<song>.json — see vault.py's save_song_mix),
+        returning the saved mix in get_song_mix's shape."""
+        ...
+
+    @abstractmethod
     def edit_backing_track(
         self, take_filename: str, trim_start_seconds: float, trim_end_seconds: float,
     ) -> dict:
@@ -566,7 +565,7 @@ class Backend(ABC):
         new take, or layering an existing one in), the Video Check path,
         _resolve_filter_slot (an inspiration filter slot redrawing this
         same song later inherits the trim from the shared index), and
-        get_song_playback_path. A newly recorded take is therefore already
+        the Completed Takes mixer (ui/song_mixer.py). A newly recorded take is therefore already
         exactly the trimmed length with nothing further to do; an
         existing take recorded before the trim was set gets the identical
         window applied at playback/mix time instead, so it stays in sync
@@ -1434,10 +1433,10 @@ class _ActiveAutoDetect:
 
 
 # Scratch playback file -> the inputs it was last rendered from. Lets
-# _compressed_playback_path/_mixed_playback_path hand back the same file on
-# a repeat Play instead of re-decoding/compressing/mixing every time — keyed
-# on each source's size+mtime and the compressor/trim settings, so changing
-# any of those re-renders on its own. Backend.clear_playback_cache empties it.
+# _compressed_playback_path hand back the same file on a repeat Play
+# instead of re-decoding/compressing every time — keyed on the source's
+# size+mtime and the compressor settings, so changing either re-renders on
+# its own. Backend.clear_playback_cache empties it.
 _playback_cache: dict[Path, tuple] = {}
 
 
@@ -1472,68 +1471,6 @@ def _compressed_playback_path(path: Path, settings: CompressorSettings) -> Path:
     data, sr = read_audio(path)
     processed = apply_compressor(data, sr, settings)
     write_flac(out_path, processed, sr)
-    _playback_cache[out_path] = key
-    return out_path
-
-
-def _mixed_playback_path(
-    song_name: str, files_and_labels: list[tuple[Path, str]], config: StudioConfig,
-    trim_start_frames: int = 0, trim_end_frames: int = 0,
-) -> Path:
-    """Mix every (take_path, instrument_label) in `files_and_labels`
-    together — one song's every instrument overlaid on top of each
-    other, each first passed through its *own* label's compressor
-    settings (see _compressed_playback_path for the single-take version
-    of the same reasoning) — and write the result to one scratch temp
-    file, returned. Shorter takes are zero-padded to the longest one's
-    length before summing (same reasoning as audio.mixer.Mixer's own
-    _sum_sources), and the sum is clipped to prevent overflow. Used by
-    get_song_playback_path for a quick "everyone's take on this song, played
-    together" preview without needing a real session.
-
-    trim_start_frames/trim_end_frames: the song's non-destructive "edit
-    backing track" trim (edit_backing_track), in frames — applied to
-    every take here the same way _load_track_locked applies it to a live
-    session's mixer sources, so a take recorded before the trim was set
-    stays in sync with the others instead of sticking out past where the
-    (now virtually-shorter) backing track would have ended.
-
-    Raises BackendError if `files_and_labels` is empty."""
-    if not files_and_labels:
-        raise BackendError("No takes to mix.")
-    work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_playback")
-    out_path = work_dir / f"{sanitize_filename(song_name) or 'mix'}_mix.flac"
-    key = (
-        tuple((_file_signature(path), repr(config.compressor_for_label(label))) for path, label in files_and_labels),
-        config.sample_rate, trim_start_frames, trim_end_frames,
-    )
-    if _playback_cache_hit(out_path, key):
-        return out_path
-    import numpy as np
-    from .audio.filters import apply_compressor
-    from .audio.formats import read_audio, write_flac
-
-    sample_rate = config.sample_rate
-    processed = []
-    for path, label in files_and_labels:
-        data, sr = read_audio(path, sample_rate)
-        data = apply_compressor(data, sr, config.compressor_for_label(label))
-        if trim_start_frames > 0 and trim_start_frames < len(data):
-            data = data[trim_start_frames:]
-        if trim_end_frames > 0 and trim_end_frames < len(data):
-            data = data[:len(data) - trim_end_frames]
-        processed.append(data)
-
-    max_len = max(len(d) for d in processed)
-    channels = max(d.shape[1] for d in processed)
-    mix = np.zeros((max_len, channels), dtype=np.float32)
-    for data in processed:
-        if data.shape[1] == 1 and channels == 2:
-            data = np.column_stack([data[:, 0], data[:, 0]])
-        mix[:len(data), :data.shape[1]] += data
-    np.clip(mix, -1.0, 1.0, out=mix)
-
-    write_flac(out_path, mix, sample_rate)
     _playback_cache[out_path] = key
     return out_path
 
@@ -2446,26 +2383,6 @@ class LocalBackend(Backend):
         play_path = _compressed_playback_path(path, settings)
         return str(play_path)
 
-    def get_song_playback_path(self, project_name: str, takes: list[dict]) -> str:
-        if not takes:
-            raise BackendError("No takes to play.")
-        files_and_labels: list[tuple[Path, str]] = []
-        for take in takes:
-            try:
-                local_path = Path(self.ensure_take_local(project_name, take["filename"]))
-            except BackendError:
-                continue  # best-effort — see docstring; the rest of the song still plays
-            files_and_labels.append((local_path, take["instrument"]))
-        if not files_and_labels:
-            raise BackendError("None of this song's takes are available right now.")
-        config = self.get_config()
-        trim_start = round(takes[0].get("trim_start_seconds", 0.0) * config.sample_rate)
-        trim_end = round(takes[0].get("trim_end_seconds", 0.0) * config.sample_rate)
-        mixed_path = _mixed_playback_path(
-            takes[0]["track_name"], files_and_labels, config, trim_start, trim_end,
-        )
-        return str(mixed_path)
-
     def list_completed_takes(self) -> list[dict]:
         config = self.get_config()
         vault_root = Path(config.session_vault_path)
@@ -2485,7 +2402,7 @@ class LocalBackend(Backend):
                 # Non-destructive "edit backing track" trim (see
                 # edit_backing_track) — already-affected takes carry this
                 # along to wherever a take dict ends up used for playback
-                # (get_song_playback_path) or re-edit (EditBackingTrackDialog
+                # (the Completed Takes mixer) or re-edit (EditBackingTrackDialog
                 # pre-filling its current values) without a second lookup.
                 "trim_start_seconds": entry.trim_start_seconds,
                 "trim_end_seconds": entry.trim_end_seconds,
@@ -2542,6 +2459,19 @@ class LocalBackend(Backend):
                 records.append((None, entry))
                 break
         return records, inspiration_index
+
+    def get_song_mix(self, track_name: str) -> dict | None:
+        from .vault import load_song_mix
+        return load_song_mix(Path(self.get_config().session_vault_path), track_name)
+
+    def save_song_mix(self, track_name: str, volumes: dict[str, float], muted: list[str]) -> dict:
+        if not track_name:
+            raise BackendError("Can't save a mix without a song name.")
+        from .vault import save_song_mix
+        try:
+            return save_song_mix(Path(self.get_config().session_vault_path), track_name, volumes, muted)
+        except OSError as e:
+            raise BackendError(f"Could not save mix for '{track_name}': {e}") from e
 
     def edit_backing_track(
         self, take_filename: str, trim_start_seconds: float, trim_end_seconds: float,

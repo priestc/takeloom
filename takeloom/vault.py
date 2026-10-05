@@ -7,7 +7,11 @@ project reads and writes into these same three vault subfolders:
     <vault>/
     ├── sessions/<session_name>_<project_name>/...
     ├── backing_tracks/<filename>
-    └── completed_takes/<filename>
+    ├── completed_takes/<filename>
+    └── mixes/<song>.json
+
+mixes/ holds the Completed Takes tab's saved mixer settings, one file per
+song — see load_song_mix/save_song_mix below.
 
 Sharing backing_tracks/completed_takes across every project is what lets
 two different projects reference the same inspiration-server song without
@@ -120,6 +124,57 @@ def record_inspiration_take(
 
 
 # --- syncing session dirs and individual vault files to/from the remote ---
+
+
+# --- saved song mixes ---
+#
+# The Completed Takes tab's mixer (ui/song_mixer.py) saves each song's
+# per-instrument volume/mute settings here, so reopening that song in the
+# mixer restores them. Keyed by the song's track_name (the same name the
+# Completed Takes list groups by) and, within it, by instrument label —
+# not take filename — so a mix still applies after a take is re-recorded,
+# and a label that's new since the mix was saved just starts at 100%.
+# Stored like inspiration_takes.json: in the local vault on the studio
+# machine only, written by the server (see architecture notes on Remote
+# being read-only for vault data).
+
+
+def _mix_path(root: Path, track_name: str) -> Path:
+    from .utils import sanitize_filename
+    return root / "mixes" / f"{sanitize_filename(track_name) or 'untitled'}.json"
+
+
+def load_song_mix(root: Path, track_name: str) -> dict | None:
+    """{"track_name": str, "volumes": {label: gain}, "muted": [label, ...],
+    "saved_at": float} for `track_name`, or None if it's never been saved
+    (or the file is unreadable — treated the same as no mix)."""
+    path = _mix_path(root, track_name)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return {
+        "track_name": data.get("track_name", track_name),
+        "volumes": {str(k): float(v) for k, v in (data.get("volumes") or {}).items()},
+        "muted": [str(m) for m in data.get("muted") or []],
+        "saved_at": data.get("saved_at"),
+    }
+
+
+def save_song_mix(root: Path, track_name: str, volumes: dict[str, float], muted: list[str]) -> dict:
+    import time
+    mix = {
+        "track_name": track_name,
+        "volumes": {str(k): float(v) for k, v in volumes.items()},
+        "muted": sorted(str(m) for m in muted),
+        "saved_at": time.time(),
+    }
+    path = _mix_path(root, track_name)
+    ensure_dir(path.parent)
+    atomic_write_text(path, json.dumps(mix, indent=2))
+    return mix
 
 
 def sync_and_maybe_prune(config: StudioConfig, session_dir: Path, log: LogFn | None = None) -> None:

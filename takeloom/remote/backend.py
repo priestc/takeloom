@@ -189,6 +189,14 @@ class RemoteBackend(Backend):
     def list_completed_takes(self) -> list[dict]:
         return self._client.call("list_completed_takes", {})["takes"]
 
+    def get_song_mix(self, track_name: str) -> dict | None:
+        return self._client.call("get_song_mix", {"track_name": track_name})["mix"]
+
+    def save_song_mix(self, track_name: str, volumes: dict[str, float], muted: list[str]) -> dict:
+        return self._client.call(
+            "save_song_mix", {"track_name": track_name, "volumes": volumes, "muted": muted},
+        )["mix"]
+
     def edit_backing_track(
         self, take_filename: str, trim_start_seconds: float, trim_end_seconds: float,
     ) -> dict:
@@ -214,7 +222,7 @@ class RemoteBackend(Backend):
     def _fetch_take_file(self, project_name: str, filename: str) -> Path:
         """Download one take file to this machine's own disk — the
         Remote-capable equivalent of LocalBackend.ensure_take_local,
-        shared by get_take_playback_path and get_song_playback_path. Server resolves/
+        used by get_take_playback_path. Server resolves/
         downloads the file on its own end (see backend.py's ensure_
         take_local) and streams it back in chunks as "take_file" events
         on this same connection (see _on_raw_event) rather than one
@@ -254,27 +262,6 @@ class RemoteBackend(Backend):
         settings = self.get_config().compressor_for_label(label)
         play_path = _compressed_playback_path(local_path, settings)
         return str(play_path)
-
-    def get_song_playback_path(self, project_name: str, takes: list[dict]) -> str:
-        if not takes:
-            raise BackendError("No takes to play.")
-        files_and_labels: list[tuple[Path, str]] = []
-        for take in takes:
-            try:
-                local_path = self._fetch_take_file(project_name, take["filename"])
-            except BackendError:
-                continue  # best-effort — see Backend.get_song_playback_path' docstring
-            files_and_labels.append((local_path, take["instrument"]))
-        if not files_and_labels:
-            raise BackendError("None of this song's takes are available right now.")
-        config = self.get_config()
-        trim_start = round(takes[0].get("trim_start_seconds", 0.0) * config.sample_rate)
-        trim_end = round(takes[0].get("trim_end_seconds", 0.0) * config.sample_rate)
-        from ..backend import _mixed_playback_path
-        mixed_path = _mixed_playback_path(
-            takes[0]["track_name"], files_and_labels, config, trim_start, trim_end,
-        )
-        return str(mixed_path)
 
     # --- inspiration ---
 

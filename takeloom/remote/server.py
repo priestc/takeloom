@@ -51,7 +51,7 @@ _READ_ONLY_OPS = {
     "search_inspiration_artists", "search_inspiration_by_filter", "find_inspiration_track",
     "is_recording", "get_monitoring_mode",
     "list_sessions", "get_session_detail", "analyze_take", "fetch_take_file",
-    "list_completed_takes", "benchmark_audio_modifiers",
+    "list_completed_takes", "benchmark_audio_modifiers", "get_song_mix",
 }
 
 

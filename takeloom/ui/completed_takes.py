@@ -2,14 +2,19 @@
 — not scoped to one session or project, unlike the Sessions tab (see
 backend.py's list_completed_takes for exactly what's gathered and why).
 
+Two panes: on the left a mixer (ui/song_mixer.py), on the right the song
+list. Clicking a song loads all of its takes into the mixer — a volume
+slider (plus Mute/Solo) per instrument, played together live — where
+"Save mix" stores those settings in the vault and they're re-applied
+whenever that song is loaded again.
+
 Takes are grouped by song: one header row per track name — a collapse/
 expand triangle, the title, then every instrument that has a take on it
 as a row of colored badges (instrument_colors.py) right there on the
-header, plus a "Play all" button that mixes every one of that song's
-takes together (backend.py's get_song_playback_path) — and, once expanded, one
-line per take below it with its own date and Play button. takes["track_
-name"] is already the group key list_completed_takes sorts by, so
-grouping here is just a consecutive-run split, not a re-sort.
+header — and, once expanded, one line per take below it with its own date
+and "Edit backing track..." button. takes["track_name"] is already the
+group key list_completed_takes sorts by, so grouping here is just a
+consecutive-run split, not a re-sort.
 
 Built from plain widgets in a scrollable canvas rather than a
 ttk.Treeview: a Treeview can only color a whole row via tags, not one
@@ -43,9 +48,9 @@ from ..backend import BackendError
 from ..config import StudioConfig
 from ..inspiration import build_inspiration_track_entry
 from .app_state import AppState
-from .audio_player import AudioPlayerBar
 from .edit_backing_track_dialog import EditBackingTrackDialog
 from .instrument_colors import make_label_badge
+from .song_mixer import SongMixer
 
 
 def _format_time_ago(recorded_at: float | None) -> str:
@@ -79,7 +84,7 @@ _PACK_BATCH = 15  # song groups packed per event-loop turn — see _pack_in_batc
 
 class CompletedTakesFrame(ttk.Frame):
     """Persistent tab (see ui/app.py's TABS): built once on first visit and
-    kept, so coming back to it is instant and whatever the player bar is
+    kept, so coming back to it is instant and whatever the mixer is
     playing keeps going. The data it shows is therefore a cache — "⟳
     Reload" refetches it (and clears the backend's cached playback files,
     see Backend.clear_playback_cache), as does connecting to/disconnecting
@@ -178,6 +183,16 @@ class CompletedTakesFrame(ttk.Frame):
             self.project_only_var.set(False)
         self._build_songs()
 
+        # The song in the mixer had its backing-track trim edited since it
+        # was loaded — reload it so the takes line up with the new trim,
+        # without auto-starting playback.
+        loaded = self._songs.get(self.mixer.track_name or "")
+        if loaded is not None:
+            takes = loaded["takes"]
+            trim = (takes[0].get("trim_start_seconds", 0.0), takes[0].get("trim_end_seconds", 0.0))
+            if trim != self.mixer.trim:
+                self._load_into_mixer(self.mixer.track_name, autoplay=False)
+
     # --- build ---
 
     def _build(self) -> None:
@@ -192,11 +207,19 @@ class CompletedTakesFrame(ttk.Frame):
         ttk.Label(title_row, textvariable=self._load_status_var, foreground="#666666").pack(side="left")
         ttk.Label(
             self,
-            text="Every completed take across the whole vault, not just one project or session — grouped by song.",
-            foreground="#666666", wraplength=760, justify="left",
+            text="Every completed take across the whole vault, not just one project or session — grouped by song. "
+            "Click a song to load its takes into the mixer.",
+            foreground="#666666", wraplength=900, justify="left",
         ).pack(anchor="w", pady=(0, 12))
 
-        filter_row = ttk.Frame(self)
+        panes = ttk.PanedWindow(self, orient="horizontal")
+        panes.pack(fill="both", expand=True)
+        self.mixer = SongMixer(panes, self.app_state)
+        right = ttk.Frame(panes)
+        panes.add(self.mixer, weight=0)
+        panes.add(right, weight=1)
+
+        filter_row = ttk.Frame(right)
         filter_row.pack(fill="x", pady=(0, 8))
         ttk.Label(filter_row, text="Filter by title:").pack(side="left")
         self.title_var = tk.StringVar(value="")
@@ -210,19 +233,16 @@ class CompletedTakesFrame(ttk.Frame):
         self._project_check.pack(side="left")
         self._project_check.state(["disabled"])
 
-        self.player = AudioPlayerBar(self)
-        self.player.pack(fill="x", pady=(0, 8))
+        self._build_scroll_container(right)
 
-        self._build_scroll_container()
-
-    def _build_scroll_container(self) -> None:
+    def _build_scroll_container(self, parent: ttk.Frame) -> None:
         """A scrollable canvas for the song/take list — plain widgets, not
         a Treeview (see module docstring for why), so it can grow past
         the window's height the same way Studio Setup's own content does
         (see studio_setup.py's _build_scroll_container, which this
         mirrors)."""
-        canvas = tk.Canvas(self, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
+        canvas = tk.Canvas(parent, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -306,23 +326,27 @@ class CompletedTakesFrame(ttk.Frame):
         toggle.pack(side="left", padx=(0, 6))
         title = ttk.Label(header, text=track_name, font=("TkDefaultFont", 11, "bold"), cursor="hand2")
         title.pack(side="left", padx=(0, 8))
-        for widget in (toggle, title):
-            widget.bind("<Button-1>", lambda _e, name=track_name: self._toggle_expanded(name))
+        # Triangle expands/collapses; anywhere else on the header (title,
+        # badges, blank space) loads the song into the mixer.
+        toggle.bind("<Button-1>", lambda _e, name=track_name: self._toggle_expanded(name))
+        load = lambda _e, name=track_name: self._load_into_mixer(name)  # noqa: E731
 
         # Every instrument that has a take on this song, right on the
         # header — a fast "who's covered this one" glance without having
         # to expand it, same color per label as everywhere else (see
         # instrument_colors.py).
         for take in takes_for_song:
-            make_label_badge(header, take["instrument"], font_size=8, padx=4, pady=0).pack(side="left", padx=(0, 4))
+            badge = make_label_badge(header, take["instrument"], font_size=8, padx=4, pady=0)
+            badge.pack(side="left", padx=(0, 4))
+            badge.bind("<Button-1>", load)
+        for widget in (header, title):
+            widget.bind("<Button-1>", load)
 
-        status_var = tk.StringVar(value="")
-        ttk.Button(
-            header, text="▶ Play all", command=lambda: self._on_play_song(track_name, takes_for_song, status_var),
-        ).pack(side="left", padx=(10, 4))
-        ttk.Label(header, textvariable=status_var, foreground="#666666").pack(side="left")
-
-        self._songs[track_name] = {"frame": frame, "toggle": toggle, "detail": None, "takes": takes_for_song}
+        self._songs[track_name] = {
+            "frame": frame, "toggle": toggle, "title": title, "detail": None, "takes": takes_for_song,
+        }
+        if track_name == self.mixer.track_name:
+            title.configure(foreground="#2a6db0")
         if track_name in self._expanded:
             self._set_expanded(track_name, True)
 
@@ -361,52 +385,26 @@ class CompletedTakesFrame(ttk.Frame):
         self._build_play_controls(row, take, takes_for_song)
 
     def _build_play_controls(self, row: ttk.Frame, take: dict, takes_for_song: list[dict]) -> None:
-        status_var = tk.StringVar(value="")
-        ttk.Button(row, text="▶ Play", command=lambda: self._on_play_take(take, status_var)).pack(
-            side="left", padx=(8, 4)
-        )
         ttk.Button(
             row, text="✂ Edit backing track...",
             command=lambda: self._on_edit_backing_track(take, takes_for_song),
-        ).pack(side="left", padx=(0, 4))
-        ttk.Label(row, textvariable=status_var, foreground="#666666").pack(side="left")
+        ).pack(side="left", padx=(8, 4))
 
-    # --- play ---
+    # --- mixer ---
 
-    def _on_play_take(self, take: dict, status_var: tk.StringVar) -> None:
+    def _load_into_mixer(self, track_name: str, autoplay: bool = True) -> None:
+        song = self._songs.get(track_name)
+        if song is None:
+            return
         if not self._play_project:
-            status_var.set("")
-            messagebox.showerror("Could not play take", "No project available to locate the vault.")
+            messagebox.showerror("Could not load song", "No project available to locate the vault.")
             return
-        status_var.set("Loading...")
-        backend = self.app_state.backend
-        self._run_backend(
-            lambda: backend.get_take_playback_path(self._play_project, take["filename"], take["instrument"]),
-            lambda result, error: self._on_play_result(
-                status_var, result, error, f"{take['track_name']} — {take['instrument']} take {take['take_number']}",
-            ),
-        )
+        self.mixer.load_song(track_name, song["takes"], self._play_project, autoplay=autoplay)
+        self._highlight_selected()
 
-    def _on_play_song(self, track_name: str, takes_for_song: list[dict], status_var: tk.StringVar) -> None:
-        if not self._play_project:
-            status_var.set("")
-            messagebox.showerror("Could not play song", "No project available to locate the vault.")
-            return
-        status_var.set("Mixing...")
-        backend = self.app_state.backend
-        self._run_backend(
-            lambda: backend.get_song_playback_path(self._play_project, takes_for_song),
-            lambda result, error: self._on_play_result(status_var, result, error, f"{track_name} — all takes"),
-        )
-
-    def _on_play_result(self, status_var: tk.StringVar, path: str | None, error: str | None, title: str) -> None:
-        if not self.winfo_exists():
-            return
-        status_var.set("")
-        if error or path is None:
-            messagebox.showerror("Could not play", error or "No playable file was produced.")
-            return
-        self.player.load(path, title)
+    def _highlight_selected(self) -> None:
+        for name, song in self._songs.items():
+            song["title"].configure(foreground="#2a6db0" if name == self.mixer.track_name else "")
 
     # --- edit backing track ---
 
