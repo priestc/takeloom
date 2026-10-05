@@ -196,13 +196,13 @@ class RemoteBackend(Backend):
     def ensure_take_local(self, project_name: str, filename: str) -> str:
         raise BackendError(
             "ensure_take_local downloads to whichever machine runs it — over Remote that's the "
-            "studio's own disk, not this one. Use play_take instead."
+            "studio's own disk, not this one. Use get_take_playback_path instead."
         )
 
     def _fetch_take_file(self, project_name: str, filename: str) -> Path:
         """Download one take file to this machine's own disk — the
         Remote-capable equivalent of LocalBackend.ensure_take_local,
-        shared by play_take and play_song_takes. Server resolves/
+        shared by get_take_playback_path and get_song_playback_path. Server resolves/
         downloads the file on its own end (see backend.py's ensure_
         take_local) and streams it back in chunks as "take_file" events
         on this same connection (see _on_raw_event) rather than one
@@ -227,19 +227,18 @@ class RemoteBackend(Backend):
         local_path.write_bytes(data)
         return local_path
 
-    def play_take(self, project_name: str, filename: str, label: str) -> None:
+    def get_take_playback_path(self, project_name: str, filename: str, label: str) -> str:
         local_path = self._fetch_take_file(project_name, filename)
-        # Compression happens client-side, same as LocalBackend.play_take
+        # Compression happens client-side, same as LocalBackend.get_take_playback_path
         # (see backend.py's _compressed_playback_path) — get_config()
         # already carries the full compressor_settings dict over from the
         # server, so there's no reason for a dedicated RPC just for this.
         from ..backend import _compressed_playback_path
         settings = self.get_config().compressor_for_label(label)
         play_path = _compressed_playback_path(local_path, settings)
-        from ..video.capture import open_in_default_player
-        open_in_default_player(play_path)
+        return str(play_path)
 
-    def play_song_takes(self, project_name: str, takes: list[dict]) -> None:
+    def get_song_playback_path(self, project_name: str, takes: list[dict]) -> str:
         if not takes:
             raise BackendError("No takes to play.")
         files_and_labels: list[tuple[Path, str]] = []
@@ -247,7 +246,7 @@ class RemoteBackend(Backend):
             try:
                 local_path = self._fetch_take_file(project_name, take["filename"])
             except BackendError:
-                continue  # best-effort — see Backend.play_song_takes' docstring
+                continue  # best-effort — see Backend.get_song_playback_path' docstring
             files_and_labels.append((local_path, take["instrument"]))
         if not files_and_labels:
             raise BackendError("None of this song's takes are available right now.")
@@ -258,8 +257,7 @@ class RemoteBackend(Backend):
         mixed_path = _mixed_playback_path(
             takes[0]["track_name"], files_and_labels, config, trim_start, trim_end,
         )
-        from ..video.capture import open_in_default_player
-        open_in_default_player(mixed_path)
+        return str(mixed_path)
 
     # --- inspiration ---
 
@@ -462,12 +460,12 @@ class RemoteBackend(Backend):
             return
 
         if event == "take_file":
-            # Chunked transfer behind play_take — accumulated here so
-            # that by the time play_take's own call() returns (after the
+            # Chunked transfer behind get_take_playback_path — accumulated here so
+            # that by the time get_take_playback_path's own call() returns (after the
             # server's "fetch_take_file" response, sent only once every
             # chunk before it has gone out), self._take_file_buffer is
             # already complete. Malformed chunks are dropped silently,
-            # same as video_check_result below — play_take's own "no data
+            # same as video_check_result below — get_take_playback_path's own "no data
             # received" check catches the resulting empty buffer.
             try:
                 seq, total = data["seq"], data["total"]

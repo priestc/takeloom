@@ -1,7 +1,8 @@
 """Sessions tab: browse past recording sessions and their takes.
 
-Per take, "▶ Play" opens it in the OS's default player — see backend.py's
-list_sessions/get_session_detail/play_take. Downloads it from the backup
+Per take, "▶ Play" plays it in the tab's built-in player bar (ui/
+audio_player.py) — see backend.py's
+list_sessions/get_session_detail/get_take_playback_path. Downloads it from the backup
 server first if it isn't already on local disk (see backend.py's
 ensure_take_local) — a take shown here doesn't have to be any project's
 *current* preferred one (see get_session_detail), so this can't assume
@@ -37,6 +38,7 @@ from tkinter import messagebox, ttk
 from ..backend import BackendError
 from ..config import StudioConfig
 from .app_state import AppState
+from .audio_player import AudioPlayerBar
 from .instrument_colors import make_label_badge
 
 
@@ -118,6 +120,9 @@ class SessionsFrame(ttk.Frame):
         self.tree.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="left", fill="y")
         self.tree.bind("<<TreeviewSelect>>", self._on_select_session)
+
+        self.player = AudioPlayerBar(self)
+        self.player.pack(fill="x", pady=(12, 0))
 
         if not self._sessions:
             ttk.Label(self, text="No past sessions found.", foreground="#666666").pack(anchor="w", pady=(12, 0))
@@ -294,16 +299,16 @@ class SessionsFrame(ttk.Frame):
         self._build_play_controls(cell, project_name, take["filename"], old_instrument)
 
     def _build_play_controls(self, row: ttk.Frame, project_name: str, filename: str, label: str) -> None:
-        # Read-only — opens the take in the OS's default player
-        # (backend.py's play_take) rather than anything this tab renders
-        # itself. Works identically pointed at local
+        # Read-only — plays the take in this tab's built-in player bar
+        # (self.player), from the local file backend.py's
+        # get_take_playback_path produces. Works identically pointed at local
         # hardware or a Remote connection: locally it just needs the file
         # to exist (downloading it from the backup server first if
         # "remote" vault mode already pruned it — see ensure_take_local),
         # remotely the server does that same local-availability step on
         # its own end and streams the bytes back to actually play here.
         # `label` (the take's own instrument label — see the bold label
-        # right next to this in _build_take_row) is what play_take looks
+        # right next to this in _build_take_row) is what get_take_playback_path looks
         # its compressor settings up by; the take file itself is always
         # raw on disk regardless.
         play_var = tk.StringVar(value="")
@@ -319,18 +324,22 @@ class SessionsFrame(ttk.Frame):
         # "Loading..." matters most over a Remote connection, where this
         # can mean a real wait — downloading the take from the backup
         # server to the studio machine, then streaming it here (see
-        # backend.py's play_take/ensure_take_local) — but costs nothing
+        # backend.py's get_take_playback_path/ensure_take_local) — but costs nothing
         # to show locally either, where it's normally near-instant.
         status_var.set("Loading...")
         backend = self.app_state.backend
         self._run_backend(
-            lambda: backend.play_take(project_name, filename, label),
-            lambda _result, error: self._on_play_take_result(status_var, error),
+            lambda: backend.get_take_playback_path(project_name, filename, label),
+            lambda result, error: self._on_play_take_result(status_var, result, error, f"{label} — {filename}"),
         )
 
-    def _on_play_take_result(self, status_var: tk.StringVar, error: str | None) -> None:
+    def _on_play_take_result(
+        self, status_var: tk.StringVar, path: str | None, error: str | None, title: str,
+    ) -> None:
         if not self.winfo_exists():
             return
         status_var.set("")
-        if error:
-            messagebox.showerror("Could not play take", error)
+        if error or path is None:
+            messagebox.showerror("Could not play take", error or "No playable file was produced.")
+            return
+        self.player.load(path, title)

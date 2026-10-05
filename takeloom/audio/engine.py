@@ -198,7 +198,7 @@ class AudioEngine:
         # Record RAW input to disk — never through the compressor. Only
         # what's actually monitored/played back (below) reflects it; a
         # take file on disk always stays exactly what came off the input,
-        # so backend.py's play_take/Mixer.add_source can apply whatever
+        # so backend.py's get_take_playback_path/Mixer.add_source can apply whatever
         # that take's own instrument-label compressor settings currently
         # are at listen time, rather than whatever was baked in the day it
         # was recorded.

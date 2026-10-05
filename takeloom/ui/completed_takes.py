@@ -6,7 +6,7 @@ Takes are grouped by song: one header row per track name — a collapse/
 expand triangle, the title, then every instrument that has a take on it
 as a row of colored badges (instrument_colors.py) right there on the
 header, plus a "Play all" button that mixes every one of that song's
-takes together (backend.py's play_song_takes) — and, once expanded, one
+takes together (backend.py's get_song_playback_path) — and, once expanded, one
 line per take below it with its own date and Play button. takes["track_
 name"] is already the group key list_completed_takes sorts by, so
 grouping here is just a consecutive-run split, not a re-sort.
@@ -43,6 +43,7 @@ from ..backend import BackendError
 from ..config import StudioConfig
 from ..inspiration import build_inspiration_track_entry
 from .app_state import AppState
+from .audio_player import AudioPlayerBar
 from .edit_backing_track_dialog import EditBackingTrackDialog
 from .instrument_colors import make_label_badge
 
@@ -164,6 +165,9 @@ class CompletedTakesFrame(ttk.Frame):
         project_check.pack(side="left")
         if not self._current_project:
             project_check.state(["disabled"])
+
+        self.player = AudioPlayerBar(self)
+        self.player.pack(fill="x", pady=(0, 8))
 
         self._build_scroll_container()
         self._apply_filter()
@@ -297,8 +301,10 @@ class CompletedTakesFrame(ttk.Frame):
         status_var.set("Loading...")
         backend = self.app_state.backend
         self._run_backend(
-            lambda: backend.play_take(self._play_project, take["filename"], take["instrument"]),
-            lambda _result, error: self._on_play_result(status_var, error),
+            lambda: backend.get_take_playback_path(self._play_project, take["filename"], take["instrument"]),
+            lambda result, error: self._on_play_result(
+                status_var, result, error, f"{take['track_name']} — {take['instrument']} take {take['take_number']}",
+            ),
         )
 
     def _on_play_song(self, track_name: str, takes_for_song: list[dict], status_var: tk.StringVar) -> None:
@@ -309,16 +315,18 @@ class CompletedTakesFrame(ttk.Frame):
         status_var.set("Mixing...")
         backend = self.app_state.backend
         self._run_backend(
-            lambda: backend.play_song_takes(self._play_project, takes_for_song),
-            lambda _result, error: self._on_play_result(status_var, error),
+            lambda: backend.get_song_playback_path(self._play_project, takes_for_song),
+            lambda result, error: self._on_play_result(status_var, result, error, f"{track_name} — all takes"),
         )
 
-    def _on_play_result(self, status_var: tk.StringVar, error: str | None) -> None:
+    def _on_play_result(self, status_var: tk.StringVar, path: str | None, error: str | None, title: str) -> None:
         if not self.winfo_exists():
             return
         status_var.set("")
-        if error:
-            messagebox.showerror("Could not play", error)
+        if error or path is None:
+            messagebox.showerror("Could not play", error or "No playable file was produced.")
+            return
+        self.player.load(path, title)
 
     # --- edit backing track ---
 

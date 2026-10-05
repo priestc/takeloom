@@ -58,7 +58,7 @@ class Mixer:
         block — the source file on disk (e.g. a completed take) always
         stays raw; this is what makes an "other instrument's take" heard
         with that take's own instrument-label compressor settings, same
-        as backend.py's play_take, without touching the file itself.
+        as backend.py's get_take_playback_path, without touching the file itself.
         Never used for "backing"/"metronome" sources (see backend.py's
         callers) — only an actual take has an instrument label to look
         settings up by."""

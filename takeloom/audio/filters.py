@@ -115,7 +115,7 @@ def apply_compressor(data: np.ndarray, sample_rate: int, settings: CompressorSet
     function of its input and gets the same input on both channels here.
 
     Used by Mixer.add_source (an "other instrument's take" layered into a
-    live session's monitor mix) and backend.py's play_take (a take opened
+    live session's monitor mix) and backend.py's get_take_playback_path (a take opened
     from the Sessions/Completed Takes tab) — the two places a previously-
     recorded take actually gets listened to "from within takeloom" per
     that label's own settings, as opposed to the take's file on disk,

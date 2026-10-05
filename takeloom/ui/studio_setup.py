@@ -361,11 +361,11 @@ class _CompressorRow:
     that label. Keyed by label (not by which specific Instrument/
     full_name), matching how takes are actually filed and played back —
     see config.py's StudioConfig.compressor_for_label and backend.py's
-    play_take: two instruments sharing a label share these same settings.
+    get_take_playback_path: two instruments sharing a label share these same settings.
     A recorded take file itself is always raw on disk no matter what's
     set here — this only ever shapes what's actually heard, live or on
     playback (see AudioEngine._callback/Mixer.add_source/backend.py's
-    play_take).
+    get_take_playback_path).
 
     attack_ms/release_ms aren't exposed as their own controls (yet) —
     carried through unchanged from whatever's already in config, same as

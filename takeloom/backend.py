@@ -389,7 +389,7 @@ class Backend(ABC):
 
         Also best-effort updates session_dir's own "takes" snapshot (see
         get_session_detail's docstring) to the new filename, so this
-        session keeps showing (and, via play_take, keeps able to
+        session keeps showing (and, via get_take_playback_path, keeps able to
         actually fetch) the take it produced instead of a now-stale
         reference to the pre-rename filename — silently, since this is
         secondary to the reassignment itself actually succeeding; a log
@@ -458,21 +458,22 @@ class Backend(ABC):
 
         Local-only: on a Remote connection this would download to the
         *server's* disk, useless to a client that wants to actually play
-        the file — RemoteBackend refuses outright; see play_take for the
+        the file — RemoteBackend refuses outright; see get_take_playback_path for the
         Remote-capable equivalent, which uses this method server-side as
         a step of its own, not by calling this one directly over the
         wire."""
         ...
 
     @abstractmethod
-    def play_take(self, project_name: str, filename: str, label: str) -> None:
-        """Open a specific take file (see ensure_take_local for what
-        `filename` means and the local-availability guarantee this gives
-        first) in the OS's default player, on whichever machine the
-        caller is actually running on — the point being that a UI tab
-        can call this identically whether app_state.backend is local or
-        a Remote connection, and it Just Plays on the right machine
-        either way, unlike ensure_take_local. Raises BackendError under
+    def get_take_playback_path(self, project_name: str, filename: str, label: str) -> str:
+        """Return a path, on whichever machine the caller is actually
+        running on, to a playable copy of a specific take file (see
+        ensure_take_local for what `filename` means and the local-
+        availability guarantee this gives first) — for the UI's built-in
+        player (ui/audio_player.py) to play. The point being that a UI
+        tab can call this identically whether app_state.backend is local
+        or a Remote connection, and gets a file on its own disk either
+        way, unlike ensure_take_local. Raises BackendError under
         the same conditions ensure_take_local does.
 
         `label` is the take's own instrument label (e.g. a Sessions-tab
@@ -481,21 +482,21 @@ class Backend(ABC):
         disk (see AudioEngine._callback), so if that label's compressor
         (StudioConfig.compressor_for_label) is enabled, this processes a
         scratch temp copy through it (see audio.filters.apply_compressor)
-        before opening *that*, leaving the original file untouched. Plays
-        the original directly, no temp copy, if that label's compressor
+        and returns *that*, leaving the original file untouched. Returns
+        the original's path, no temp copy, if that label's compressor
         is disabled."""
         ...
 
     @abstractmethod
-    def play_song_takes(self, project_name: str, takes: list[dict]) -> None:
-        """Like play_take, but for every take in `takes` (each a
+    def get_song_playback_path(self, project_name: str, takes: list[dict]) -> str:
+        """Like get_take_playback_path, but for every take in `takes` (each a
         Completed Takes row dict — needs at least "filename",
         "instrument", and "track_name") at once, mixed together — one
         song's every instrument overlaid on top of each other, each
         passed through its own label's compressor settings first (see
-        play_take's docstring for the single-take version of the same
-        reasoning), and the mixed result opened in the OS's default
-        player. Best-effort per take: one that isn't available (locally,
+        get_take_playback_path's docstring for the single-take version of the same
+        reasoning), and the mixed result's path returned (a scratch
+        temp file). Best-effort per take: one that isn't available (locally,
         or via the backup server) is skipped rather than failing the
         whole mix, so a song missing one instrument's take still plays
         the rest. Raises BackendError only if `takes` is empty or *none*
@@ -556,7 +557,7 @@ class Backend(ABC):
         new take, or layering an existing one in), the Video Check path,
         _resolve_filter_slot (an inspiration filter slot redrawing this
         same song later inherits the trim from the shared index), and
-        play_song_takes. A newly recorded take is therefore already
+        get_song_playback_path. A newly recorded take is therefore already
         exactly the trimmed length with nothing further to do; an
         existing take recorded before the trim was set gets the identical
         window applied at playback/mix time instead, so it stays in sync
@@ -1426,7 +1427,7 @@ class _ActiveAutoDetect:
 def _compressed_playback_path(path: Path, settings: CompressorSettings) -> Path:
     """If `settings` is enabled, run `path`'s audio through the compressor
     and write the result to a scratch temp copy, returning that instead of
-    `path` — shared by LocalBackend.play_take and RemoteBackend.play_take
+    `path` — shared by LocalBackend.get_take_playback_path and RemoteBackend.get_take_playback_path
     so a completed take's own file on disk always stays exactly what
     AudioEngine captured (raw), while anything actually listened to
     through a takeloom player reflects that take's current instrument-
@@ -1457,7 +1458,7 @@ def _mixed_playback_path(
     file, returned. Shorter takes are zero-padded to the longest one's
     length before summing (same reasoning as audio.mixer.Mixer's own
     _sum_sources), and the sum is clipped to prevent overflow. Used by
-    play_song_takes for a quick "everyone's take on this song, played
+    get_song_playback_path for a quick "everyone's take on this song, played
     together" preview without needing a real session.
 
     trim_start_frames/trim_end_frames: the song's non-destructive "edit
@@ -2402,14 +2403,13 @@ class LocalBackend(Backend):
             raise BackendError(f"Could not download '{filename}' from {config.backup_server}.")
         return str(local_path)
 
-    def play_take(self, project_name: str, filename: str, label: str) -> None:
+    def get_take_playback_path(self, project_name: str, filename: str, label: str) -> str:
         path = Path(self.ensure_take_local(project_name, filename))
         settings = self.get_config().compressor_for_label(label)
         play_path = _compressed_playback_path(path, settings)
-        from .video.capture import open_in_default_player
-        open_in_default_player(play_path)
+        return str(play_path)
 
-    def play_song_takes(self, project_name: str, takes: list[dict]) -> None:
+    def get_song_playback_path(self, project_name: str, takes: list[dict]) -> str:
         if not takes:
             raise BackendError("No takes to play.")
         files_and_labels: list[tuple[Path, str]] = []
@@ -2427,8 +2427,7 @@ class LocalBackend(Backend):
         mixed_path = _mixed_playback_path(
             takes[0]["track_name"], files_and_labels, config, trim_start, trim_end,
         )
-        from .video.capture import open_in_default_player
-        open_in_default_player(mixed_path)
+        return str(mixed_path)
 
     def list_completed_takes(self) -> list[dict]:
         config = self.get_config()
@@ -2449,7 +2448,7 @@ class LocalBackend(Backend):
                 # Non-destructive "edit backing track" trim (see
                 # edit_backing_track) — already-affected takes carry this
                 # along to wherever a take dict ends up used for playback
-                # (play_song_takes) or re-edit (EditBackingTrackDialog
+                # (get_song_playback_path) or re-edit (EditBackingTrackDialog
                 # pre-filling its current values) without a second lookup.
                 "trim_start_seconds": entry.trim_start_seconds,
                 "trim_end_seconds": entry.trim_end_seconds,

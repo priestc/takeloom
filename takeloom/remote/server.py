@@ -340,7 +340,7 @@ class _ClientHandler(socketserver.StreamRequestHandler):
                 # file" events on this connection (see send_file), before
                 # the ordinary RPC response below so that by the time the
                 # client's blocking call() returns, every chunk has
-                # already arrived (see RemoteBackend.play_take).
+                # already arrived (see RemoteBackend.get_take_playback_path).
                 path = self._owner.backend.ensure_take_local(args["project_name"], args["filename"])
                 self.send_file("take_file", Path(path), extra={"filename": args["filename"]})
                 result = {}

@@ -335,7 +335,7 @@ class StudioConfig:
 
     def compressor_for_label(self, label: str) -> CompressorSettings:
         """This label's compressor settings — see AudioEngine._callback
-        (live monitoring) and backend.py's play_take/Mixer.add_source
+        (live monitoring) and backend.py's get_take_playback_path/Mixer.add_source
         (playback of a previously-recorded take) for where this actually
         gets applied. A recorded take file itself is always raw/
         uncompressed on disk regardless of this; the compressor only ever
