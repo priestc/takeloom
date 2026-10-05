@@ -8,11 +8,12 @@ slider (plus Mute/Solo) per instrument, played together live — where
 "Save mix" stores those settings in the vault and they're re-applied
 whenever that song is loaded again.
 
-Takes are grouped by song: one header row per track name — a collapse/
-expand triangle, the title, then every instrument that has a take on it
-as a row of colored badges (instrument_colors.py) right there on the
-header — and, once expanded, one line per take below it with its own date
-and "Edit backing track..." button. takes["track_name"] is already the
+Takes are grouped by song, one grid row per track name with three
+columns: Name (behind a collapse/expand triangle), Backing source
+(Inspiration / YouTube / Direct upload — TrackEntry.source_label()), and
+Instruments — every instrument that has a take on it as a row of colored
+badges (instrument_colors.py). Once expanded, one line per take appears
+below it with its own date and "Edit backing track..." button. takes["track_name"] is already the
 group key list_completed_takes sorts by, so grouping here is just a
 consecutive-run split, not a re-sort.
 
@@ -79,7 +80,12 @@ def _format_time_ago(recorded_at: float | None) -> str:
     return f"{int(years)}y ago"
 
 
-_PACK_BATCH = 15  # song groups packed per event-loop turn — see _pack_in_batches
+_PACK_BATCH = 15  # song rows shown per event-loop turn — see _pack_in_batches
+
+# backend list_completed_takes' "backing_source" (TrackEntry.source_label())
+# -> what the grid's "Backing source" column shows. Missing (an older
+# server over Remote) shows "—".
+_BACKING_SOURCE_NAMES = {"inspiration": "Inspiration", "youtube": "YouTube", "upload": "Direct upload"}
 
 
 class CompletedTakesFrame(ttk.Frame):
@@ -282,6 +288,7 @@ class CompletedTakesFrame(ttk.Frame):
         # list_completed_takes), so groupby's usual "only groups
         # consecutive runs" caveat doesn't apply here — every take for a
         # given song is already adjacent.
+        self._build_column_headings()
         for track_name, group in groupby(self._takes, key=lambda t: t["track_name"]):
             self._build_song_group(track_name, list(group))
         self._bind_mousewheel(self.content)
@@ -293,9 +300,9 @@ class CompletedTakesFrame(ttk.Frame):
         title = self.title_var.get().strip().lower()
         project_only = self.project_only_var.get()
         for song in self._songs.values():
-            song["frame"].pack_forget()
+            self._show_song(song, False)
         visible = [
-            song["frame"] for track_name, song in self._songs.items()
+            song for track_name, song in self._songs.items()
             if (not title or title in track_name.lower())
             and (not project_only or track_name in self._current_track_names)
         ]
@@ -303,8 +310,8 @@ class CompletedTakesFrame(ttk.Frame):
         self._pack_generation += 1
         self._pack_in_batches(visible, self._pack_generation)
 
-    def _pack_in_batches(self, frames: list[ttk.Frame], generation: int) -> None:
-        """Pack `frames` a batch at a time, yielding to the event loop in
+    def _pack_in_batches(self, songs: list[dict], generation: int) -> None:
+        """Show `songs` a batch at a time, yielding to the event loop in
         between. Mapping a widget for the first time inside the canvas
         costs ~1ms on macOS and a full list is hundreds of them — done in
         one go that froze the window for seconds. This way the first
@@ -312,38 +319,70 @@ class CompletedTakesFrame(ttk.Frame):
         newer _apply_filter (bumping _pack_generation) abandons this run."""
         if generation != self._pack_generation or not self.winfo_exists():
             return
-        for frame in frames[:_PACK_BATCH]:
-            frame.pack(fill="x")
-        if len(frames) > _PACK_BATCH:
-            self.after(1, lambda: self._pack_in_batches(frames[_PACK_BATCH:], generation))
+        for song in songs[:_PACK_BATCH]:
+            self._show_song(song, True)
+        if len(songs) > _PACK_BATCH:
+            self.after(1, lambda: self._pack_in_batches(songs[_PACK_BATCH:], generation))
+
+    def _show_song(self, song: dict, visible: bool) -> None:
+        """Grid in (or remove) one song's row of cells — and its detail
+        row too, if it's expanded. Each widget's grid options were set
+        once at build time, so a bare grid() puts it back where it was."""
+        for cell in song["cells"]:
+            cell.grid() if visible else cell.grid_remove()
+        if song["detail"] is not None:
+            song["detail"].grid() if visible and song["name"] in self._expanded else song["detail"].grid_remove()
+
+    def _build_column_headings(self) -> None:
+        for column, text in enumerate(("Name", "Backing source", "Instruments")):
+            ttk.Label(self.content, text=text, foreground="#666666", font=("TkDefaultFont", 10, "bold")).grid(
+                row=0, column=column, sticky="w", padx=(0 if column else 22, 16), pady=(0, 4),
+            )
+        ttk.Separator(self.content, orient="horizontal").grid(row=1, column=0, columnspan=3, sticky="ew")
+        self.content.columnconfigure(2, weight=1)
 
     def _build_song_group(self, track_name: str, takes_for_song: list[dict]) -> None:
-        frame = ttk.Frame(self.content)
-        header = ttk.Frame(frame)
-        header.pack(fill="x", pady=(10, 1))
+        # Two grid rows per song: the song's own cells, then its (initially
+        # unbuilt) per-take detail row spanning all three columns.
+        row = 2 + 2 * len(self._songs)
 
-        toggle = tk.Label(header, text="\N{BLACK RIGHT-POINTING TRIANGLE}", font=("TkDefaultFont", 9), cursor="hand2")
+        name_cell = ttk.Frame(self.content, cursor="hand2")
+        name_cell.grid(row=row, column=0, sticky="w", pady=(6, 2), padx=(0, 16))
+        toggle = tk.Label(name_cell, text="\N{BLACK RIGHT-POINTING TRIANGLE}", font=("TkDefaultFont", 9), cursor="hand2")
         toggle.pack(side="left", padx=(0, 6))
-        title = ttk.Label(header, text=track_name, font=("TkDefaultFont", 11, "bold"), cursor="hand2")
-        title.pack(side="left", padx=(0, 8))
-        # Triangle expands/collapses; anywhere else on the header (title,
-        # badges, blank space) loads the song into the mixer.
+        title = ttk.Label(
+            name_cell, text=track_name, font=("TkDefaultFont", 11, "bold"), cursor="hand2", wraplength=380,
+        )
+        title.pack(side="left")
+
+        source = _BACKING_SOURCE_NAMES.get(takes_for_song[0].get("backing_source", ""), "—")
+        source_cell = ttk.Label(self.content, text=source, foreground="#444444", cursor="hand2")
+        source_cell.grid(row=row, column=1, sticky="w", pady=(6, 2), padx=(0, 16))
+
+        # Every instrument that has a take on this song — a fast "who's
+        # covered this one" glance without having to expand it, same color
+        # per label as everywhere else (see instrument_colors.py).
+        instruments_cell = ttk.Frame(self.content, cursor="hand2")
+        instruments_cell.grid(row=row, column=2, sticky="w", pady=(6, 2))
+        badges = []
+        for take in takes_for_song:
+            badge = make_label_badge(instruments_cell, take["instrument"], font_size=8, padx=4, pady=0)
+            badge.pack(side="left", padx=(0, 4))
+            badges.append(badge)
+
+        # Triangle expands/collapses; anywhere else on the row loads the
+        # song into the mixer.
         toggle.bind("<Button-1>", lambda _e, name=track_name: self._toggle_expanded(name))
         load = lambda _e, name=track_name: self._load_into_mixer(name)  # noqa: E731
-
-        # Every instrument that has a take on this song, right on the
-        # header — a fast "who's covered this one" glance without having
-        # to expand it, same color per label as everywhere else (see
-        # instrument_colors.py).
-        for take in takes_for_song:
-            badge = make_label_badge(header, take["instrument"], font_size=8, padx=4, pady=0)
-            badge.pack(side="left", padx=(0, 4))
-            badge.bind("<Button-1>", load)
-        for widget in (header, title):
+        for widget in (name_cell, title, source_cell, instruments_cell, *badges):
             widget.bind("<Button-1>", load)
 
+        cells = [name_cell, source_cell, instruments_cell]
+        for cell in cells:
+            cell.grid_remove()  # shown by _apply_filter
         self._songs[track_name] = {
-            "frame": frame, "toggle": toggle, "title": title, "detail": None, "takes": takes_for_song,
+            "name": track_name, "row": row, "cells": cells, "toggle": toggle, "title": title,
+            "detail": None, "takes": takes_for_song,
         }
         if track_name == self.mixer.track_name:
             title.configure(foreground="#2a6db0")
@@ -360,15 +399,18 @@ class CompletedTakesFrame(ttk.Frame):
         if expanded:
             self._expanded.add(track_name)
             if song["detail"] is None:
-                song["detail"] = ttk.Frame(song["frame"])
+                song["detail"] = ttk.Frame(self.content)
+                song["detail"].grid(row=song["row"] + 1, column=0, columnspan=3, sticky="w")
                 for take in song["takes"]:
                     self._build_take_row(song["detail"], take, song["takes"])
                 self._bind_mousewheel(song["detail"])
-            song["detail"].pack(fill="x")
+                song["detail"].grid_remove()
+            if song["cells"][0].winfo_manager():  # only if the song itself is currently shown
+                song["detail"].grid()
         else:
             self._expanded.discard(track_name)
             if song["detail"] is not None:
-                song["detail"].pack_forget()
+                song["detail"].grid_remove()
         song["toggle"].configure(
             text="\N{BLACK DOWN-POINTING TRIANGLE}" if expanded else "\N{BLACK RIGHT-POINTING TRIANGLE}"
         )

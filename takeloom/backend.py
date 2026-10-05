@@ -511,12 +511,16 @@ class Backend(ABC):
         Each dict: {"track_name": str, "instrument": str (a label),
         "filename": str, "take_number": int, "has_video": bool,
         "has_midi": bool, "volume": float, "recorded_at": float | None,
-        "trim_start_seconds": float, "trim_end_seconds": float}, sorted by
+        "trim_start_seconds": float, "trim_end_seconds": float,
+        "backing_source": str}, sorted by
         track_name. The last two are the song's current non-destructive
         "edit backing track" trim (see edit_backing_track) — 0.0/0.0 if
         it's never been trimmed — carried here so a caller (play_song_
         takes, or the edit dialog reopening on an already-trimmed song)
-        doesn't need a second lookup just to read them back. A take
+        doesn't need a second lookup just to read them back.
+        backing_source is TrackEntry.source_label() — "inspiration",
+        "youtube", or "upload" — where the song's backing track came from.
+        A take
         superseded by a later reassign_take/re-record
         no longer appears here, same as it wouldn't in any project's
         setlist — this reflects each track+label's *current* take, not
@@ -2396,6 +2400,7 @@ class LocalBackend(Backend):
                 recorded_at = None
             by_filename[take.filename] = {
                 "track_name": entry.name, "instrument": label, "filename": take.filename,
+                "backing_source": entry.source_label(),
                 "take_number": take.take_number, "has_video": take.has_video, "has_midi": take.has_midi,
                 "volume": take.volume,
                 "recorded_at": recorded_at,
