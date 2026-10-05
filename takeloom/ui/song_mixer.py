@@ -1,7 +1,8 @@
 """Completed Takes tab's mixer panel (the left-hand pane): every take on one
-song, each on its own channel strip with a volume slider plus Mute/Solo,
-played together live through an AudioPlayerBar (ui/audio_player.py) — a
-slider move is heard immediately, no re-render.
+song — plus its backing track — each on its own channel strip with a
+volume slider plus Mute/Solo, played together live through an
+AudioPlayerBar (ui/audio_player.py) — a slider move is heard immediately,
+no re-render.
 
 "Save mix" writes the strips' volumes/mutes into the vault as
 mixes/<song>.json (backend.save_song_mix — vault.py's save_song_mix; a
@@ -26,6 +27,9 @@ from .backing_trim_editor import BackingTrimEditor
 from .instrument_colors import make_label_badge
 
 _MAX_GAIN = 2.0  # slider top = 200%
+# Saved-mix key for the backing track's strip — alongside instrument labels
+# in mixes/<song>.json's "volumes"/"muted", which can never be this.
+_BACKING_KEY = "backing track"
 
 
 class SongMixer(ttk.Frame):
@@ -101,17 +105,25 @@ class SongMixer(ttk.Frame):
                     loaded.append((take, path))
                 except BackendError as e:
                     skipped.append(f"{take['instrument']}: {e}")
+            backing_path = None
+            if takes:
+                try:
+                    backing_path = backend.get_backing_playback_path(takes[0]["filename"])
+                except BackendError as e:
+                    skipped.append(f"backing track: {e}")
             try:
                 mix, mix_error = backend.get_song_mix(track_name), None
             except BackendError as e:
                 mix, mix_error = None, str(e)
-            self.after(0, lambda: self._on_song_loaded(token, track_name, loaded, skipped, mix, mix_error, autoplay))
+            self.after(0, lambda: self._on_song_loaded(
+                token, track_name, loaded, backing_path, skipped, mix, mix_error, autoplay,
+            ))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_song_loaded(
-        self, token: int, track_name: str, loaded: list[tuple[dict, str]], skipped: list[str],
-        mix: dict | None, mix_error: str | None, autoplay: bool,
+        self, token: int, track_name: str, loaded: list[tuple[dict, str]], backing_path: str | None,
+        skipped: list[str], mix: dict | None, mix_error: str | None, autoplay: bool,
     ) -> None:
         if token != self._load_token or not self.winfo_exists():
             return
@@ -132,7 +144,24 @@ class SongMixer(ttk.Frame):
             # same song filed in two places with different takes), number
             # them so each strip still saves its own setting.
             key = take["instrument"] if labels.count(take["instrument"]) == 1 else f"{take['instrument']} #{i + 1}"
-            self._build_strip(i, key, take, volumes.get(key, 1.0), key in muted)
+            self._build_strip(
+                i + 1, key, lambda parent, label=take["instrument"]: make_label_badge(
+                    parent, label, font_size=8, padx=4, pady=1,
+                ),
+                f"take {take['take_number']}", volumes.get(key, 1.0), key in muted,
+            )
+        if backing_path is not None:
+            # Leftmost on screen (column 0), but last in self._strips and
+            # the player's track list — the player resamples everything to
+            # the *first* file's rate, which should be a take's (the
+            # session rate), not whatever the backing download came as.
+            self._build_strip(
+                0, _BACKING_KEY, lambda parent: tk.Label(
+                    parent, text="backing", bg="#444444", fg="white",
+                    font=("TkDefaultFont", 8, "bold"), padx=4, pady=1,
+                ),
+                "track", volumes.get(_BACKING_KEY, 1.0), _BACKING_KEY in muted,
+            )
         self._saved_state = self._current_state() if mix else None
 
         notes = []
@@ -150,8 +179,9 @@ class SongMixer(ttk.Frame):
         self._set_buttons_enabled(True)
 
         loaded_takes = [take for take, _path in loaded]
+        paths = [path for _take, path in loaded] + ([backing_path] if backing_path is not None else [])
         self.player.load_tracks(
-            [path for _take, path in loaded], track_name, gains=self._effective_gains(),
+            paths, track_name, gains=self._effective_gains(),
             trim_start_seconds=self.trim[0], trim_end_seconds=self.trim[1], autoplay=autoplay,
             on_loaded=lambda full: self._on_audio_loaded(token, track_name, loaded_takes, full),
         )
@@ -167,7 +197,10 @@ class SongMixer(ttk.Frame):
         self.trim = (trim_start, trim_end)
         self._on_trim_saved()
 
-    def _build_strip(self, column: int, key: str, take: dict, gain: float, muted: bool) -> None:
+    def _build_strip(
+        self, column: int, key: str, make_badge: Callable[[tk.Misc], tk.Widget], caption: str,
+        gain: float, muted: bool,
+    ) -> None:
         strip = ttk.Frame(self._strips_frame)
         strip.grid(row=0, column=column, sticky="ns", padx=(0, 14))
         self._strips_frame.rowconfigure(0, weight=1)
@@ -188,8 +221,8 @@ class SongMixer(ttk.Frame):
         scale.bind("<Double-Button-1>", lambda _e: (gain_var.set(1.0), self._on_strip_changed()))
         ttk.Checkbutton(strip, text="Mute", variable=mute_var, command=self._on_strip_changed).pack(anchor="w")
         ttk.Checkbutton(strip, text="Solo", variable=solo_var, command=self._on_strip_changed).pack(anchor="w")
-        make_label_badge(strip, take["instrument"], font_size=8, padx=4, pady=1).pack(pady=(4, 0))
-        ttk.Label(strip, text=f"take {take['take_number']}", foreground="#666666").pack()
+        make_badge(strip).pack(pady=(4, 0))
+        ttk.Label(strip, text=caption, foreground="#666666").pack()
 
         self._strips.append(entry)
         self._update_pct(entry)

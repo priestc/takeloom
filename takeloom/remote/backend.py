@@ -219,6 +219,21 @@ class RemoteBackend(Backend):
             "studio's own disk, not this one. Use get_take_playback_path instead."
         )
 
+    def ensure_backing_track_local(self, take_filename: str) -> str:
+        raise BackendError(
+            "ensure_backing_track_local downloads to whichever machine runs it — over Remote that's the "
+            "studio's own disk, not this one. Use get_backing_playback_path instead."
+        )
+
+    def get_backing_playback_path(self, take_filename: str) -> str:
+        # Same chunked transfer as _fetch_take_file, via the server's
+        # "fetch_backing_file" op; cached per song (keyed by the take
+        # that identifies it) the same way.
+        return str(self._fetch_file(
+            "fetch_backing_file", {"take_filename": take_filename},
+            cache_key=f"backing:{take_filename}", local_name="backing_{filename}",
+        ))
+
     def _fetch_take_file(self, project_name: str, filename: str) -> Path:
         """Download one take file to this machine's own disk — the
         Remote-capable equivalent of LocalBackend.ensure_take_local,
@@ -236,20 +251,29 @@ class RemoteBackend(Backend):
         wait/Event needed here. Raises BackendError if nothing came
         back (the file isn't available anywhere on the studio end).
         Reuses an earlier download of the same file (see _fetched_takes)."""
-        cached = self._fetched_takes.get(filename)
+        return self._fetch_file(
+            "fetch_take_file", {"project_name": project_name, "filename": filename},
+            cache_key=filename, local_name=filename,
+        )
+
+    def _fetch_file(self, op: str, args: dict, cache_key: str, local_name: str) -> Path:
+        """Shared chunked download behind _fetch_take_file and
+        get_backing_playback_path. `local_name` may contain "{filename}",
+        filled from the RPC result's "filename" (the server-side file's
+        real name — its extension decides how read_audio decodes it)."""
+        cached = self._fetched_takes.get(cache_key)
         if cached is not None and cached.exists():
             return cached
         self._take_file_buffer = bytearray()
-        self._client.call(
-            "fetch_take_file", {"project_name": project_name, "filename": filename}, timeout=DOWNLOAD_TIMEOUT,
-        )
+        result = self._client.call(op, args, timeout=DOWNLOAD_TIMEOUT) or {}
+        local_name = local_name.replace("{filename}", result.get("filename") or cache_key.replace(":", "_"))
         data = bytes(self._take_file_buffer)
         if not data:
-            raise BackendError(f"No data received for '{filename}'.")
+            raise BackendError(f"No data received for '{local_name}'.")
         work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_remote_takes")
-        local_path = work_dir / filename
+        local_path = work_dir / local_name
         local_path.write_bytes(data)
-        self._fetched_takes[filename] = local_path
+        self._fetched_takes[cache_key] = local_path
         return local_path
 
     def get_take_playback_path(self, project_name: str, filename: str, label: str) -> str:

@@ -474,6 +474,26 @@ class Backend(ABC):
         ...
 
     @abstractmethod
+    def ensure_backing_track_local(self, take_filename: str) -> str:
+        """Make sure the backing track of the song `take_filename` (any one
+        of its current takes — resolved the same way edit_backing_track
+        does) exists on *this machine's* vault disk — downloading it from
+        the inspiration server or the backup server if not — and return
+        its path. Local-only, like ensure_take_local: RemoteBackend
+        refuses; see get_backing_playback_path for the Remote-capable
+        equivalent."""
+        ...
+
+    @abstractmethod
+    def get_backing_playback_path(self, take_filename: str) -> str:
+        """Like get_take_playback_path, for the backing track of the song
+        `take_filename` belongs to — a path on the caller's own machine
+        (fetched from the studio over Remote) for the Completed Takes
+        mixer's "Backing track" strip. Raises BackendError if it can't be
+        made available."""
+        ...
+
+    @abstractmethod
     def get_take_playback_path(self, project_name: str, filename: str, label: str) -> str:
         """Return a path, on whichever machine the caller is actually
         running on, to a playable copy of a specific take file (see
@@ -2384,6 +2404,36 @@ class LocalBackend(Backend):
         if not sync_vault_file_down(config.backup_server, f"completed_takes/{filename}", local_path):
             raise BackendError(f"Could not download '{filename}' from {config.backup_server}.")
         return str(local_path)
+
+    def ensure_backing_track_local(self, take_filename: str) -> str:
+        config = self.get_config()
+        records, _index = self._find_track_records(config, take_filename)
+        if not records:
+            raise BackendError(f"Could not find any project or record referencing take '{take_filename}'.")
+        entry = records[0][1]
+        if not entry.backing_track:
+            raise BackendError(f"'{entry.name}' has no backing track.")
+        local_path = Path(config.session_vault_path) / "backing_tracks" / entry.backing_track
+        if local_path.exists():
+            return str(local_path)
+        if entry.inspiration_track_id:
+            from .inspiration import InspirationError, download_inspiration_track
+            try:
+                download_inspiration_track(entry, local_path, config)
+            except InspirationError as e:
+                raise BackendError(f"Could not download the backing track for '{entry.name}': {e}") from e
+            return str(local_path)
+        if not config.backup_server:
+            raise BackendError(
+                f"Backing track '{entry.backing_track}' isn't available locally, and no backup server is configured."
+            )
+        from .sync import sync_vault_file_down
+        if not sync_vault_file_down(config.backup_server, f"backing_tracks/{entry.backing_track}", local_path):
+            raise BackendError(f"Could not download '{entry.backing_track}' from {config.backup_server}.")
+        return str(local_path)
+
+    def get_backing_playback_path(self, take_filename: str) -> str:
+        return self.ensure_backing_track_local(take_filename)
 
     def get_take_playback_path(self, project_name: str, filename: str, label: str) -> str:
         path = Path(self.ensure_take_local(project_name, filename))

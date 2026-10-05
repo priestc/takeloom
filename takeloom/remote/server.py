@@ -50,7 +50,7 @@ _READ_ONLY_OPS = {
     "list_projects", "get_setlist", "get_filter_slot_previews",
     "search_inspiration_artists", "search_inspiration_by_filter", "find_inspiration_track",
     "is_recording", "get_monitoring_mode",
-    "list_sessions", "get_session_detail", "analyze_take", "fetch_take_file",
+    "list_sessions", "get_session_detail", "analyze_take", "fetch_take_file", "fetch_backing_file",
     "list_completed_takes", "benchmark_audio_modifiers", "get_song_mix",
 }
 
@@ -344,6 +344,13 @@ class _ClientHandler(socketserver.StreamRequestHandler):
                 path = self._owner.backend.ensure_take_local(args["project_name"], args["filename"])
                 self.send_file("take_file", Path(path), extra={"filename": args["filename"]})
                 result = {}
+            elif op == "fetch_backing_file":
+                # Same as fetch_take_file, for a song's backing track (the
+                # Completed Takes mixer's "Backing track" strip) — see
+                # RemoteBackend.get_backing_playback_path.
+                path = self._owner.backend.ensure_backing_track_local(args["take_filename"])
+                self.send_file("take_file", Path(path), extra={"filename": Path(path).name})
+                result = {"filename": Path(path).name}  # real name/extension — mp3/m4a/... decode by suffix
             else:
                 result = dispatch(self._owner.backend, op, args)
             self._write({"kind": "response", "id": req_id, "ok": True, "result": result})
