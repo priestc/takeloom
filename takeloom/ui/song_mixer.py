@@ -30,7 +30,7 @@ _MAX_GAIN = 2.0  # slider top = 200%
 # Saved-mix key for the backing track's strip — alongside instrument labels
 # in mixes/<song>.json's "volumes"/"muted", which can never be this.
 _BACKING_KEY = "backing track"
-_NO_TAKE = "No preferred take"
+_NO_TAKE = "none"
 
 
 class SongMixer(ttk.Frame):
@@ -294,7 +294,7 @@ class SongMixer(ttk.Frame):
     ) -> ttk.Combobox:
         """A strip's take dropdown: every take of this song for `label`
         on file (list_completed_takes' alternate_takes/unpreferred_takes),
-        plus "No preferred take". Picking one makes it the song's
+        plus "none" (no preferred take). Picking one makes it the song's
         preferred take for `label` (backend.set_preferred_take)."""
         choices: list[tuple[str, str | None]] = [(f"take {t['take_number']}", t["filename"]) for t in takes]
         choices.append((_NO_TAKE, None))
@@ -302,7 +302,7 @@ class SongMixer(ttk.Frame):
         var = tk.StringVar(value=current)
         combo = ttk.Combobox(
             parent, textvariable=var, values=[text for text, _f in choices], state="readonly",
-            width=7,  # strip-width; the open list still shows "No preferred take" in full
+            width=7,
         )
 
         def on_selected(_event: object) -> None:
