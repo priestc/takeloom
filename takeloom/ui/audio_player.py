@@ -35,6 +35,7 @@ def _format_seconds(seconds: float) -> str:
 
 # Prominent transport colors: (background, foreground).
 _PLAY_COLORS = ("#2e9e4f", "white")
+_PAUSE_COLORS = ("#2f6fd1", "white")  # the play button while playing (showing ⏸)
 _STOP_ACTIVE_COLORS = ("#d23c3c", "white")  # only while playing
 _IDLE_COLORS = ("#9a9a9a", "white")
 _DISABLED_COLORS = ("#d6d6d6", "#f4f4f4")
@@ -378,9 +379,11 @@ class AudioPlayerBar(ttk.Frame):
         self._refresh_position()
 
     def _refresh_stop_color(self) -> None:
-        # Prominent transport only: stop is red while playing, gray otherwise.
+        # Prominent transport only: while playing, ⏸ is blue and stop red;
+        # otherwise ▶ is green and stop gray.
         if isinstance(self._stop_button, _ColorButton):
             self._stop_button.set_colors(_STOP_ACTIVE_COLORS if self._playing else _IDLE_COLORS)
+            self._play_button.set_colors(_PAUSE_COLORS if self._playing else _PLAY_COLORS)
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         state = ["!disabled"] if enabled else ["disabled"]
