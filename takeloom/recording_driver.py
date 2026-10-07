@@ -421,7 +421,7 @@ class RecordingDeckDriver:
         if config.streaming_enabled != streaming:
             config.streaming_enabled = streaming
             self._backend.save_config(config)
-        # start_recording can take a beat — a filter slot has to query the
+        # start_recording can take a beat — a song set slot has to query the
         # inspiration server for a match and may then download the backing
         # track — so say so, or Play just looks dead until "Loaded …".
         self.streamdeck.notify("Opening session…", revert_after=4.0)

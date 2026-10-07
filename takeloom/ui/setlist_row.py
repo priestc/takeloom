@@ -24,10 +24,10 @@ class SetlistRow(tk.Frame):
     """A single setlist entry: a large title line (track name, duration,
     and — for the currently detected instrument — a take checkmark), a
     smaller grey stats line below it (per-installed-label take status for
-    an ordinary track; match count, and per-label "next up" picks before
-    autodetect knows what's being recorded, for an inspiration filter
+    an ordinary track; set size, and per-label "next up" picks before
+    autodetect knows what's being recorded, for a song set
     slot — see record.py's _track_stats), and an optional highlight line
-    below that in slightly bigger text — the filter slot's "next up" pick
+    below that in slightly bigger text — the song set slot's "next up" pick
     for specifically the currently-detected instrument, once autodetect
     knows one, called out on its own instead of having to be picked out
     of the full per-label list above. Empty/absent for an ordinary track,
@@ -72,7 +72,7 @@ class SetlistRow(tk.Frame):
             anchor="w", justify="left", wraplength=1,
         )
         # Not packed here — set_content() packs/unpacks it on demand, since
-        # most rows (every ordinary track, and a filter slot before
+        # most rows (every ordinary track, and a song set slot before
         # autodetect knows what's being recorded) have nothing to show here
         # and shouldn't reserve blank space for it.
 

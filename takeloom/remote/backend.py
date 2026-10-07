@@ -128,12 +128,6 @@ class RemoteBackend(Backend):
             timeout=DOWNLOAD_TIMEOUT,
         )
 
-    def add_inspiration_filter_slot(self, project_name: str, label: str, filter_criteria: dict) -> dict:
-        return self._client.call(
-            "add_inspiration_filter_slot",
-            {"project_name": project_name, "label": label, "filter_criteria": filter_criteria},
-        )
-
     def add_song_set_slot(self, project_name: str, label: str, songs: list[dict]) -> dict:
         return self._client.call(
             "add_song_set_slot", {"project_name": project_name, "label": label, "songs": songs},
@@ -203,7 +197,7 @@ class RemoteBackend(Backend):
         # Every file this touches already lives on the studio's own vault
         # disk — unlike add_local_backing_track, there's no client-side
         # path involved, so this is a plain RPC the same as e.g.
-        # add_inspiration_filter_slot.
+        # add_song_set_slot.
         return self._client.call(
             "edit_backing_track",
             {

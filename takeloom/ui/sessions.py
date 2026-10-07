@@ -286,7 +286,7 @@ class SessionsFrame(ttk.Frame):
         cell.pack(side="left", padx=(0, 14))
         # Label called out as its own colored badge — this is what
         # actually answers "what was this filed under" at a glance,
-        # including for a take pulled in from a filter-slot draw's shared
+        # including for a take pulled in from a song-set draw's shared
         # inspiration-take index — and the same color for a given label
         # everywhere it's shown (see instrument_colors.py) makes it a
         # fast visual scan across rows.

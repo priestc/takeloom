@@ -1,9 +1,7 @@
 """Add to Setlist dialog: add one backing track to a project already
 selected on the Record tab, from a local file, a YouTube URL, or the
-inspiration server (by exact artist/title search), or add a standing
-"inspiration filter" slot that draws a random inspiration-server track
-fresh each session — one tab per source, each embedded directly in this
-dialog rather than behind its own popup."""
+inspiration server (by exact artist/title search) — one tab per source,
+each embedded directly in this dialog rather than behind its own popup."""
 
 from __future__ import annotations
 
@@ -15,9 +13,7 @@ from typing import Callable
 from tkinterdnd2 import DND_FILES, DND_TEXT
 
 from ..backend import Backend, BackendError
-from ..inspiration import derive_filter_label
 from ..youtube import is_youtube_url
-from .filter_fields import FilterCriteriaFields
 
 
 class _AutocompleteEntry(ttk.Frame):
@@ -203,16 +199,12 @@ class _AutocompleteEntry(ttk.Frame):
 
 
 class AddToSetlistDialog(tk.Toplevel):
-    """Add a single backing track to `project_name`'s setlist. Four
-    tabs — File, YouTube URL, Inspiration, Inspiration Filter — share one
-    Add button that acts on whichever tab is currently selected; switching
-    tabs doesn't lose anything typed into the others. `on_track_added`
-    fires once, on success, right before the dialog closes itself.
-
-    Inspiration Filter is different from the other three: it doesn't add
-    one fixed song, but a standing "slot" that draws a random track
-    matching its filter fresh every session — see TrackEntry's docstring
-    in project.py and backend.py's _resolve_filter_slot_for_session."""
+    """Add a single backing track to `project_name`'s setlist. Three
+    tabs — File, YouTube URL, Inspiration — share one Add button that acts
+    on whichever tab is currently selected; switching tabs doesn't lose
+    anything typed into the others. `on_track_added` fires once, on
+    success, right before the dialog closes itself. (A random-draw slot
+    is a song set instead — see ui/song_set_dialog.py.)"""
 
     _FILE_PLACEHOLDER = "Drag an audio/video file here, or click Browse..."
 
@@ -243,7 +235,6 @@ class AddToSetlistDialog(tk.Toplevel):
         self._build_file_tab()
         self._build_youtube_tab()
         self._build_inspiration_tab()
-        self._build_inspiration_filter_tab()
 
         self.progress = ttk.Progressbar(frame, mode="determinate", maximum=100, length=400)
         self.progress.pack(fill="x", pady=(10, 0))
@@ -381,24 +372,6 @@ class AddToSetlistDialog(tk.Toplevel):
         year = track.get("year")
         return f"{track.get('title', '')} ({year})" if year else track.get("title", "")
 
-    # --- Inspiration Filter tab ---
-
-    def _build_inspiration_filter_tab(self) -> None:
-        tab = ttk.Frame(self.notebook, padding=12)
-        self.notebook.add(tab, text="Inspiration Filter")
-
-        ttk.Label(
-            tab, text="Adds a slot to the setlist that draws a random track matching this filter "
-                      "every session, instead of one fixed song — the setlist stays as it is, so the "
-                      "same slot draws again next session. If a previous draw already has a take from "
-                      "a different instrument, it's preferred over a brand new draw, so instruments can "
-                      "layer onto the same song. Every take is still saved to the takes archive as usual.",
-            foreground="#666666", wraplength=380, justify="left",
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
-
-        self.filter_fields = FilterCriteriaFields(tab, self._backend, dialog_parent=self, start_row=1)
-        self.filter_fields.bind_return(lambda _e: self._on_add())
-
     # --- add ---
 
     def _on_window_close(self) -> None:
@@ -452,12 +425,6 @@ class AddToSetlistDialog(tk.Toplevel):
                 return backend.add_inspiration_backing_track(project, artist, title, on_progress=on_progress)
 
             self._start_add(do_inspiration)
-        else:
-            filter_criteria = self.filter_fields.get_criteria()
-            if filter_criteria is None:
-                return
-            label = derive_filter_label(filter_criteria)
-            self._start_add(lambda backend, project: backend.add_inspiration_filter_slot(project, label, filter_criteria))
 
     def _start_add(self, call: Callable[[Backend, str], dict]) -> None:
         self._working = True

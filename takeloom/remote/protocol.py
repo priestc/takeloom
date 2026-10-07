@@ -75,8 +75,6 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
         return backend.add_youtube_backing_track(args["project_name"], args["url"])
     if op == "add_inspiration_backing_track":
         return backend.add_inspiration_backing_track(args["project_name"], args["artist"], args["title"])
-    if op == "add_inspiration_filter_slot":
-        return backend.add_inspiration_filter_slot(args["project_name"], args["label"], args["filter_criteria"])
     if op == "add_song_set_slot":
         return backend.add_song_set_slot(args["project_name"], args["label"], args["songs"])
     if op == "find_inspiration_track":

@@ -52,18 +52,19 @@ class TakeInfo:
 class TrackEntry:
     """A single song/track in the setlist.
 
-    A track with is_inspiration_filter=True is a standing "slot" rather
+    A track with is_inspiration_filter=True is a "song set" slot rather
     than a fixed song: backing_track stays "" (there's no file — this
-    entry is never itself loaded for playback), and inspiration_filter
-    holds the filter criteria (e.g. {"artist": "Miles Davis"} or
-    {"genre": "Rock"}) a session draws an actual song from fresh each time
-    this slot comes up — see backend.py's _resolve_filter_slot. The
-    setlist itself never grows a new entry for a drawn song; which song
+    entry is never itself loaded for playback), and song_set holds the
+    inspiration-server songs a session draws one from at random each time
+    this slot comes up — see backend.py's _resolve_filter_slot. (The flag
+    keeps its old name from when a slot could also be a live inspiration
+    filter; those were all converted to song sets of their matches and
+    are no longer supported.) The setlist itself never grows a new entry for a drawn song; which song
     got drawn, and its take, are tracked in the Studio Session Vault's
     shared inspiration-take index (vault.py) instead — keyed by
     inspiration_track_id, not by which project or slot happened to draw
     it, so any project referencing the same song sees the same takes.
-    preferred_takes on the filter slot's own entry is therefore always
+    preferred_takes on the song set slot's own entry is therefore always
     empty, which is also what makes it come up as "still needs a take"
     again on every future session.
     """
@@ -74,24 +75,10 @@ class TrackEntry:
     takes_volume: int = 100  # playback volume for other instruments' takes
     inspiration_track_id: int = 0  # radioserver track ID (0 = local file)
     is_inspiration_filter: bool = False
-    inspiration_filter: dict = field(default_factory=dict)
-    # Raw inspiration-server search results for inspiration_filter, from
-    # the most recent search_tracks_by_filter call made on this slot's
-    # behalf (see backend.py's get_filter_slot_previews) — cached here so
-    # opening the project again doesn't re-hit the inspiration server just
-    # to redisplay the same "next up" previews. Cleared whenever
-    # inspiration_filter itself changes (see record.py's _on_edit_filter)
-    # so a stale list under new criteria can't linger; empty for an
-    # ordinary track or a filter slot never yet previewed.
-    cached_matches: list[dict] = field(default_factory=list)
-    # A "song set": a filter slot (is_inspiration_filter=True) whose
-    # candidates are this fixed, hand-picked list of inspiration-server
-    # track dicts (id/artist/title/year/format/duration) instead of
-    # whatever inspiration_filter currently matches on the server. Drawn
-    # from exactly like a filter slot every session (same reuse-preferring
-    # pick — see backend.py's _pick_filter_match); inspiration_filter is
-    # {} and cached_matches unused. Empty for everything else. See
-    # is_song_set.
+    # A "song set" slot's candidates (is_inspiration_filter=True): a fixed
+    # list of inspiration-server track dicts (id/artist/title/year/format/
+    # duration), one drawn uniformly at random each session — see
+    # backend.py's _pick_filter_match. Empty for everything else.
     song_set: list[dict] = field(default_factory=list)
     preferred_takes: dict[str, TakeInfo] = field(default_factory=dict)
     # key = instrument label (not full_name — a Stratocaster and a
@@ -127,7 +114,7 @@ class TrackEntry:
 
     def source_label(self) -> str:
         """Human-readable source: "inspiration" (radioserver-sourced,
-        including a filter slot's drawn song), "youtube" (a downloaded
+        including a song set slot's drawn song), "youtube" (a downloaded
         video), or "upload" (a manually added local file) — used to make
         completed-take filenames explicit about what they were recorded
         against (see utils.take_filename)."""
@@ -158,8 +145,6 @@ class TrackEntry:
             takes_volume=data.get("takes_volume", 100),
             inspiration_track_id=data.get("inspiration_track_id", 0),
             is_inspiration_filter=data.get("is_inspiration_filter", False),
-            inspiration_filter=data.get("inspiration_filter", {}),
-            cached_matches=data.get("cached_matches", []),
             song_set=data.get("song_set", []),
             preferred_takes=takes,
             source=data.get("source", "upload"),
@@ -260,33 +245,12 @@ class Project:
             data = json.loads(self.setlist_path.read_text())
             self.setlist = Setlist.from_dict(data)
 
-    def add_inspiration_filter_slot(
-        self, label: str, filter_criteria: dict, duration_seconds: float = 0.0,
-        cached_matches: list[dict] | None = None,
-    ) -> TrackEntry:
-        """Add a standing "draw a random song from this filter each
-        session" slot to the setlist — see TrackEntry's docstring. Unlike
+    def add_song_set_slot(self, label: str, songs: list[dict], duration_seconds: float = 0.0) -> TrackEntry:
+        """Add a standing "draw a random song from this set each session"
+        slot to the setlist — see TrackEntry's docstring. Unlike
         add_backing_track, there's no file to copy; the slot itself is
         never played directly. `duration_seconds` is the average across
-        every currently-matching track (see inspiration.average_duration)
-        — the slot has no single fixed song of its own to derive a
-        duration from otherwise. `cached_matches`, if the caller already
-        queried the inspiration server for this criteria (e.g. to compute
-        duration_seconds), seeds TrackEntry.cached_matches so the first
-        get_filter_slot_previews call right after doesn't repeat that same
-        query."""
-        entry = TrackEntry(
-            name=label, backing_track="", is_inspiration_filter=True, inspiration_filter=dict(filter_criteria),
-            duration_seconds=duration_seconds, cached_matches=list(cached_matches or []),
-        )
-        self.setlist.add_track(entry)
-        self.save_setlist()
-        return entry
-
-    def add_song_set_slot(self, label: str, songs: list[dict], duration_seconds: float = 0.0) -> TrackEntry:
-        """Add a "song set" slot — like add_inspiration_filter_slot, but
-        drawing from a fixed list of hand-picked inspiration tracks
-        instead of a live filter. See TrackEntry.song_set."""
+        the set (see inspiration.average_duration)."""
         entry = TrackEntry(
             name=label, backing_track="", is_inspiration_filter=True,
             song_set=[dict(s) for s in songs], duration_seconds=duration_seconds,

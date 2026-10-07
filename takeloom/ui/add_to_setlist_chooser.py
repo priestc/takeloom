@@ -1,6 +1,6 @@
 """First step of the Record tab's "Add to Setlist" button: pick whether
 you're adding one song (AddToSetlistDialog — file, YouTube, inspiration
-track, or inspiration filter) or a set of songs (SongSetDialog — a fixed
+track) or a set of songs (SongSetDialog — a fixed
 list each session draws from)."""
 
 from __future__ import annotations
@@ -34,10 +34,9 @@ class AddToSetlistChooser(tk.Toplevel):
         )
 
         for label, description, command in (
-            ("Single song", "One song: from a file, a YouTube URL, or the inspiration server "
-                            "(or an inspiration filter slot).", self._on_single),
-            ("Set of songs", "A list of songs you pick — one at a time, or a batch from an "
-                             "inspiration filter. Each session draws one song from the set.", self._on_set),
+            ("Single song", "One song: from a file, a YouTube URL, or the inspiration server.", self._on_single),
+            ("Set of songs", "A list of songs you pick — one at a time, or every song matching a "
+                             "filter. Each session draws one song at random from the set.", self._on_set),
         ):
             row = ttk.Frame(frame)
             row.pack(fill="x", pady=4)

@@ -22,13 +22,12 @@ from ..audio.pitch import TunerSmoother
 from ..audio.synth import DEFAULT_SYNTH_VOICE, SYNTH_VOICES
 from ..backend import BackendError, StartRecordingRequest
 from ..config import StudioConfig
-from ..inspiration import average_duration, derive_filter_label
+from ..inspiration import average_duration
 from ..project import Setlist, TrackEntry
 from ..recording_driver import RecordingDeckDriver
 from ..utils import format_duration
 from .add_to_setlist_chooser import AddToSetlistChooser
 from .app_state import AppState
-from .filter_slot_dialogs import EditFilterDialog, ShowTracksDialog
 from .instrument_colors import color_for_label
 from .level_meter import LevelMeter
 from .tuner_meter import TunerMeter
@@ -61,7 +60,7 @@ class RecordFrame(ttk.Frame):
         # comment. Parallel array, same order as self._setlist.tracks
         # (kept in sync by every mutator: _on_row_motion/_on_delete_track).
         self._setlist_rows: list[SetlistRow] = []
-        # Per-track-index preview of what each inspiration filter slot
+        # Per-track-index preview of what each song set slot
         # would draw right now for each installed instrument label (None
         # for an ordinary, non-filter track) — see backend.py's
         # get_filter_slot_previews. Fetched once when a project is opened
@@ -69,7 +68,7 @@ class RecordFrame(ttk.Frame):
         # the "next up" picks shown stay put for the rest of that visit
         # rather than re-randomizing every setlist redisplay; only
         # refetched when the track count changes (_apply_refreshed_setlist)
-        # or a filter slot's own criteria is edited (_on_edit_filter).
+        # or a song set's songs are edited (_on_edit_song_set).
         self._filter_previews: list[dict | None] = []
         # Whether the setlist can currently be clicked/reordered/right-
         # clicked at all — mirrors the old tk.Listbox's own "disabled"
@@ -289,10 +288,6 @@ class RecordFrame(ttk.Frame):
         self.loading_status_var.set(status)
         self._loading_overlay.place(x=0, y=0, relwidth=1, relheight=1)
         self._loading_overlay.lift()
-
-    def _set_loading_status(self, status: str) -> None:
-        if hasattr(self, "loading_status_var"):
-            self.loading_status_var.set(status)
 
     def _hide_loading_overlay(self) -> None:
         if hasattr(self, "_loading_overlay"):
@@ -704,7 +699,7 @@ class RecordFrame(ttk.Frame):
     def _installed_labels(self) -> list[str]:
         """Every distinct instrument label configured on the Studio Setup
         tab, in the order instruments were added — the set of labels a
-        song can have a take "installed" for, and what a filter slot's
+        song can have a take "installed" for, and what a song set slot's
         next-up preview is computed per (see get_filter_slot_previews)."""
         if not self.config_obj:
             return []
@@ -721,16 +716,12 @@ class RecordFrame(ttk.Frame):
     def _track_title(self, track: TrackEntry, inst_name: str) -> str:
         dur = format_duration(track.duration_seconds)
         if track.is_inspiration_filter:
-            # Never has a take of its own (see TrackEntry's docstring), and
-            # which songs it's drawn — and their takes — now live in the
-            # vault-wide shared index (vault.py), not on this slot. The
-            # slot's own name is already the auto-derived filter label
-            # (see inspiration.derive_filter_label). duration_seconds is
-            # the average across every currently-matching track (see
+            # A song set never has a take of its own (see TrackEntry's
+            # docstring), and which songs it's drawn — and their takes —
+            # live in the vault-wide shared index (vault.py), not on this
+            # slot. duration_seconds is the average across the set (see
             # inspiration.average_duration) rather than one fixed song's.
-            # A song set (TrackEntry.song_set) draws the same way, from its
-            # own fixed list.
-            return f"{'🎵' if track.is_song_set else '🎲'} {track.name}  (~{dur})"
+            return f"🎵 {track.name}  (~{dur})"
         # Takes are filed by label, not by which specific instrument
         # played them — a Telecaster take should still check off a song
         # for the Stratocaster too, since both are "electric-guitar"
@@ -750,7 +741,7 @@ class RecordFrame(ttk.Frame):
         setlist row's title, and an optional "next up" line called out in
         bigger text (see SetlistRow) — see _refresh_setlist. For an
         ordinary track: (which installed instrument labels already have a
-        completed take, ""). For an inspiration filter slot: how many
+        completed take, ""). For a song set slot: how many
         inspiration-server tracks currently match its criteria, plus —
         once autodetect knows what's being recorded (`inst_name`) — its
         "next up" pick specifically for that instrument's label, broken
@@ -767,10 +758,7 @@ class RecordFrame(ttk.Frame):
             if preview is None:
                 return "Checking matches...", ""
             count = preview.get("match_count", 0)
-            if track.is_song_set:
-                stats = f"{count} song{'s' if count != 1 else ''} in set"
-            else:
-                stats = f"{count} matching track{'s' if count != 1 else ''}"
+            stats = f"{count} song{'s' if count != 1 else ''} in set"
             next_up = preview.get("next_up") or {}
             detected_label = self.config_obj.label_for_instrument(inst_name) if inst_name and self.config_obj else ""
             if detected_label and detected_label in labels:
@@ -895,15 +883,13 @@ class RecordFrame(ttk.Frame):
         self._refresh_setlist()
         self._auto_select_default_track()
         if any(t.is_inspiration_filter for t in self._setlist.tracks):
-            # Keep the overlay up through the (possibly several-second,
-            # multi-query) filter-preview fetch — _handle_filter_preview_
-            # status updates its text live, _apply_filter_previews takes
-            # it down once this resolves either way.
-            self._show_loading_overlay("Checking inspiration filters...")
+            # Keep the overlay up through the "next up" preview fetch —
+            # _apply_filter_previews takes it down once this resolves
+            # either way.
+            self._show_loading_overlay("Picking song set songs...")
             self._fetch_filter_previews(loading=True)
         else:
-            # Nothing to query — no inspiration-server calls are about to
-            # happen, so there's nothing worth blocking on.
+            # No song sets — nothing worth blocking on.
             self._filter_previews = [None] * len(self._setlist.tracks)
             self._hide_loading_overlay()
 
@@ -1215,40 +1201,13 @@ class RecordFrame(ttk.Frame):
         menu = tk.Menu(self, tearoff=0)
         if track.is_song_set:
             menu.add_command(label="Edit songs...", command=lambda: self._on_edit_song_set(index))
-        elif track.is_inspiration_filter:
-            menu.add_command(label="Edit...", command=lambda: self._on_edit_filter(index))
-            menu.add_command(label="Show tracks...", command=lambda: self._on_show_filter_tracks(index))
-        else:
+        elif not track.is_inspiration_filter:
             menu.add_command(label="Rename...", command=lambda: self._on_rename_track(index))
         menu.add_command(label="Delete", command=lambda: self._on_delete_track(index))
         try:
             menu.tk_popup(event.x_root, event.y_root)  # type: ignore[attr-defined]
         finally:
             menu.grab_release()
-
-    def _on_edit_filter(self, index: int) -> None:
-        if not self._setlist or index >= len(self._setlist.tracks):
-            return
-        track = self._setlist.tracks[index]
-
-        def on_save(new_criteria: dict) -> None:
-            track.inspiration_filter = new_criteria
-            # The cached match list (backend.py's get_filter_slot_previews)
-            # was queried against the *old* criteria — stale now, and left
-            # alone it would keep being reused for a filter it no longer
-            # describes. Clearing it here forces a fresh inspiration-server
-            # query (and a fresh cache) the next time previews are fetched.
-            track.cached_matches = []
-            track.name = derive_filter_label(new_criteria)
-            if self._selected_track_index == index:
-                self.selection_var.set(f"Selected: {track.name}")
-            backend = self.app_state.backend
-            self._run_backend(
-                lambda: average_duration(backend.search_inspiration_by_filter(new_criteria)),
-                lambda avg, error: self._apply_filter_slot_duration(index, avg if error is None else 0.0),
-            )
-
-        EditFilterDialog(self, self.app_state.backend, track.inspiration_filter, on_save)
 
     def _on_edit_song_set(self, index: int) -> None:
         if not self._setlist or index >= len(self._setlist.tracks):
@@ -1270,24 +1229,6 @@ class RecordFrame(ttk.Frame):
             self, self.app_state.backend, title="Edit Song Set", on_saved=on_saved,
             initial_name=track.name, initial_songs=track.song_set,
         )
-
-    def _apply_filter_slot_duration(self, index: int, avg_duration: float) -> None:
-        if not self._setlist or index >= len(self._setlist.tracks):
-            return
-        self._setlist.tracks[index].duration_seconds = avg_duration
-        # The filter's criteria just changed (this only ever runs from
-        # _on_edit_filter's on_save) — self._filter_previews[index] was
-        # computed against the *old* criteria, so it needs a fresh fetch
-        # once the new criteria are actually saved to disk (get_filter_
-        # slot_previews reads the setlist back from disk, so it can't be
-        # fetched before the save below completes).
-        self._save_setlist_and_refresh(refresh_filter_previews=True)
-
-    def _on_show_filter_tracks(self, index: int) -> None:
-        if not self._setlist or index >= len(self._setlist.tracks):
-            return
-        track = self._setlist.tracks[index]
-        ShowTracksDialog(self, self.app_state.backend, track.name, track.inspiration_filter)
 
     def _on_rename_track(self, index: int) -> None:
         if not self._setlist or index >= len(self._setlist.tracks):
@@ -1726,14 +1667,3 @@ class RecordFrame(ttk.Frame):
         elif event == "streaming_status":
             if "status" in data:
                 self.status_var.set(data["status"])
-        elif event == "filter_preview_status":
-            # Broadcast by get_filter_slot_previews (backend.py) as it works
-            # through a project's filter slots — see that method's
-            # docstring. Ignore one meant for a project we're not (or no
-            # longer) looking at: e.g. a stale event from a project switch
-            # that's since moved on, or in Remote mode, another connected
-            # client loading a different project.
-            if data.get("project_name") == self._project_name:
-                index, total, label = data.get("index", 0), data.get("total", 0), data.get("label", "")
-                status = f"Checking filter {index} of {total}: {label}" if label else f"Checking filter {index} of {total}..."
-                self._set_loading_status(status)

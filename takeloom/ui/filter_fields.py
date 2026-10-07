@@ -1,7 +1,6 @@
 """Inspiration filter criteria fields (artist/genre/year range/length
-range) — the widget set shared by the Add to Setlist dialog's
-"Inspiration Filter" tab and the setlist's "Edit filter..." dialog, so
-both stay in sync on fields and validation rather than drifting apart.
+range) — the song set builder's "Add from filter" tab (ui/song_set_
+dialog.py).
 """
 
 from __future__ import annotations
@@ -17,8 +16,8 @@ class FilterCriteriaFields:
     """Builds Artist/Genre/Year range/Length range widgets into `parent`
     starting at grid row `start_row`. `get_criteria()` validates and
     returns a filter_criteria dict (or None, having shown an error
-    dialog itself) in exactly the shape backend.add_inspiration_filter_
-    slot / inspiration.search_tracks_by_filter expect. `dialog_parent`
+    dialog itself) in exactly the shape inspiration.search_tracks_by_
+    filter expects. `dialog_parent`
     is the Toplevel error dialogs should be modal to — not necessarily
     `parent` itself, which is just a content frame."""
 

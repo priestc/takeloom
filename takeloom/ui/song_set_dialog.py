@@ -1,9 +1,9 @@
 """Song Set dialog: build (or edit) a setlist "song set" slot — a fixed,
 hand-picked list of inspiration-server songs that each session draws one
-song from, the same way an inspiration filter slot does (see
-TrackEntry.song_set in project.py). Songs go in one at a time by artist/
-title, or in bulk from an inspiration filter — either way the result is a
-plain list the user can prune before saving, not a live filter."""
+song from at random (see TrackEntry.song_set in project.py). Songs go in
+one at a time by artist/title, or in bulk from everything an inspiration
+filter matches — either way the result is a plain list the user can prune
+before saving, not a live filter."""
 
 from __future__ import annotations
 

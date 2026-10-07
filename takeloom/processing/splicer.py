@@ -38,14 +38,14 @@ much lower bar (MIN_RECOVERED_TAKE_SECONDS) than an ordinary abandoned
 segment: there was no decision to abandon it, so "recover as much as
 possible" wins over the same 10-minute rule.
 
-A setlist "filter slot" (TrackEntry.is_inspiration_filter) complicates
+A setlist "song set slot" (TrackEntry.is_inspiration_filter) complicates
 `track_index` slightly: it still points at the slot's own (permanent)
 position in the setlist, but the take actually belongs to whichever song
 backend.py's _resolve_filter_slot happened to draw for it that session —
 never a top-level entry of its own. That's why every take here is named
-from the logged `track_name` (the drawn song's name, for a filter slot)
+from the logged `track_name` (the drawn song's name, for a song set slot)
 rather than looked up from the setlist entry at track_index (the slot's
-own name) — and why a filter slot's take is recorded into the shared
+own name) — and why a song set slot's take is recorded into the shared
 vault-wide inspiration-take index (vault.py, keyed by the drawn song's
 inspiration_track_id, from the session log's filter_slot_draws) instead
 of the slot's own preferred_takes: the slot itself must stay "always
@@ -287,7 +287,7 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                 slot = project.setlist.tracks[take.track_index]
                 # take.track_name (logged on this take's record_start/
                 # back_to_start events) is the slot's own name for an
-                # ordinary track — but for a filter slot, it's whatever
+                # ordinary track — but for a song set slot, it's whatever
                 # song actually got drawn for it this session, not the
                 # slot's own label ("Random ..."). Always used for the
                 # archived take's filename/watermark.
@@ -324,7 +324,7 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                 )
                 take_full_name = take.instrument or instrument
 
-                # For a filter slot, the take belongs to whatever song got
+                # For a song set slot, the take belongs to whatever song got
                 # drawn this session (draw_info), not the slot's own
                 # (never-populated) backing_track — needed up front so the
                 # filename itself (take_filename) can name the actual
@@ -403,7 +403,7 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                         # A regular (non-filter) inspiration-sourced track:
                         # mirror the take into the shared index too, so any
                         # *other* project referencing this same song can
-                        # find it — same reuse mechanism a filter slot's
+                        # find it — same reuse mechanism a song set slot's
                         # draw gets, just recorded alongside the ordinary
                         # setlist entry rather than instead of it.
                         record_inspiration_take(

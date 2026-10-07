@@ -291,7 +291,7 @@ class _ClientHandler(socketserver.StreamRequestHandler):
                         # One thread per request rather than handling it
                         # inline and only then going back to read the next
                         # line: a slow op (e.g. an inspiration-server query
-                        # a filter slot preview kicks off — see backend.py's
+                        # a song set slot preview kicks off — see backend.py's
                         # get_filter_slot_previews) would otherwise block
                         # this whole connection's request queue behind it,
                         # silently stalling unrelated commands (start_auto_

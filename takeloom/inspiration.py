@@ -29,7 +29,7 @@ def _fmt_length(seconds: float) -> str:
 
 
 def derive_filter_label(filter_criteria: dict) -> str:
-    """Auto-derive a human-readable label for an inspiration filter slot
+    """Auto-derive a human-readable label for a song set slot
     from its criteria — e.g. {"genre": "Doo Wop", "year_max": 1965} ->
     "Doo Wop before 1965", {"artist": "Bob Dylan", "year_min": 2003,
     "year_max": 2006} -> "Bob Dylan 2003-2006" — so the "Add inspiration
@@ -127,19 +127,17 @@ def _post_track_query(config: StudioConfig, filters: list[dict], all_matches: bo
 def search_tracks_by_filter(config: StudioConfig, filter_criteria: dict, all_matches: bool = False) -> list[dict]:
     """Query the inspiration server for every track matching one arbitrary
     filter dict (e.g. {"artist": "Miles Davis"} or {"genre": "Rock"}).
-    Backs both a setlist "inspiration filter" slot's random draw each
-    session (see backend.py's _resolve_filter_slot) and the "Show
-    tracks..." preview of what a slot currently matches."""
+    Backs the song set builder's "Add from filter" tab (see
+    ui/song_set_dialog.py)."""
     if not filter_criteria:
-        raise InspirationError("This filter slot has no filter criteria set.")
+        raise InspirationError("Enter at least one filter field.")
     return _post_track_query(config, [filter_criteria], all_matches=all_matches)
 
 
 def search_inspiration_tracks(config: StudioConfig, artist: str = "", title: str = "") -> list[dict]:
-    """Query radioserver directly by artist and/or title, independent of a
-    project's own configured inspiration filters — backs the Add to
-    Setlist dialog's "Inspiration" tab (add one exact track), as opposed
-    to search_tracks_by_filter's broader filter-slot browsing."""
+    """Query radioserver directly by artist and/or title — backs the Add
+    to Setlist dialog's "Inspiration" tab (add one exact track), as
+    opposed to search_tracks_by_filter's broader browsing."""
     filters = {k: v for k, v in {"artist": artist.strip(), "title": title.strip()}.items() if v}
     if not filters:
         raise InspirationError("Enter an artist and/or title to search.")
@@ -190,7 +188,7 @@ def select_best_match(tracks: list[dict], artist: str, title: str) -> dict:
 
 def average_duration(tracks: list[dict]) -> float:
     """Mean duration (seconds) across `tracks` (inspiration-server track
-    dicts, as from search_tracks_by_filter) — a filter slot has no
+    dicts, as from search_tracks_by_filter) — a song set slot has no
     single fixed song of its own, so this stands in as its
     duration_seconds for setlist display and the total-runtime sum.
     0.0 if there's nothing to average (an unmatched filter, or tracks
@@ -249,7 +247,7 @@ def search_title_suggestions(config: StudioConfig, partial: str, artist: str = "
 def build_inspiration_track_entry(track_info: dict) -> TrackEntry:
     """Construct a TrackEntry from an inspiration track record, without
     adding it to any project's setlist — used for a session-only,
-    throwaway resolution (a setlist "filter slot"'s random draw — see
+    throwaway resolution (a setlist "song set slot"'s random draw — see
     backend.py's _resolve_filter_slot) that should never persist as a
     setlist entry itself."""
     track_id = track_info["id"]

@@ -199,8 +199,8 @@ class Backend(ABC):
     ) -> dict:
         """Search the inspiration server by artist and/or title and add the
         exact match as a backing track — the Add to Setlist dialog's
-        "Inspiration" tab, as opposed to an "inspiration filter" slot
-        (add_inspiration_filter_slot) which draws a random matching track
+        "Inspiration" tab, as opposed to a song set slot
+        (add_song_set_slot) which draws a random song from its list
         fresh each session instead of one fixed song. Downloads the audio
         immediately, so this leaves the track fully ready to record.
         Raises BackendError if no exact artist/title match is found (see
@@ -214,24 +214,14 @@ class Backend(ABC):
         ...
 
     @abstractmethod
-    def add_inspiration_filter_slot(self, project_name: str, label: str, filter_criteria: dict) -> dict:
-        """Add a standing setlist "slot" that draws a random track matching
-        `filter_criteria` (e.g. {"artist": "Miles Davis"} or {"genre":
-        "Rock"}) fresh each session, instead of one fixed song — see
-        TrackEntry's docstring and backend.py's _resolve_filter_slot_for_
-        session. `label` is the slot's display name in the Setlist list.
-        The entry's duration_seconds is set to the average across every
-        currently-matching track (see inspiration.average_duration),
-        since the slot has no single fixed song of its own."""
-        ...
-
-    @abstractmethod
     def add_song_set_slot(self, project_name: str, label: str, songs: list[dict]) -> dict:
-        """Add a "song set" slot: like add_inspiration_filter_slot, but
-        each session draws from `songs` — a fixed list of inspiration-
-        server track dicts (as from search_inspiration_titles/
-        find_inspiration_track/search_inspiration_by_filter) — rather than
-        from a live filter query. See TrackEntry.song_set."""
+        """Add a standing setlist "song set" slot: each session draws one
+        song at random from `songs` — a fixed list of inspiration-server
+        track dicts (as from search_inspiration_titles/
+        find_inspiration_track/search_inspiration_by_filter) — instead of
+        one fixed song. See TrackEntry's docstring and _resolve_filter_
+        slot_for_session. `label` is the slot's display name in the
+        Setlist list."""
         ...
 
     @abstractmethod
@@ -245,34 +235,16 @@ class Backend(ABC):
 
     @abstractmethod
     def get_filter_slot_previews(self, project_name: str) -> list[dict | None]:
-        """Read-only preview of what each inspiration-filter slot in
-        project_name's setlist would currently draw, one entry per
-        setlist track in order (None for an ordinary, non-filter track).
-        Each filter slot's entry is {"match_count": N, "next_up": {label:
-        name_or_None}} — match_count is how many inspiration-server
-        tracks currently match its criteria, and next_up is, for every
-        configured instrument label, the song _resolve_filter_slot would
-        currently pick for it (same reuse-preferring logic — see
-        _pick_filter_match), without committing to anything. Meant to be
-        called once when a project is opened in the UI (see record.py's
-        Setlist panel) so the picks shown stay stable for the rest of
-        that visit rather than re-randomizing on every setlist
-        redisplay.
-
-        Each filter slot's raw match list is cached on its own TrackEntry
-        (cached_matches, in project.json/setlist.json) the first time
-        it's fetched, so opening the project again later reuses it
-        instead of re-querying the inspiration server — this method only
-        actually queries for a slot that's never been previewed before,
-        or whose criteria just changed (record.py's _on_edit_filter
-        clears the cache when that happens). Persists the cache back to
-        setlist.json as a side effect whenever it had to query.
-
-        Emits a "filter_preview_status" event ({"project_name", "index",
-        "total", "label"}) just before each filter slot's own query, so a
-        caller can show live progress across what can be a several-second
-        call over a setlist with many filter slots — still emitted for a
-        slot served from cache, so "checking N of M" stays accurate."""
+        """Read-only preview of what each song set slot in project_name's
+        setlist would currently draw, one entry per setlist track in order
+        (None for an ordinary track). Each slot's entry is {"match_count":
+        N, "next_up": {label: name_or_None}} — match_count is how many
+        songs are in the set, and next_up is, for every configured
+        instrument label, a random pick from it (see _pick_filter_match),
+        without committing to anything. Meant to be called once when a
+        project is opened in the UI (see record.py's Setlist panel) so the
+        picks shown stay stable for the rest of that visit rather than
+        re-randomizing on every setlist redisplay."""
         ...
 
     # --- sessions (browse/correct past recordings) ---
@@ -311,7 +283,7 @@ class Backend(ABC):
         same shape reassign_take/analyze_take's `instrument_name` param
         expects; kept in sync by reassign_take if a take it names is later
         renamed — see that method's docstring). Each track's entry also
-        reports whether it was an inspiration filter-slot draw
+        reports whether it was a song set draw
         (session_log.json's filter_slot_draws) — reassign_take/
         analyze_take both work on those the same as any other take (see
         reassign_take's docstring) — and a `status`: "completed" (a take
@@ -378,10 +350,10 @@ class Backend(ABC):
         instead: renames the take file(s) on disk, and re-keys it either
         in the project's setlist.json (an ordinary track), or in the
         shared vault-wide inspiration_takes.json index (a track drawn
-        from an inspiration filter slot — see TrackEntry's docstring for
+        from a song set slot — see TrackEntry's docstring for
         why its take never lives on the setlist entry itself; session_
         dir's own session_log.json records exactly which shared-index
-        entry a filter slot drew via filter_slot_draws, so this is just
+        entry a song set slot drew via filter_slot_draws, so this is just
         as reliable either way — same lookup get_session_detail/
         analyze_take already use). For an ordinary, non-filter track
         that's also inspiration-sourced, both the setlist entry and the
@@ -421,7 +393,7 @@ class Backend(ABC):
         recorded audio most resembles — a read-only diagnostic behind the
         Sessions tab's "Analyze" button, to flag a take that may have
         been filed under the wrong label in the first place (the reason
-        to reach for reassign_take). Works for an inspiration filter-slot
+        to reach for reassign_take). Works for a song set
         draw too, same as reassign_take (looked up from the shared
         vault-wide inspiration-take index, same as get_session_detail).
         Narrows the comparison to instruments on the take's own
@@ -524,7 +496,7 @@ class Backend(ABC):
         setlist.json (an ordinary track's preferred_takes) plus the
         shared vault-wide inspiration-take index (vault.py's
         load_inspiration_index) — the only place a take drawn from an
-        inspiration filter slot is ever recorded, since a filter slot's
+        song set slot is ever recorded, since a song set slot's
         own TrackEntry.preferred_takes stays empty forever (see
         TrackEntry's docstring) — deduplicated by filename, since a
         non-filter inspiration-sourced track's take is written to both.
@@ -591,7 +563,7 @@ class Backend(ABC):
         backing_track/preferred_takes applies as a virtual playback
         window instead — see _load_track_locked (a session recording a
         new take, or layering an existing one in), the Video Check path,
-        _resolve_filter_slot (an inspiration filter slot redrawing this
+        _resolve_filter_slot (a song set slot redrawing this
         same song later inherits the trim from the shared index), and
         the Completed Takes mixer (ui/song_mixer.py). A newly recorded take is therefore already
         exactly the trimmed length with nothing further to do; an
@@ -607,7 +579,7 @@ class Backend(ABC):
         song this is: every project's setlist is scanned for the
         TrackEntry whose preferred_takes contains it, and the shared
         vault-wide inspiration-take index (vault.py) is checked the same
-        way, so this also works for a song an inspiration filter slot
+        way, so this also works for a song a song set slot
         drew (which has no TrackEntry of its own — see TrackEntry's
         docstring) as long as it has at least one take recorded. Every
         record found that way is updated (an ordinary, inspiration-
@@ -632,8 +604,8 @@ class Backend(ABC):
 
     @abstractmethod
     def search_inspiration_artists(self, partial: str) -> list[str]:
-        """Autocomplete suggestions for an inspiration filter's Artist
-        field, from the inspiration server's autocomplete endpoint (see
+        """Autocomplete suggestions for an inspiration Artist field (the
+        song set builder's filter, the Add to Setlist dialog), from the inspiration server's autocomplete endpoint (see
         docs/inspiration-server-autocomplete-api.md). Returns [] rather
         than raising on any failure — this fires on every keystroke, so a
         slow/unreachable server should just mean no suggestions, not an
@@ -668,14 +640,11 @@ class Backend(ABC):
 
     @abstractmethod
     def search_inspiration_by_filter(self, filter_criteria: dict, all_matches: bool = False) -> list[dict]:
-        """Inspiration-server tracks matching `filter_criteria` (same
-        shape as an inspiration filter slot's inspiration_filter — artist/
+        """Inspiration-server tracks matching `filter_criteria` (artist/
         genre/year_min/year_max/duration_min/duration_max) — backs the
-        setlist's "Show tracks..." context menu action, so an operator can
-        see exactly what a filter slot might draw before recording. A
-        random sample of at most 100 unless `all_matches` (the song set
-        builder), which asks for every match — see inspiration.
-        _post_track_query."""
+        song set builder's "Add from filter" tab. A random sample of at
+        most 100 unless `all_matches`, which asks for every match — see
+        inspiration._post_track_query."""
         ...
 
     # --- recording ---
@@ -734,7 +703,7 @@ class Backend(ABC):
         same setlist position rather than advancing to the next one. The
         in-progress song, if any, is logged as skipped (no take), same as
         next_track(). Raises BackendError if nothing's loaded or the
-        current track isn't a filter slot's draw — callers driving this
+        current track isn't a song set slot's draw — callers driving this
         from a Stream Deck key just log that rather than treating it as
         fatal (see recording_driver.py)."""
         ...
@@ -1357,16 +1326,16 @@ class _ActiveSession:
     # Setlist indices that completed a take *during this session* — the
     # setlist itself isn't updated until post-processing, so auto-advance
     # has to remember these itself to not offer the same song twice. A
-    # filter slot's own index is added here the moment it's resolved
+    # song set slot's own index is added here the moment it's resolved
     # (see _resolve_filter_slot_for_session), not when a take completes —
     # otherwise it would keep getting redrawn every auto-advance cycle
     # within this same session, since its own preferred_takes never gets
     # a take (the take belongs to whatever song got drawn, which is never
     # itself added to the setlist — see _resolve_filter_slot).
     completed_track_indices: set = field(default_factory=set)
-    # filter-slot index -> the TrackEntry drawn for it this session (never
+    # song-set index -> the TrackEntry drawn for it this session (never
     # added to project.setlist.tracks — see _resolve_filter_slot). Session-
-    # only cache: a filter slot revisited later in the same session (e.g. a
+    # only cache: a song set slot revisited later in the same session (e.g. a
     # manual reselect) gets the same resolved track back rather than a
     # fresh random draw each time.
     resolved_filter_picks: dict = field(default_factory=dict)
@@ -1772,25 +1741,6 @@ class LocalBackend(Backend):
                 raise BackendError(str(e)) from e
         return entry.to_dict()
 
-    def add_inspiration_filter_slot(self, project_name: str, label: str, filter_criteria: dict) -> dict:
-        if not filter_criteria:
-            raise BackendError("Enter at least one filter field (artist and/or genre).")
-        project = self._open_project(project_name)
-        from .inspiration import InspirationError, average_duration, search_tracks_by_filter
-        matches: list[dict] = []
-        try:
-            matches = search_tracks_by_filter(self.get_config(), filter_criteria)
-            duration = average_duration(matches)
-        except InspirationError:
-            # Still worth adding the slot even if the inspiration server
-            # is briefly unreachable — just without a duration estimate
-            # yet (0.0, same as before this was tracked at all).
-            duration = 0.0
-        entry = project.add_inspiration_filter_slot(
-            label, filter_criteria, duration_seconds=duration, cached_matches=matches,
-        )
-        return entry.to_dict()
-
     def add_song_set_slot(self, project_name: str, label: str, songs: list[dict]) -> dict:
         songs = [s for s in songs if s.get("id")]
         if not songs:
@@ -1831,63 +1781,19 @@ class LocalBackend(Backend):
             if inst.label and inst.label not in labels:
                 labels.append(inst.label)
 
-        from .inspiration import InspirationError, build_inspiration_track_entry, search_tracks_by_filter
-        from .vault import load_inspiration_index, vault_root
+        from .inspiration import build_inspiration_track_entry
 
-        total = sum(1 for t in project.setlist.tracks if t.is_inspiration_filter)
-        index = None  # lazily loaded — only needed once any filter slot is actually hit
         previews: list[dict | None] = []
-        checked = 0
-        cache_dirty = False
         for track in project.setlist.tracks:
             if not track.is_inspiration_filter:
                 previews.append(None)
                 continue
-            checked += 1
-            # This call runs on its own request thread (see remote/server.py)
-            # and can involve several seconds of inspiration-server round
-            # trips across a whole setlist's worth of filter slots — this
-            # event is what lets the UI show a live "checking N of M" status
-            # (and know when to put up/take down its loading overlay — see
-            # record.py's _show_loading_overlay) instead of just staring at
-            # a stalled-looking Setlist panel for however long it takes.
-            # Still emitted even when the cache below skips the actual
-            # network call, so "checking N of M" stays accurate across a
-            # setlist mixing cached and not-yet-cached slots.
-            self._emit(
-                "filter_preview_status",
-                {"project_name": project_name, "index": checked, "total": total, "label": track.name},
-            )
-            if track.song_set:
-                matches = track.song_set  # fixed list — nothing to query
-            elif track.cached_matches:
-                # Reuses the last search_tracks_by_filter result cached on
-                # this slot (see TrackEntry.cached_matches) instead of
-                # re-querying the inspiration server — cleared by record.
-                # py's _on_edit_filter whenever inspiration_filter itself
-                # changes, so this can't go stale against new criteria.
-                matches = track.cached_matches
-            else:
-                try:
-                    matches = search_tracks_by_filter(config, track.inspiration_filter)
-                except InspirationError:
-                    previews.append({"match_count": 0, "next_up": {label: None for label in labels}})
-                    continue
-                if matches:
-                    track.cached_matches = matches
-                    cache_dirty = True
+            matches = track.song_set
             if not matches:
                 previews.append({"match_count": 0, "next_up": {label: None for label in labels}})
                 continue
-            if index is None:
-                index = load_inspiration_index(vault_root(config))
-            next_up = {}
-            for label in labels:
-                chosen = self._pick_filter_match(matches, label, index, prefer_reuse=not track.song_set)
-                next_up[label] = build_inspiration_track_entry(chosen).name
+            next_up = {label: build_inspiration_track_entry(self._pick_filter_match(matches)).name for label in labels}
             previews.append({"match_count": len(matches), "next_up": next_up})
-        if cache_dirty:
-            project.save_setlist()
         return previews
 
     # --- sessions (browse/correct past recordings) ---
@@ -2178,7 +2084,7 @@ class LocalBackend(Backend):
         """Rename a completed take's audio (and video/MIDI, if present)
         file(s) on disk to new_instrument's naming convention, returning
         the new TakeInfo — reassign_take's two cases (an ordinary setlist
-        track, and a track drawn from an inspiration filter slot) do this
+        track, and a track drawn from a song set slot) do this
         identical file move; only where the resulting TakeInfo then gets
         stored differs."""
         from .utils import next_take_number, take_filename
@@ -2267,8 +2173,8 @@ class LocalBackend(Backend):
         root = vault_root(config)
 
         if str(track_index) in filter_slot_draws:
-            # Drawn from an inspiration filter slot — its take isn't filed
-            # on any TrackEntry in the setlist (a filter slot's own entry
+            # Drawn from a song set slot — its take isn't filed
+            # on any TrackEntry in the setlist (a song set slot's own entry
             # never holds one, see TrackEntry's docstring); it lives in the
             # shared vault-wide inspiration-take index instead, keyed by
             # exactly which song this session drew — filter_slot_draws
@@ -2337,7 +2243,7 @@ class LocalBackend(Backend):
 
         take = None
         if track_index is not None and str(track_index) in filter_slot_draws:
-            # Same reasoning as get_session_detail: a filter slot's own
+            # Same reasoning as get_session_detail: a song set slot's own
             # TrackEntry never holds a take — look the drawn song up in
             # the shared vault-wide inspiration-take index instead.
             from .vault import get_inspiration_entry, vault_root
@@ -2502,7 +2408,7 @@ class LocalBackend(Backend):
         write them back (project.save_setlist() / save_inspiration_index
         with the second return value). A project entry pairs with that
         Project; the shared index's own entry (if any — the only place a
-        take drawn from a filter slot ever lives, see TrackEntry's
+        take drawn from a song set slot ever lives, see TrackEntry's
         docstring) pairs with None instead, since there's no Project to
         save it through. Used by edit_backing_track (resolve what to
         update) and list_completed_takes (read trim_start_seconds/
@@ -3248,59 +3154,37 @@ class LocalBackend(Backend):
     def _resolve_filter_slot(
         self, config: StudioConfig, track: TrackEntry, instrument_name: str, exclude_id: int | None = None,
     ) -> TrackEntry:
-        """Resolve `track` for `instrument_name` to record. A non-filter
-        track passes through unchanged.
-
-        Queries the inspiration server for every song matching the
-        filter, then prefers one that some *other* project or session has
-        already recorded a take on (but not yet for this instrument's
-        label — takes are filed by label, see TrackEntry.preferred_takes,
-        so any instrument sharing it counts) — via the shared vault-wide
-        inspiration-take index (vault.py), not just this project's own
-        history — so a later instrument can layer onto the same song
-        instead of the setlist only ever accumulating unrelated one-off
-        takes. Falls back to a genuinely random pick among every match
-        when none qualify. A song set (track.song_set) skips the
-        preference and always draws uniformly at random from its list.
-        Either way, the setlist itself never gains a
-        new entry here — see TrackEntry's docstring and _resolve_filter_
-        slot_for_session's caching wrapper, which is what actually gets
-        called during a session; this is the pure "pick one" step, split
-        out for testability.
+        """Resolve `track` for `instrument_name` to record. An ordinary
+        track passes through unchanged; a song set slot draws one song from
+        its list uniformly at random (see _pick_filter_match). Either way,
+        the setlist itself never gains a new entry here — see TrackEntry's
+        docstring and _resolve_filter_slot_for_session's caching wrapper,
+        which is what actually gets called during a session; this is the
+        pure "pick one" step, split out for testability.
 
         `exclude_id` (redraw_current_track's use) leaves one specific
         inspiration_track_id out of consideration — so "give me a
         different one" doesn't just hand back what's already loaded —
         falling back to allowing it anyway if excluding it would leave no
-        candidates at all (a filter matching only one song shouldn't error
-        out just because that one song is the one being redrawn away
-        from)."""
+        candidates at all (a set of only one song shouldn't error out just
+        because that one song is the one being redrawn away from)."""
         if not track.is_inspiration_filter:
             return track
-        from .inspiration import InspirationError, build_inspiration_track_entry, search_tracks_by_filter
-        if track.song_set:
-            matches = list(track.song_set)  # a song set draws from its own fixed list — no server query
-        else:
-            try:
-                matches = search_tracks_by_filter(config, track.inspiration_filter)
-            except InspirationError as e:
-                raise BackendError(str(e)) from e
+        from .inspiration import build_inspiration_track_entry
+        matches = list(track.song_set)
         if not matches:
-            raise BackendError(f"No inspiration tracks match the filter for '{track.name}'.")
+            raise BackendError(f"The song set '{track.name}' has no songs in it.")
 
         from .vault import load_inspiration_index, vault_root
         index = load_inspiration_index(vault_root(config))
-        label = config.label_for_instrument(instrument_name)
-        chosen = self._pick_filter_match(
-            matches, label, index, exclude_id=exclude_id, prefer_reuse=not track.song_set,
-        )
+        chosen = self._pick_filter_match(matches, exclude_id=exclude_id)
         entry = build_inspiration_track_entry(chosen)
 
         # build_inspiration_track_entry only knows the raw inspiration-
         # server record — if this same song already has a shared-index
         # entry (e.g. some other instrument/project already recorded it,
         # or it's been through edit_backing_track), carry its trim over
-        # too, so a filter slot redrawing a previously-trimmed song keeps
+        # too, so a song set slot redrawing a previously-trimmed song keeps
         # getting the trimmed version rather than silently reverting to
         # the untrimmed original the moment it's drawn fresh.
         shared = index.get(str(chosen.get("id")))
@@ -3313,43 +3197,25 @@ class LocalBackend(Backend):
         return entry
 
     @staticmethod
-    def _pick_filter_match(
-        matches: list[dict], label: str, index: dict, exclude_id: int | None = None,
-        prefer_reuse: bool = True,
-    ) -> dict:
-        """The actual "which song" choice within `matches` for `label`,
-        split out of _resolve_filter_slot so get_filter_slot_previews can
-        reuse the exact same reuse-preferring logic per label without
-        re-querying the inspiration server or reloading the vault index
-        for each one. Prefers a match some other instrument has already
-        recorded a take for (but not yet under `label`), falling back to
-        a genuinely random pick among every match when none qualify —
-        see _resolve_filter_slot's own docstring for why.
-
-        `prefer_reuse=False` (a song set) skips that preference entirely
-        and draws uniformly at random from every candidate, regardless of
-        which songs other instruments already have takes on."""
+    def _pick_filter_match(matches: list[dict], exclude_id: int | None = None) -> dict:
+        """The actual "which song" choice within a song set's `matches` —
+        uniformly random, regardless of which songs other instruments
+        already have takes on. Shared by _resolve_filter_slot and
+        get_filter_slot_previews."""
         candidates = [m for m in matches if m.get("id") != exclude_id] or matches
-        if not prefer_reuse:
-            return random.choice(candidates)
-        reusable = []
-        for m in candidates:
-            shared = index.get(str(m.get("id")))
-            if shared is not None and shared.preferred_takes and shared.get_take_for_instrument(label) is None:
-                reusable.append(m)
-        return random.choice(reusable) if reusable else random.choice(candidates)
+        return random.choice(candidates)
 
     def _resolve_filter_slot_for_session(
         self, session: "_ActiveSession", config: StudioConfig, track: TrackEntry, index: int,
     ) -> TrackEntry:
         """_resolve_filter_slot(), cached for the rest of `session` — a
-        filter slot revisited later in the same session (e.g. a manual
+        song set slot revisited later in the same session (e.g. a manual
         reselect) gets the same resolved track back rather than a fresh
-        random draw each time. Also marks the filter slot's own `index` as
+        random draw each time. Also marks the song set slot's own `index` as
         completed for this session (session.completed_track_indices) the
         moment it's drawn, regardless of whether the resulting take itself
         later succeeds — otherwise _advance_locked would keep re-offering
-        the same filter slot indefinitely within one session, since the
+        the same song set slot indefinitely within one session, since the
         slot's own preferred_takes never actually gets a take (the take
         belongs to whatever song got drawn — recorded into the shared
         vault-wide index instead, see vault.record_inspiration_take).
@@ -3389,7 +3255,7 @@ class LocalBackend(Backend):
         while capture is live (that was audible as choppy monitoring, and
         also front-loaded dead air into a streamed/recorded session):
 
-        - resolve every inspiration filter slot now (one draw each), and
+        - resolve every song set slot now (one draw each), and
         - download every not-yet-local backing track now, so no mid-session
           multi-MB download + FLAC/opus write.
 
@@ -3401,7 +3267,7 @@ class LocalBackend(Backend):
         if and when that track is actually reached, exactly as before, just
         not mid-take.
 
-        Returns {setlist index -> resolved TrackEntry} for the filter slots
+        Returns {setlist index -> resolved TrackEntry} for the song set slots
         it managed to resolve, to seed _ActiveSession.resolved_filter_picks
         so _resolve_filter_slot_for_session finds them already drawn. Called
         with self._record_lock held."""
@@ -3424,7 +3290,7 @@ class LocalBackend(Backend):
                     track = self._resolve_filter_slot(config, slot, inst.full_name)
                 except BackendError as e:
                     self._emit("recording_status", {
-                        "status": f"Prep {n}/{len(pending)}: couldn't resolve filter '{slot.name}' — {e}",
+                        "status": f"Prep {n}/{len(pending)}: couldn't draw from song set '{slot.name}' — {e}",
                     })
                     continue
                 resolved_picks[index] = track
@@ -3471,7 +3337,7 @@ class LocalBackend(Backend):
         already on disk and ones completed earlier in this same session
         (the setlist doesn't learn about those until post-processing).
         Returns the loaded track (resolved, if the setlist position found
-        is a filter slot — see _resolve_filter_slot_for_session), or None
+        is a song set slot — see _resolve_filter_slot_for_session), or None
         (emitting a "waiting" status) when nothing's left. Called with
         self._record_lock held; playback must already be stopped."""
         tracks = session.project.setlist.tracks
@@ -4769,7 +4635,7 @@ class LocalBackend(Backend):
         if inst is None:
             raise BackendError(f"Instrument '{instrument_name}' not found.")
 
-        # All the setlist's network/heavy-disk work (filter-slot draws +
+        # All the setlist's network/heavy-disk work (song-set draws +
         # backing-track downloads) up front, before any capture hardware is
         # touched — so nothing mid-session hits the inspiration server or
         # writes a big file while audio/video is live. See _prefetch_
@@ -5076,7 +4942,7 @@ class LocalBackend(Backend):
             "sample_rate": session.engine.sample_rate,
             "mix_start_frame": session.mix_start_frame,
             "has_video": session.session_video_raw is not None,
-            # filter-slot index -> the song actually drawn for it this
+            # song-set index -> the song actually drawn for it this
             # session (see _resolve_filter_slot) — the setlist itself
             # never records this, so post-processing needs it from here
             # to record a completed take into the shared vault-wide

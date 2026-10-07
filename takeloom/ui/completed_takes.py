@@ -29,13 +29,9 @@ A title filter narrows by track name (whole song groups shown/hidden
 together); "Filter by this project" further narrows to only songs
 currently in the loaded project's own setlist (config.last_selected_
 project) — the same project the Record tab has open. An ordinary track
-matches by its own name directly; a filter slot has no single fixed song
-of its own, so it matches by every song currently in its cached_matches
-(see project.py's TrackEntry and backend.py's get_filter_slot_previews)
-— the same cached list the Record tab's Setlist panel shows "next up"
-from, not a fresh inspiration-server query. A filter slot never yet
-opened in the Record tab (empty cache) contributes no songs here, same
-as it shows nothing "next up" there either.
+matches by its own name directly; a song set slot has no single fixed song
+of its own, so it matches by every song in its set (see project.py's
+TrackEntry.song_set).
 """
 
 from __future__ import annotations
@@ -156,7 +152,7 @@ class CompletedTakesFrame(ttk.Frame):
                 setlist = backend.get_setlist(current_project)
                 for t in setlist.get("tracks", []):
                     if t.get("is_inspiration_filter"):
-                        for match in t.get("song_set") or t.get("cached_matches", []):
+                        for match in t.get("song_set", []):
                             current_track_names.add(build_inspiration_track_entry(match).name)
                     else:
                         current_track_names.add(t["name"])
