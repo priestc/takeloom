@@ -68,6 +68,38 @@ class PreviewSubscription:
         raise NotImplementedError
 
 
+def _scan_song_take_files(stems: list[str], entry: TrackEntry, completed_dir: Path) -> dict[str, list[dict]]:
+    """Every take file of `entry`'s song among `stems` (completed_takes/
+    .flac stems), by label: {label: [{"take_number", "filename",
+    "has_video", "has_midi"}, ...]} sorted by take_number — matched by
+    utils.take_filename's 'track - label - takeN [source:id]' pattern.
+    A file tagged as recorded against a *different* backing track (same
+    song name, other audio) is left out, since it wouldn't line up; an
+    untagged one (from before tags existed) is kept."""
+    import re
+    from .utils import _backing_track_id, sanitize_filename
+
+    prefix = f"{sanitize_filename(entry.name)} - "
+    source = entry.source_label()
+    expected_tag = f"{source}:{sanitize_filename(_backing_track_id(source, entry.backing_track))}"
+    pattern = re.compile(r"^(?P<label>(?:(?! - ).)+) - take(?P<n>\d+)(?: \[(?P<tag>.*)\])?$")
+    found: dict[str, list[dict]] = {}
+    for stem in stems:
+        if not stem.startswith(prefix):
+            continue
+        m = pattern.match(stem[len(prefix):])
+        if m is None or (m.group("tag") is not None and m.group("tag") != expected_tag):
+            continue
+        found.setdefault(m.group("label"), []).append({
+            "take_number": int(m.group("n")), "filename": f"{stem}.flac",
+            "has_video": (completed_dir / f"{stem}.mp4").exists(),
+            "has_midi": (completed_dir / f"{stem}.mid").exists(),
+        })
+    for takes in found.values():
+        takes.sort(key=lambda t: t["take_number"])
+    return found
+
+
 class Backend(ABC):
     """Interface every UI tab depends on (constructor-injected via AppState)."""
 
@@ -520,7 +552,16 @@ class Backend(ABC):
         superseded by a later reassign_take/re-record
         no longer appears here, same as it wouldn't in any project's
         setlist — this reflects each track+label's *current* take, not
-        every file ever written to completed_takes/.
+        every file ever written to completed_takes/. Those older files
+        are still offered, though: "alternate_takes" lists every take of
+        this row's song+label found in completed_takes/ (this one
+        included), and "unpreferred_takes" maps each *other* label that
+        has take files for this song but no current take ("no preferred
+        take") to its own such list — the Completed Takes mixer's take
+        dropdowns, which switch between them via set_preferred_take.
+        Each listed take: {"take_number", "filename", "has_video",
+        "has_midi"}, sorted by take_number. Only files recorded against
+        this song's own backing track count (see _scan_song_take_files).
 
         recorded_at is the take file's own filesystem mtime (a Unix
         timestamp), or None if it isn't on local disk right now (e.g.
@@ -533,6 +574,20 @@ class Backend(ABC):
         reassign_take rename (same-filesystem renames don't touch it),
         so this stays meaningful even for a take that's been re-filed
         under a different label since it was recorded."""
+        ...
+
+    @abstractmethod
+    def set_preferred_take(self, take_filename: str, instrument: str, new_filename: str | None) -> None:
+        """Make `new_filename` — one of list_completed_takes' alternate_
+        takes/unpreferred_takes for this song and `instrument` (a label)
+        — the song's current take for that label, or with None, clear it
+        ("no preferred take") so the label has no take at all. The take
+        files themselves are never touched. `take_filename` is any one
+        current take of the song, resolving *which* song exactly as
+        edit_backing_track does — every matching record (a project's own
+        TrackEntry and/or the shared inspiration-take index) is updated.
+        Raises BackendError if no record references `take_filename` or
+        `new_filename` isn't a take of this song for `instrument`."""
         ...
 
     @abstractmethod
@@ -2420,6 +2475,7 @@ class LocalBackend(Backend):
                 "trim_end_seconds": entry.trim_end_seconds,
             }
 
+        entry_of: dict[str, TrackEntry] = {}  # row filename -> the record it came from
         for path in Project.list_projects(Path(config.projects_dir)):
             try:
                 project = Project.open(path, vault_root)
@@ -2428,13 +2484,84 @@ class LocalBackend(Backend):
             for track in project.setlist.tracks:
                 for label, take in track.preferred_takes.items():
                     add(track, label, take)
+                    entry_of[take.filename] = track
 
         from .vault import load_inspiration_index
         for entry in load_inspiration_index(vault_root).values():
             for label, take in entry.preferred_takes.items():
                 add(entry, label, take)
+                entry_of[take.filename] = entry
+
+        # Every take file on disk per song+label — one directory listing
+        # for the whole vault, then scanned once per distinct backing
+        # track (two records can share a song name but not its audio).
+        try:
+            stems = [p.stem for p in completed_dir.iterdir() if p.suffix == ".flac"]
+        except OSError:
+            stems = []
+        scans: dict[tuple, dict[str, list[dict]]] = {}
+        preferred_labels: dict[str, set[str]] = {}
+        for row in by_filename.values():
+            preferred_labels.setdefault(row["track_name"], set()).add(row["instrument"])
+        for row in by_filename.values():
+            entry = entry_of[row["filename"]]
+            key = (entry.name, entry.source_label(), entry.backing_track)
+            if key not in scans:
+                scans[key] = _scan_song_take_files(stems, entry, completed_dir)
+            song_files = scans[key]
+            alternates = {t["filename"]: t for t in song_files.get(row["instrument"], [])}
+            # The current take is always offered, even if its file isn't on
+            # local disk right now (pruned under "remote" vault mode).
+            alternates.setdefault(row["filename"], {
+                "take_number": row["take_number"], "filename": row["filename"],
+                "has_video": row["has_video"], "has_midi": row["has_midi"],
+            })
+            row["alternate_takes"] = sorted(alternates.values(), key=lambda t: t["take_number"])
+            row["unpreferred_takes"] = {
+                label: takes for label, takes in song_files.items()
+                if label not in preferred_labels[row["track_name"]]
+            }
 
         return sorted(by_filename.values(), key=lambda d: d["track_name"].lower())
+
+    def set_preferred_take(self, take_filename: str, instrument: str, new_filename: str | None) -> None:
+        config = self.get_config()
+        root = Path(config.session_vault_path)
+        completed_dir = root / "completed_takes"
+        records, inspiration_index = self._find_track_records(config, take_filename)
+        if not records:
+            raise BackendError(f"Could not find any project or record referencing take '{take_filename}'.")
+
+        new_take: TakeInfo | None = None
+        if new_filename is not None:
+            stems = [Path(new_filename).stem] if (completed_dir / new_filename).exists() else []
+            match = next(
+                (t for t in _scan_song_take_files(stems, records[0][1], completed_dir).get(instrument, [])
+                 if t["filename"] == new_filename),
+                None,
+            )
+            if match is None:
+                raise BackendError(
+                    f"'{new_filename}' isn't a {instrument} take of '{records[0][1].name}' in {completed_dir}."
+                )
+            new_take = TakeInfo(
+                instrument=instrument, take_number=match["take_number"], filename=new_filename,
+                has_video=match["has_video"], has_midi=match["has_midi"],
+            )
+
+        shared_touched = False
+        for project, entry in records:
+            if new_take is None:
+                entry.preferred_takes.pop(instrument, None)
+            else:
+                entry.set_preferred_take(instrument, new_take)
+            if project is not None:
+                project.save_setlist()
+            else:
+                shared_touched = True
+        if shared_touched:
+            from .vault import save_inspiration_index
+            save_inspiration_index(root, inspiration_index)
 
     def _find_track_records(
         self, config: StudioConfig, take_filename: str,

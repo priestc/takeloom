@@ -107,6 +107,9 @@ class CompletedTakesFrame(ttk.Frame):
         self._songs: dict[str, dict] = {}
         self._pack_generation = 0  # see _pack_in_batches
         self._current_backend = app_state.backend
+        # Set by _on_takes_changed: reload the mixer's song after the next
+        # load, autoplaying if it was playing (bool), or None for no reload.
+        self._reload_mixer_song: bool | None = None
 
         self._build()
         self.app_state.add_listener(self._on_app_state_changed)
@@ -133,6 +136,10 @@ class CompletedTakesFrame(ttk.Frame):
             self.after(0, lambda: on_done(result, error))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _on_takes_changed(self, was_playing: bool) -> None:
+        self._reload_mixer_song = was_playing
+        self._load()
 
     def _on_reload(self) -> None:
         self._load(clear_playback_cache=True)
@@ -191,7 +198,16 @@ class CompletedTakesFrame(ttk.Frame):
         # was loaded — reload it so the takes line up with the new trim,
         # without auto-starting playback.
         loaded = self._songs.get(self.mixer.track_name or "")
-        if loaded is not None:
+        reload_song, self._reload_mixer_song = self._reload_mixer_song, None
+        if reload_song is not None and self.mixer.track_name:
+            # A strip's take dropdown changed the song's preferred takes —
+            # reload it with the new ones (or empty, if that cleared its
+            # last take and the song dropped off the list).
+            if loaded is not None:
+                self._load_into_mixer(self.mixer.track_name, autoplay=reload_song)
+            else:
+                self.mixer.load_song(self.mixer.track_name, [], self._play_project, autoplay=False)
+        elif loaded is not None:
             takes = loaded["takes"]
             trim = (takes[0].get("trim_start_seconds", 0.0), takes[0].get("trim_end_seconds", 0.0))
             if trim != self.mixer.trim:
@@ -218,7 +234,9 @@ class CompletedTakesFrame(ttk.Frame):
 
         panes = ttk.PanedWindow(self, orient="horizontal")
         panes.pack(fill="both", expand=True)
-        self.mixer = SongMixer(panes, self.app_state, on_trim_saved=self._load)
+        self.mixer = SongMixer(
+            panes, self.app_state, on_trim_saved=self._load, on_takes_changed=self._on_takes_changed,
+        )
         right = ttk.Frame(panes)
         panes.add(self.mixer, weight=0)
         panes.add(right, weight=1)

@@ -99,6 +99,9 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
         return backend.analyze_take(args["session_dir"], args["track_name"], args["instrument_name"])
     if op == "list_completed_takes":
         return {"takes": backend.list_completed_takes()}
+    if op == "set_preferred_take":
+        backend.set_preferred_take(args["take_filename"], args["instrument"], args["new_filename"])
+        return {}
     if op == "get_song_mix":
         return {"mix": backend.get_song_mix(args["track_name"])}
     if op == "save_song_mix":

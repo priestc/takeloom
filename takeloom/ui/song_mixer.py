@@ -30,16 +30,25 @@ _MAX_GAIN = 2.0  # slider top = 200%
 # Saved-mix key for the backing track's strip — alongside instrument labels
 # in mixes/<song>.json's "volumes"/"muted", which can never be this.
 _BACKING_KEY = "backing track"
+_NO_TAKE = "No preferred take"
 
 
 class SongMixer(ttk.Frame):
-    def __init__(self, master: tk.Misc, app_state: AppState, on_trim_saved: Callable[[], None]) -> None:
+    def __init__(
+        self, master: tk.Misc, app_state: AppState, on_trim_saved: Callable[[], None],
+        on_takes_changed: Callable[[bool], None],
+    ) -> None:
         super().__init__(master)
         self.app_state = app_state
         self._on_trim_saved = on_trim_saved
+        # Called after a strip's take dropdown changed the song's preferred
+        # take — with whether it was playing — so the page reloads the list
+        # and this song with it (see CompletedTakesFrame._on_takes_changed).
+        self._on_takes_changed = on_takes_changed
         self.track_name: str | None = None
         self.trim: tuple[float, float] = (0.0, 0.0)  # the loaded song's trim, see CompletedTakesFrame._on_loaded
         self._load_token = 0
+        self._song_takes: list[dict] = []  # the loaded song's Completed Takes rows
         # One per loaded take: {"key", "label", "gain_var", "mute_var", "solo_var", "pct_var"}
         self._strips: list[dict] = []
         self._saved_state: tuple | None = None  # (volumes, muted) last saved/loaded — for "unsaved changes"
@@ -117,6 +126,7 @@ class SongMixer(ttk.Frame):
         token = self._load_token
         self.track_name = track_name
         self.trim = (takes[0].get("trim_start_seconds", 0.0), takes[0].get("trim_end_seconds", 0.0)) if takes else (0.0, 0.0)
+        self._song_takes = takes
         self._title_var.set(track_name)
         self._status_var.set("Loading takes...")
         self.trim_editor.clear()
@@ -158,6 +168,7 @@ class SongMixer(ttk.Frame):
             child.destroy()
         self._strips = []
         if not loaded:
+            self.player.stop()
             self._status_var.set("None of this song's takes are available right now.")
             if skipped:
                 self._status_var.set("None of this song's takes are available: " + "; ".join(skipped))
@@ -175,7 +186,23 @@ class SongMixer(ttk.Frame):
                 i + 1, key, lambda parent, label=take["instrument"]: make_label_badge(
                     parent, label, font_size=8, padx=4, pady=1,
                 ),
-                f"take {take['take_number']}", volumes.get(key, 1.0), key in muted,
+                lambda parent, take=take: self._make_take_chooser(
+                    parent, take["instrument"], take.get("alternate_takes") or [take], take["filename"],
+                ),
+                volumes.get(key, 1.0), key in muted,
+            )
+        # Labels with take files on disk but no preferred take: a fader-less
+        # strip holding just the dropdown, so one can be picked again.
+        unpreferred = (loaded[0][0].get("unpreferred_takes") or {}) if loaded else {}
+        for j, (label, label_takes) in enumerate(sorted(unpreferred.items())):
+            self._build_strip(
+                len(loaded) + 1 + j, label, lambda parent, label=label: make_label_badge(
+                    parent, label, font_size=8, padx=4, pady=1,
+                ),
+                lambda parent, label=label, label_takes=label_takes: self._make_take_chooser(
+                    parent, label, label_takes, None,
+                ),
+                1.0, False, has_audio=False,
             )
         if backing_path is not None:
             # Leftmost on screen (column 0), but last in self._strips and
@@ -187,7 +214,8 @@ class SongMixer(ttk.Frame):
                     parent, text="backing", bg="#444444", fg="white",
                     font=("TkDefaultFont", 8, "bold"), padx=4, pady=1,
                 ),
-                "track", volumes.get(_BACKING_KEY, 1.0), _BACKING_KEY in muted,
+                lambda parent: ttk.Label(parent, text="track", foreground="#666666"),
+                volumes.get(_BACKING_KEY, 1.0), _BACKING_KEY in muted,
             )
         self._saved_state = self._current_state() if mix else None
 
@@ -225,12 +253,17 @@ class SongMixer(ttk.Frame):
         self._on_trim_saved()
 
     def _build_strip(
-        self, column: int, key: str, make_badge: Callable[[tk.Misc], tk.Widget], caption: str,
-        gain: float, muted: bool,
+        self, column: int, key: str, make_badge: Callable[[tk.Misc], tk.Widget],
+        make_caption: Callable[[tk.Misc], tk.Widget], gain: float, muted: bool, has_audio: bool = True,
     ) -> None:
         strip = ttk.Frame(self._strips_frame)
-        strip.grid(row=0, column=column, sticky="ns", padx=(0, 14))
+        strip.grid(row=0, column=column, sticky="ns" if has_audio else "s", padx=(0, 14))
         self._strips_frame.rowconfigure(0, weight=1)
+        if not has_audio:
+            # Not in self._strips — nothing for the player to mix, nothing to save.
+            make_badge(strip).pack(pady=(4, 0))
+            make_caption(strip).pack(pady=(2, 0))
+            return
 
         pct_var = tk.StringVar()
         gain_var = tk.DoubleVar(value=min(max(gain, 0.0), _MAX_GAIN))
@@ -249,10 +282,63 @@ class SongMixer(ttk.Frame):
         ttk.Checkbutton(strip, text="Mute", variable=mute_var, command=self._on_strip_changed).pack(anchor="w")
         ttk.Checkbutton(strip, text="Solo", variable=solo_var, command=self._on_strip_changed).pack(anchor="w")
         make_badge(strip).pack(pady=(4, 0))
-        ttk.Label(strip, text=caption, foreground="#666666").pack()
+        make_caption(strip).pack(pady=(2, 0))
 
         self._strips.append(entry)
         self._update_pct(entry)
+
+    # --- take choice ---
+
+    def _make_take_chooser(
+        self, parent: tk.Misc, label: str, takes: list[dict], current_filename: str | None,
+    ) -> ttk.Combobox:
+        """A strip's take dropdown: every take of this song for `label`
+        on file (list_completed_takes' alternate_takes/unpreferred_takes),
+        plus "No preferred take". Picking one makes it the song's
+        preferred take for `label` (backend.set_preferred_take)."""
+        choices: list[tuple[str, str | None]] = [(f"take {t['take_number']}", t["filename"]) for t in takes]
+        choices.append((_NO_TAKE, None))
+        current = next((text for text, f in choices if f == current_filename), _NO_TAKE)
+        var = tk.StringVar(value=current)
+        combo = ttk.Combobox(
+            parent, textvariable=var, values=[text for text, _f in choices], state="readonly",
+            width=7,  # strip-width; the open list still shows "No preferred take" in full
+        )
+
+        def on_selected(_event: object) -> None:
+            combo.selection_clear()
+            chosen = dict(choices)[var.get()]
+            if chosen != current_filename:
+                self._set_preferred_take(label, chosen)
+
+        combo.bind("<<ComboboxSelected>>", on_selected)
+        return combo
+
+    def _set_preferred_take(self, label: str, filename: str | None) -> None:
+        if not self.track_name or not self._song_takes:
+            return
+        any_take = self._song_takes[0]["filename"]  # resolves which song, see set_preferred_take
+        was_playing = self.player.is_playing
+        self._status_var.set(f"Switching {label} take...")
+        backend = self.app_state.backend
+
+        def worker() -> None:
+            try:
+                backend.set_preferred_take(any_take, label, filename)
+                error = None
+            except BackendError as e:
+                error = str(e)
+            self.after(0, lambda: self._on_take_set(error, was_playing))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_take_set(self, error: str | None, was_playing: bool) -> None:
+        if not self.winfo_exists():
+            return
+        if error:
+            self._status_var.set(f"Could not change take: {error}")
+            return
+        self._on_takes_changed(was_playing)
 
     # --- strip state ---
 

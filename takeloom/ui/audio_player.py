@@ -179,6 +179,10 @@ class AudioPlayerBar(ttk.Frame):
             self._play()
 
     @property
+    def is_playing(self) -> bool:
+        return self._playing
+
+    @property
     def full_length_seconds(self) -> float:
         return self._length / self._sample_rate if self._tracks is not None and self._sample_rate else 0.0
 

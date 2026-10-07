@@ -183,6 +183,12 @@ class RemoteBackend(Backend):
     def list_completed_takes(self) -> list[dict]:
         return self._client.call("list_completed_takes", {})["takes"]
 
+    def set_preferred_take(self, take_filename: str, instrument: str, new_filename: str | None) -> None:
+        self._client.call(
+            "set_preferred_take",
+            {"take_filename": take_filename, "instrument": instrument, "new_filename": new_filename},
+        )
+
     def get_song_mix(self, track_name: str) -> dict | None:
         return self._client.call("get_song_mix", {"track_name": track_name})["mix"]
 
