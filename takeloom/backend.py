@@ -1967,7 +1967,8 @@ class LocalBackend(Backend):
 
     def get_session_detail(self, session_dir: str) -> dict:
         _, data = self._read_session_log(session_dir)
-        filter_slot_indices = {int(k) for k in data.get("filter_slot_draws", {})}
+        filter_slot_draws = data.get("filter_slot_draws", {})
+        filter_slot_indices = {int(k) for k in filter_slot_draws}
 
         track_names: list[str] = []
         track_index_by_name: dict[str, int] = {}
@@ -1988,6 +1989,18 @@ class LocalBackend(Backend):
             is_filter_draw = track_index in filter_slot_indices
             takes = session_takes.get(str(track_index), [])
             status = self._track_take_status(data, track_index) if track_index is not None else "not recorded"
+            # A song set slot skipped past one or more draws before
+            # recording logs each of them under the same track_index —
+            # but only the final draw (filter_slot_draws' "name") is what
+            # the slot's take belongs to. Without this, every earlier
+            # draw's row showed that same take, and reassigning it from
+            # one of those rows renamed the take's file after the wrong
+            # song (see reassign_take).
+            final_draw_name = (filter_slot_draws.get(str(track_index)) or {}).get("name")
+            if is_filter_draw and final_draw_name and name != final_draw_name:
+                takes = []
+                if status != "pending":
+                    status = "skipped"
             tracks.append({
                 "track_name": name, "is_filter_draw": is_filter_draw, "takes": takes, "status": status,
             })
@@ -2189,8 +2202,12 @@ class LocalBackend(Backend):
             if take is None:
                 raise BackendError(f"No take is currently filed under '{old_instrument}' for '{track_name}'.")
 
+            # shared.name, not the caller's track_name: a slot that skipped
+            # past earlier draws logs all of them under this same
+            # track_index, so track_name may be a skipped draw's name —
+            # which once renamed a take's file after the wrong song.
             new_take = self._move_take_file(
-                project, track_name, new_instrument, take,
+                project, shared.name or track_name, new_instrument, take,
                 source="inspiration", backing_track=f"inspiration_{track_id}",
             )
             del shared.preferred_takes[old_instrument]
