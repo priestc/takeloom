@@ -33,6 +33,42 @@ def _format_seconds(seconds: float) -> str:
     return f"{seconds // 60}:{seconds % 60:02d}"
 
 
+# Prominent transport colors: (background, foreground).
+_PLAY_COLORS = ("#2e9e4f", "white")
+_STOP_ACTIVE_COLORS = ("#d23c3c", "white")  # only while playing
+_IDLE_COLORS = ("#9a9a9a", "white")
+_DISABLED_COLORS = ("#d6d6d6", "#f4f4f4")
+
+
+class _ColorButton(tk.Label):
+    """A solid-colored clickable button for the prominent transport —
+    a Label, since macOS's native (aqua) buttons, ttk or tk, ignore
+    background colors. Mimics just the ttk.Button calls AudioPlayerBar
+    makes on its buttons (configure(text=...), state([...]))."""
+
+    def __init__(self, master: tk.Misc, text: str, command: Callable[[], None]) -> None:
+        super().__init__(
+            master, text=text, font=("TkDefaultFont", 18, "bold"), width=4, padx=6, pady=4, cursor="hand2",
+        )
+        self._command = command
+        self._enabled = True
+        self._colors = _IDLE_COLORS
+        self.bind("<Button-1>", lambda _e: self._enabled and self._command())
+
+    def state(self, spec: list[str]) -> None:
+        self._enabled = "disabled" not in spec
+        self.configure(cursor="hand2" if self._enabled else "arrow")
+        self._paint()
+
+    def set_colors(self, colors: tuple[str, str]) -> None:
+        self._colors = colors
+        self._paint()
+
+    def _paint(self) -> None:
+        bg, fg = self._colors if self._enabled else _DISABLED_COLORS
+        self.configure(bg=bg, fg=fg)
+
+
 class AudioPlayerBar(ttk.Frame):
     def __init__(self, master: tk.Misc, show_title: bool = True, prominent: bool = False) -> None:
         # prominent: a boxed, larger transport bar — the Completed Takes
@@ -73,10 +109,11 @@ class AudioPlayerBar(ttk.Frame):
             self._scale.pack(fill="x", pady=(0, 6))
             controls = ttk.Frame(self)
             controls.pack(fill="x")
-            self._play_button = ttk.Button(controls, text="▶", width=5, command=self.toggle_play)
+            self._play_button = _ColorButton(controls, "▶", self.toggle_play)
+            self._play_button.set_colors(_PLAY_COLORS)
             self._play_button.pack(side="left")
-            self._stop_button = ttk.Button(controls, text="■", width=5, command=self.stop)
-            self._stop_button.pack(side="left", padx=(4, 0))
+            self._stop_button = _ColorButton(controls, "■", self.stop)
+            self._stop_button.pack(side="left", padx=(6, 0))
             ttk.Label(controls, textvariable=self._time_var, font=("TkFixedFont", 16, "bold")).pack(side="right")
         else:
             controls = ttk.Frame(self)
@@ -116,6 +153,7 @@ class AudioPlayerBar(ttk.Frame):
         self._close_stream()
         self._playing = False
         self._play_button.configure(text="▶")
+        self._refresh_stop_color()
         self._load_token += 1
         token = self._load_token
         self._title_var.set(f"Loading {title}...")
@@ -260,11 +298,13 @@ class AudioPlayerBar(ttk.Frame):
                 return
         self._playing = True
         self._play_button.configure(text="⏸")
+        self._refresh_stop_color()
         self._schedule_poll()
 
     def _pause(self) -> None:
         self._playing = False
         self._play_button.configure(text="▶")
+        self._refresh_stop_color()
         # Closing (not just silencing) the stream on pause frees the output
         # device while nothing's playing — reopened on the next play.
         self._close_stream()
@@ -336,6 +376,11 @@ class AudioPlayerBar(ttk.Frame):
         with self._lock:
             self._position = min(max(frame, self._win_start), self._win_end)
         self._refresh_position()
+
+    def _refresh_stop_color(self) -> None:
+        # Prominent transport only: stop is red while playing, gray otherwise.
+        if isinstance(self._stop_button, _ColorButton):
+            self._stop_button.set_colors(_STOP_ACTIVE_COLORS if self._playing else _IDLE_COLORS)
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         state = ["!disabled"] if enabled else ["disabled"]
