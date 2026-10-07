@@ -1,5 +1,5 @@
-"""Backing-track trim editor — the bottom of the Completed Takes tab's left
-pane, under the mixer (ui/song_mixer.py). Non-destructively crops a long
+"""Backing-track trim editor — the collapsible "Trim song" section snapped
+to the bottom of the Completed Takes tab's left pane (ui/song_mixer.py). Non-destructively crops a long
 intro/outro off the loaded song: move the start later or the end earlier
 (or back again) and the mixer's player hears the new window immediately
 (AudioPlayerBar.set_window — it keeps the full, untrimmed takes loaded).
@@ -47,8 +47,8 @@ class BackingTrimEditor(ttk.Frame):
         self._nudge_buttons: list[ttk.Button] = []
         self._token = 0
 
-        ttk.Separator(self, orient="horizontal").pack(fill="x", pady=(0, 8))
-        ttk.Label(self, text="Backing track", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        # No heading of its own — the mixer's collapsible "Trim song" header
+        # (SongMixer._toggle_trim) sits above it.
         ttk.Label(
             self, text="Crop a long intro/outro. Non-destructive — applies to every take of this song and any "
                        "future session that loads it.",

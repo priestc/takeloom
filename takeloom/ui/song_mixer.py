@@ -52,32 +52,57 @@ class SongMixer(ttk.Frame):
         ttk.Label(self, textvariable=self._title_var, font=("TkDefaultFont", 12, "bold"), wraplength=380).pack(
             anchor="w"
         )
-        self.player = AudioPlayerBar(self, show_title=False)
-        self.player.pack(fill="x", pady=(4, 10))
+        # "Trim song" — snapped to the bottom of the pane, collapsed by
+        # default; its header button expands/collapses the editor above it.
+        # Packed before the notebook so the notebook's expand=True can't
+        # push it off the bottom.
+        trim_section = ttk.Frame(self)
+        trim_section.pack(side="bottom", fill="x", pady=(12, 0))
+        ttk.Separator(trim_section, orient="horizontal").pack(fill="x", pady=(0, 6))
+        self._trim_toggle = ttk.Button(trim_section, text="▸ Trim song", command=self._toggle_trim)
+        self._trim_toggle.pack(anchor="w")
+        self._trim_open = False
 
-        self._strips_frame = ttk.Frame(self)
+        notebook = ttk.Notebook(self)
+        notebook.pack(fill="both", expand=True, pady=(6, 0))
+        audio_tab = ttk.Frame(notebook, padding=(6, 8))
+        video_tab = ttk.Frame(notebook, padding=(6, 8))  # empty for now
+        notebook.add(audio_tab, text="Audio")
+        notebook.add(video_tab, text="Video")
+
+        self.player = AudioPlayerBar(audio_tab, show_title=False)
+        self.player.pack(fill="x", pady=(0, 10))
+
+        self._strips_frame = ttk.Frame(audio_tab)
         self._strips_frame.pack(fill="x")
         self._placeholder = ttk.Label(
             self._strips_frame, text="Click a song on the right to load its takes here.", foreground="#666666",
         )
         self._placeholder.pack(anchor="w")
 
-        buttons = ttk.Frame(self)
+        buttons = ttk.Frame(audio_tab)
         buttons.pack(fill="x", pady=(10, 0))
         self._save_button = ttk.Button(buttons, text="Save mix", command=self._on_save)
         self._save_button.pack(side="left")
         self._reset_button = ttk.Button(buttons, text="Reset to 100%", command=self._on_reset)
         self._reset_button.pack(side="left", padx=(6, 0))
         self._status_var = tk.StringVar(value="")
-        ttk.Label(self, textvariable=self._status_var, foreground="#666666", wraplength=400, justify="left").pack(
+        ttk.Label(audio_tab, textvariable=self._status_var, foreground="#666666", wraplength=400, justify="left").pack(
             anchor="w", pady=(6, 0)
         )
         self._set_buttons_enabled(False)
 
         self.trim_editor = BackingTrimEditor(
-            self, lambda: self.app_state.backend, self.player, on_saved=self._on_trim_editor_saved,
+            trim_section, lambda: self.app_state.backend, self.player, on_saved=self._on_trim_editor_saved,
         )
-        self.trim_editor.pack(fill="x", pady=(16, 0))
+
+    def _toggle_trim(self) -> None:
+        self._trim_open = not self._trim_open
+        if self._trim_open:
+            self.trim_editor.pack(fill="x", pady=(6, 0))
+        else:
+            self.trim_editor.pack_forget()
+        self._trim_toggle.configure(text=("▾" if self._trim_open else "▸") + " Trim song")
 
     # --- loading ---
 

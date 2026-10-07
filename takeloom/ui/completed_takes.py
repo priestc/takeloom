@@ -6,8 +6,10 @@ Two panes: on the left a mixer (ui/song_mixer.py), on the right the song
 list. Clicking a song loads all of its takes into the mixer — a volume
 slider (plus Mute/Solo) per instrument, played together live — where
 "Save mix" stores those settings in the vault and they're re-applied
-whenever that song is loaded again. Below the mixer, a backing-track trim
-editor (ui/backing_trim_editor.py) crops the song's intro/outro.
+whenever that song is loaded again. The mixer sits on the left pane's
+"Audio" tab (a "Video" tab sits beside it, empty for now); a collapsible
+"Trim song" section snapped to the pane's bottom holds the backing-track
+trim editor (ui/backing_trim_editor.py), which crops the intro/outro.
 
 Takes are grouped by song, one grid row per track name with three
 columns: Name (behind a collapse/expand triangle), Backing source
