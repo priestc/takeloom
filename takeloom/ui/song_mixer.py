@@ -63,15 +63,17 @@ class SongMixer(ttk.Frame):
         self._trim_toggle.pack(anchor="w")
         self._trim_open = False
 
+        # Transport — above the tabs, full pane width: it plays the whole
+        # song (and the trim editor previews through it), whichever tab is up.
+        self.player = AudioPlayerBar(self, show_title=False, prominent=True)
+        self.player.pack(fill="x", pady=(6, 4))
+
         notebook = ttk.Notebook(self)
         notebook.pack(fill="both", expand=True, pady=(6, 0))
         audio_tab = ttk.Frame(notebook, padding=(6, 8))
         video_tab = ttk.Frame(notebook, padding=(6, 8))  # empty for now
         notebook.add(audio_tab, text="Audio")
         notebook.add(video_tab, text="Video")
-
-        self.player = AudioPlayerBar(audio_tab, show_title=False)
-        self.player.pack(fill="x", pady=(0, 10))
 
         self._strips_frame = ttk.Frame(audio_tab)
         self._strips_frame.pack(fill="x")

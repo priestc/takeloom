@@ -34,8 +34,12 @@ def _format_seconds(seconds: float) -> str:
 
 
 class AudioPlayerBar(ttk.Frame):
-    def __init__(self, master: tk.Misc, show_title: bool = True) -> None:
-        super().__init__(master)
+    def __init__(self, master: tk.Misc, show_title: bool = True, prominent: bool = False) -> None:
+        # prominent: a boxed, larger transport bar — the Completed Takes
+        # mixer's, which sits alone above its tabs rather than inline in a list.
+        super().__init__(master, **({"style": "Transport.TFrame", "padding": (12, 10)} if prominent else {}))
+        if prominent:
+            ttk.Style(self).configure("Transport.TFrame", relief="groove", borderwidth=2)
         self._lock = threading.Lock()
         # One (frames, channels) array per track, all the same length
         # (shorter ones zero-padded), mono or stereo — the callback always
@@ -61,18 +65,29 @@ class AudioPlayerBar(ttk.Frame):
         if show_title:  # the Completed Takes mixer shows the song name itself
             ttk.Label(self, textvariable=self._title_var, foreground="#666666").pack(anchor="w")
 
-        controls = ttk.Frame(self)
-        controls.pack(fill="x", pady=(2, 0))
-        self._play_button = ttk.Button(controls, text="▶", width=3, command=self.toggle_play)
-        self._play_button.pack(side="left")
-        self._stop_button = ttk.Button(controls, text="■", width=3, command=self.stop)
-        self._stop_button.pack(side="left", padx=(2, 8))
         self._time_var = tk.StringVar(value="0:00 / 0:00")
-        ttk.Label(controls, textvariable=self._time_var, width=12, anchor="e").pack(side="right", padx=(8, 0))
-
         self._pos_var = tk.DoubleVar(value=0.0)
-        self._scale = ttk.Scale(controls, from_=0.0, to=1.0, variable=self._pos_var, orient="horizontal")
-        self._scale.pack(side="left", fill="x", expand=True)
+        if prominent:
+            # Seek bar on its own full-width row; ▶/■ and a large time readout below it.
+            self._scale = ttk.Scale(self, from_=0.0, to=1.0, variable=self._pos_var, orient="horizontal")
+            self._scale.pack(fill="x", pady=(0, 6))
+            controls = ttk.Frame(self)
+            controls.pack(fill="x")
+            self._play_button = ttk.Button(controls, text="▶", width=5, command=self.toggle_play)
+            self._play_button.pack(side="left")
+            self._stop_button = ttk.Button(controls, text="■", width=5, command=self.stop)
+            self._stop_button.pack(side="left", padx=(4, 0))
+            ttk.Label(controls, textvariable=self._time_var, font=("TkFixedFont", 16, "bold")).pack(side="right")
+        else:
+            controls = ttk.Frame(self)
+            controls.pack(fill="x", pady=(2, 0))
+            self._play_button = ttk.Button(controls, text="▶", width=3, command=self.toggle_play)
+            self._play_button.pack(side="left")
+            self._stop_button = ttk.Button(controls, text="■", width=3, command=self.stop)
+            self._stop_button.pack(side="left", padx=(2, 8))
+            ttk.Label(controls, textvariable=self._time_var, width=12, anchor="e").pack(side="right", padx=(8, 0))
+            self._scale = ttk.Scale(controls, from_=0.0, to=1.0, variable=self._pos_var, orient="horizontal")
+            self._scale.pack(side="left", fill="x", expand=True)
         self._scale.bind("<ButtonPress-1>", self._on_seek_start)
         self._scale.bind("<ButtonRelease-1>", self._on_seek_end)
 
