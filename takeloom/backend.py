@@ -1883,7 +1883,7 @@ class LocalBackend(Backend):
                 index = load_inspiration_index(vault_root(config))
             next_up = {}
             for label in labels:
-                chosen = self._pick_filter_match(matches, label, index)
+                chosen = self._pick_filter_match(matches, label, index, prefer_reuse=not track.song_set)
                 next_up[label] = build_inspiration_track_entry(chosen).name
             previews.append({"match_count": len(matches), "next_up": next_up})
         if cache_dirty:
@@ -3260,7 +3260,9 @@ class LocalBackend(Backend):
         history — so a later instrument can layer onto the same song
         instead of the setlist only ever accumulating unrelated one-off
         takes. Falls back to a genuinely random pick among every match
-        when none qualify. Either way, the setlist itself never gains a
+        when none qualify. A song set (track.song_set) skips the
+        preference and always draws uniformly at random from its list.
+        Either way, the setlist itself never gains a
         new entry here — see TrackEntry's docstring and _resolve_filter_
         slot_for_session's caching wrapper, which is what actually gets
         called during a session; this is the pure "pick one" step, split
@@ -3289,7 +3291,9 @@ class LocalBackend(Backend):
         from .vault import load_inspiration_index, vault_root
         index = load_inspiration_index(vault_root(config))
         label = config.label_for_instrument(instrument_name)
-        chosen = self._pick_filter_match(matches, label, index, exclude_id=exclude_id)
+        chosen = self._pick_filter_match(
+            matches, label, index, exclude_id=exclude_id, prefer_reuse=not track.song_set,
+        )
         entry = build_inspiration_track_entry(chosen)
 
         # build_inspiration_track_entry only knows the raw inspiration-
@@ -3311,6 +3315,7 @@ class LocalBackend(Backend):
     @staticmethod
     def _pick_filter_match(
         matches: list[dict], label: str, index: dict, exclude_id: int | None = None,
+        prefer_reuse: bool = True,
     ) -> dict:
         """The actual "which song" choice within `matches` for `label`,
         split out of _resolve_filter_slot so get_filter_slot_previews can
@@ -3319,8 +3324,14 @@ class LocalBackend(Backend):
         for each one. Prefers a match some other instrument has already
         recorded a take for (but not yet under `label`), falling back to
         a genuinely random pick among every match when none qualify —
-        see _resolve_filter_slot's own docstring for why."""
+        see _resolve_filter_slot's own docstring for why.
+
+        `prefer_reuse=False` (a song set) skips that preference entirely
+        and draws uniformly at random from every candidate, regardless of
+        which songs other instruments already have takes on."""
         candidates = [m for m in matches if m.get("id") != exclude_id] or matches
+        if not prefer_reuse:
+            return random.choice(candidates)
         reusable = []
         for m in candidates:
             shared = index.get(str(m.get("id")))

@@ -59,8 +59,8 @@ class SongSetDialog(tk.Toplevel):
         ttk.Entry(name_row, textvariable=self.name_var, width=40).pack(side="left", fill="x", expand=True)
 
         ttk.Label(
-            frame, text="Each session draws one song from this set, like an inspiration filter — "
-                        "preferring a song another instrument already has a take for, so parts can layer.",
+            frame, text="Each session draws one song at random from this set, regardless of which songs "
+                        "other instruments already have takes for.",
             foreground="#666666", wraplength=520, justify="left",
         ).pack(anchor="w", pady=(0, 8))
 
