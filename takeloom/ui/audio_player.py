@@ -25,6 +25,8 @@ from typing import Callable
 
 import numpy as np
 
+from .level_meter import LevelMeter
+
 _POLL_MS = 100
 
 
@@ -104,7 +106,14 @@ class AudioPlayerBar(ttk.Frame):
 
         self._time_var = tk.StringVar(value="0:00 / 0:00")
         self._pos_var = tk.DoubleVar(value=0.0)
+        self._peak = 0.0  # loudest output sample since the meter last read it (audio thread writes)
+        self._meter: LevelMeter | None = None
         if prominent:
+            # Level meter (the Record tab's LevelMeter) over the seek bar,
+            # showing the mix as heard — fader/mute/solo included.
+            self._meter = LevelMeter(self)
+            self._meter.pack(fill="x", pady=(0, 8))
+            self._meter_tick()
             # Seek bar on its own full-width row; ▶/■ and a large time readout below it.
             self._scale = ttk.Scale(self, from_=0.0, to=1.0, variable=self._pos_var, orient="horizontal")
             self._scale.pack(fill="x", pady=(0, 6))
@@ -336,8 +345,19 @@ class AudioPlayerBar(ttk.Frame):
             self._applied_gains = list(self._gains)
             self._position = start + n
         np.clip(outdata, -1.0, 1.0, out=outdata)
+        if frames:
+            self._peak = max(self._peak, float(np.abs(outdata).max()))
 
     # --- position UI ---
+
+    def _meter_tick(self) -> None:
+        # Own 50ms timer (like the Record tab's _poll_levels), always
+        # running, so the meter also decays back to empty after a pause.
+        if not self.winfo_exists() or self._meter is None:
+            return
+        peak, self._peak = (self._peak if self._playing else 0.0), 0.0
+        self._meter.set_level(peak)
+        self.after(50, self._meter_tick)
 
     def _schedule_poll(self) -> None:
         if self._poll_id is None:
