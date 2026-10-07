@@ -77,12 +77,25 @@ class SongMixer(ttk.Frame):
         self.player = AudioPlayerBar(self, show_title=False, prominent=True)
         self.player.pack(fill="x", pady=(6, 4))
 
-        notebook = ttk.Notebook(self)
-        notebook.pack(fill="both", expand=True, pady=(6, 0))
+        # Audio/Video tabs — a ttk.Notebook with its own tab strip hidden,
+        # switched by a row of toggle buttons instead: a native (aqua) tab
+        # strip can't be stretched to the pane's width, these can.
+        ttk.Style(self).layout("TabsHidden.TNotebook.Tab", [])
+        tab_row = ttk.Frame(self)
+        tab_row.pack(fill="x", pady=(6, 0))
+        notebook = ttk.Notebook(self, style="TabsHidden.TNotebook")
+        notebook.pack(fill="both", expand=True)
         audio_tab = ttk.Frame(notebook, padding=(6, 8))
         video_tab = ttk.Frame(notebook, padding=(6, 8))  # empty for now
-        notebook.add(audio_tab, text="Audio")
-        notebook.add(video_tab, text="Video")
+        notebook.add(audio_tab)
+        notebook.add(video_tab)
+        self._tab_var = tk.IntVar(value=0)
+        for column, text in enumerate(("🔊 Audio", "🎬 Video")):
+            ttk.Radiobutton(
+                tab_row, text=text, value=column, variable=self._tab_var, style="Toolbutton",
+                command=lambda: notebook.select(self._tab_var.get()),
+            ).grid(row=0, column=column, sticky="ew")
+            tab_row.columnconfigure(column, weight=1, uniform="tabs")
 
         self._strips_frame = ttk.Frame(audio_tab)
         self._strips_frame.pack(fill="x")
