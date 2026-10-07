@@ -80,7 +80,9 @@ class SongMixer(ttk.Frame):
         # Audio/Video tabs — a ttk.Notebook with its own tab strip hidden,
         # switched by a row of toggle buttons instead: a native (aqua) tab
         # strip can't be stretched to the pane's width, these can.
-        ttk.Style(self).layout("TabsHidden.TNotebook.Tab", [])
+        style = ttk.Style(self)
+        style.layout("TabsHidden.TNotebook.Tab", [])
+        style.configure("MixerTab.Toolbutton", font=("TkDefaultFont", 16), padding=(0, 6))
         tab_row = ttk.Frame(self)
         tab_row.pack(fill="x", pady=(6, 0))
         notebook = ttk.Notebook(self, style="TabsHidden.TNotebook")
@@ -92,7 +94,7 @@ class SongMixer(ttk.Frame):
         self._tab_var = tk.IntVar(value=0)
         for column, text in enumerate(("🔊 Audio", "🎬 Video")):
             ttk.Radiobutton(
-                tab_row, text=text, value=column, variable=self._tab_var, style="Toolbutton",
+                tab_row, text=text, value=column, variable=self._tab_var, style="MixerTab.Toolbutton",
                 command=lambda: notebook.select(self._tab_var.get()),
             ).grid(row=0, column=column, sticky="ew")
             tab_row.columnconfigure(column, weight=1, uniform="tabs")
