@@ -238,8 +238,17 @@ class CompletedTakesFrame(ttk.Frame):
             panes, self.app_state, on_trim_saved=self._load, on_takes_changed=self._on_takes_changed,
         )
         right = ttk.Frame(panes)
-        panes.add(self.mixer, weight=0)
+        panes.add(self.mixer, weight=1)
         panes.add(right, weight=1)
+
+        # Start 50/50 — set once the pane has a real width; after that the
+        # sash is the user's to drag (equal weights keep growth even).
+        def _center_sash(event: tk.Event) -> None:
+            if event.width > 1:
+                panes.sashpos(0, event.width // 2)
+                panes.unbind("<Configure>", bind_id)
+
+        bind_id = panes.bind("<Configure>", _center_sash, add="+")
 
         filter_row = ttk.Frame(right)
         filter_row.pack(fill="x", pady=(0, 8))
@@ -367,7 +376,7 @@ class CompletedTakesFrame(ttk.Frame):
         toggle = tk.Label(name_cell, text="\N{BLACK RIGHT-POINTING TRIANGLE}", font=("TkDefaultFont", 9), cursor="hand2")
         toggle.pack(side="left", padx=(0, 6))
         title = ttk.Label(
-            name_cell, text=track_name, font=("TkDefaultFont", 11, "bold"), cursor="hand2", wraplength=380,
+            name_cell, text=track_name, font=("TkDefaultFont", 11, "bold"), cursor="hand2", wraplength=260,
         )
         title.pack(side="left")
 
