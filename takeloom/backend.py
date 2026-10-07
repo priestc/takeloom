@@ -1286,6 +1286,16 @@ class _SessionEvent:
         return d
 
 
+def _filter_draw_dict(entry: TrackEntry) -> dict:
+    """One song-set draw as session_log.json records it (see
+    _save_session_log)."""
+    return {
+        "name": entry.name, "backing_track": entry.backing_track,
+        "duration_seconds": entry.duration_seconds,
+        "inspiration_track_id": entry.inspiration_track_id,
+    }
+
+
 @dataclass
 class _ActiveSession:
     """The recording: one continuous audio stream (session.flac) and, with a
@@ -1339,6 +1349,12 @@ class _ActiveSession:
     # manual reselect) gets the same resolved track back rather than a
     # fresh random draw each time.
     resolved_filter_picks: dict = field(default_factory=dict)
+    # song-set index -> every earlier draw a redraw replaced in
+    # resolved_filter_picks, oldest first. A take recorded on one of
+    # those (kept if it ran long enough, see processing/splicer.py) must
+    # still be filed under its own song, not whichever draw the slot
+    # ended up on — see _save_session_log's filter_slot_draw_history.
+    replaced_filter_picks: dict = field(default_factory=dict)
     # Raw MIDI performance captured alongside the audio (see audio/
     # midi_log.py) when `inst.is_midi` — None for an analog instrument,
     # where the concept doesn't apply. Written out to session_midi.mid
@@ -1989,17 +2005,22 @@ class LocalBackend(Backend):
             is_filter_draw = track_index in filter_slot_indices
             takes = session_takes.get(str(track_index), [])
             status = self._track_take_status(data, track_index) if track_index is not None else "not recorded"
-            # A song set slot skipped past one or more draws before
-            # recording logs each of them under the same track_index —
-            # but only the final draw (filter_slot_draws' "name") is what
-            # the slot's take belongs to. Without this, every earlier
-            # draw's row showed that same take, and reassigning it from
-            # one of those rows renamed the take's file after the wrong
-            # song (see reassign_take).
-            final_draw_name = (filter_slot_draws.get(str(track_index)) or {}).get("name")
-            if is_filter_draw and final_draw_name and name != final_draw_name:
-                takes = []
-                if status != "pending":
+            # A song set slot redrawn mid-session logs every draw under
+            # the same track_index, so its takes (and status) have to be
+            # split back out per song — otherwise every draw's row shows
+            # every take, and reassigning one from the wrong row renamed
+            # its file after the wrong song (see reassign_take). A take
+            # snapshot carries its own track_name since splicer.py began
+            # recording it; an older one is assumed to belong to the
+            # slot's final draw (filter_slot_draws' "name"), the only
+            # draw such a session could have filed a take under.
+            if is_filter_draw:
+                final_draw_name = (filter_slot_draws.get(str(track_index)) or {}).get("name")
+                takes = [
+                    t for t in takes
+                    if t.get("track_name", final_draw_name) in (name, None)
+                ]
+                if status == "completed" and not takes:
                     status = "skipped"
             tracks.append({
                 "track_name": name, "is_filter_draw": is_filter_draw, "takes": takes, "status": status,
@@ -2154,7 +2175,7 @@ class LocalBackend(Backend):
         changed = False
         for i, entry in enumerate(entries):
             if entry.get("filename") == old_filename:
-                entries[i] = {"instrument": new_take.instrument, **asdict(new_take)}
+                entries[i] = {**entry, "instrument": new_take.instrument, **asdict(new_take)}
                 changed = True
         if not changed:
             return
@@ -2182,6 +2203,7 @@ class LocalBackend(Backend):
             raise BackendError(f"Track '{track_name}' wasn't touched by session '{session_dir}'.")
 
         project = self._open_project(data.get("project", ""))
+        from .processing.splicer import filter_draw_for_track
         from .vault import load_inspiration_index, save_inspiration_index, vault_root
         root = vault_root(config)
 
@@ -2193,7 +2215,7 @@ class LocalBackend(Backend):
             # exactly which song this session drew — filter_slot_draws
             # records that, same lookup get_session_detail/analyze_take
             # already use to find it reliably.
-            track_id = filter_slot_draws[str(track_index)].get("inspiration_track_id")
+            track_id = (filter_draw_for_track(data, track_index, track_name) or {}).get("inspiration_track_id")
             index = load_inspiration_index(root)
             shared = index.get(str(track_id)) if track_id else None
             if shared is None:
@@ -2263,8 +2285,9 @@ class LocalBackend(Backend):
             # Same reasoning as get_session_detail: a song set slot's own
             # TrackEntry never holds a take — look the drawn song up in
             # the shared vault-wide inspiration-take index instead.
+            from .processing.splicer import filter_draw_for_track
             from .vault import get_inspiration_entry, vault_root
-            track_id = filter_slot_draws[str(track_index)].get("inspiration_track_id")
+            track_id = (filter_draw_for_track(data, track_index, track_name) or {}).get("inspiration_track_id")
             shared = get_inspiration_entry(vault_root(config), track_id) if track_id else None
             take = shared.get_take_for_instrument(instrument_name) if shared is not None else None
         else:
@@ -3500,6 +3523,9 @@ class LocalBackend(Backend):
             # just hand the same song back (see _resolve_filter_slot).
             exclude_id = session.current_track.inspiration_track_id
             resolved = self._resolve_filter_slot(config, slot, session.inst.full_name, exclude_id=exclude_id)
+            previous = session.resolved_filter_picks.get(index)
+            if previous is not None:
+                session.replaced_filter_picks.setdefault(index, []).append(previous)
             session.resolved_filter_picks[index] = resolved
             self._load_track_locked(session, resolved, index, config)
             self._start_playback_locked(session)
@@ -4965,11 +4991,19 @@ class LocalBackend(Backend):
             # to record a completed take into the shared vault-wide
             # inspiration-take index (vault.py) rather than the setlist.
             "filter_slot_draws": {
-                str(index): {
-                    "name": entry.name, "backing_track": entry.backing_track,
-                    "duration_seconds": entry.duration_seconds,
-                    "inspiration_track_id": entry.inspiration_track_id,
-                }
+                str(index): _filter_draw_dict(entry)
+                for index, entry in session.resolved_filter_picks.items()
+            },
+            # Every song drawn for each song-set index, in order — the
+            # final one (same as filter_slot_draws) plus any it was
+            # redrawn away from. Looked up by name (see
+            # filter_draw_for_track) so a take recorded on a skipped draw
+            # still files under its own song.
+            "filter_slot_draw_history": {
+                str(index): [
+                    _filter_draw_dict(e)
+                    for e in [*session.replaced_filter_picks.get(index, []), entry]
+                ]
                 for index, entry in session.resolved_filter_picks.items()
             },
             "events": [e.to_dict() for e in session.events],

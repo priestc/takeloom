@@ -196,6 +196,19 @@ def parse_session_log(data: dict, total_frames: int | None = None) -> list[Compl
     return completed
 
 
+def filter_draw_for_track(data: dict, track_index: int, track_name: str) -> dict | None:
+    """The song-set draw (session_log.json's filter_slot_draws shape) that
+    `track_name` was at `track_index` — a slot redrawn mid-session logs
+    every draw under the same track_index, so the slot's final draw
+    (filter_slot_draws) isn't necessarily the song a given take was
+    played over. Falls back to that final draw for a log predating
+    filter_slot_draw_history, or a name not found in it."""
+    for draw in (data.get("filter_slot_draw_history") or {}).get(str(track_index), []):
+        if draw.get("name") == track_name:
+            return draw
+    return (data.get("filter_slot_draws") or {}).get(str(track_index))
+
+
 def _copy_flac_segment(src: sf.SoundFile, start: int, end: int, out_path: Path) -> None:
     """Write src's [start, end) frame range to out_path, block-wise — a
     session recording can be hours long, so it's never loaded whole."""
@@ -259,7 +272,6 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
             total_frames = None
 
     completed = parse_session_log(data, total_frames=total_frames)
-    filter_slot_draws = data.get("filter_slot_draws", {})
 
     saved = 0
     videos = 0
@@ -329,7 +341,10 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                 # (never-populated) backing_track — needed up front so the
                 # filename itself (take_filename) can name the actual
                 # backing track/source, not the slot's.
-                draw_info = filter_slot_draws.get(str(take.track_index)) if slot.is_inspiration_filter else None
+                draw_info = (
+                    filter_draw_for_track(data, take.track_index, take.track_name)
+                    if slot.is_inspiration_filter else None
+                )
                 if slot.is_inspiration_filter:
                     take_backing_track = draw_info["backing_track"] if draw_info else ""
                     take_source = "inspiration"
@@ -410,8 +425,11 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                             root, slot.inspiration_track_id, slot.name, slot.backing_track,
                             slot.duration_seconds, take_label, take_info,
                         )
+                # track_name too: a redrawn song-set slot can produce
+                # takes of different songs under one track_index, and
+                # get_session_detail needs to show each under its own song.
                 session_takes.setdefault(take.track_index, []).append(
-                    {"instrument": take_label, **asdict(take_info)}
+                    {"instrument": take_label, "track_name": track_name, **asdict(take_info)}
                 )
                 saved += 1
 
