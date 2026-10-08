@@ -41,7 +41,7 @@ class Control:
     bend) or nothing at all (a button the keyboard handles internally,
     like octave shift)."""
     name: str
-    kind: str  # "knob" | "fader" | "wheel" | "button" | "pad" | "pedal"
+    kind: str  # "knob" | "slider" | "wheel" | "button" | "pad" | "pedal"
     cc: int | None = None
     role: str | None = None
     notes: str = ""
