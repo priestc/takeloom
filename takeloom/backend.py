@@ -841,7 +841,8 @@ class Backend(ABC):
         would act on right now — {"instrument": full_name, "voice":
         current synth voice} — or None if the key shouldn't be shown: no
         session open, the keyboard is connected, and it has no "switch
-        voice" button of its own (config.Instrument.voice_cc == 0). Once
+        voice" control of its own (its keyboard_drivers driver has no
+        voice knob). Once
         auto-detect has identified an instrument, only that one counts —
         an identified guitar hides the key even with a keyboard plugged
         in."""
@@ -1655,8 +1656,8 @@ class LocalBackend(Backend):
         # be heard, not whatever happened to be used last time.
         self._monitor_all_inputs = True
         # The keyboard-knob listener (_ensure_control_listener): one
-        # knob-only MidiInput per plugged-in keyboard that has a Voice CC
-        # or Pitch CC, keyed by lowercased midi_device, plus the config
+        # knob-only MidiInput per plugged-in keyboard whose driver has a
+        # voice or backing-pitch knob, keyed by lowercased midi_device, plus the config
         # snapshot its rtmidi-thread handler reads (refreshed every poll).
         self._control_thread: threading.Thread | None = None
         self._control_inputs: dict = {}
@@ -2952,7 +2953,7 @@ class LocalBackend(Backend):
             else:
                 inst = config.get_instrument(config.last_selected_instrument)
                 candidates = [inst] if inst is not None and inst.is_midi else []
-        candidates = [inst for inst in candidates if not inst.voice_cc]
+        candidates = [inst for inst in candidates if not inst.keyboard_driver.voice_cc]
         if not candidates:
             return None
         ports = list_midi_devices()
@@ -2981,8 +2982,9 @@ class LocalBackend(Backend):
 
     def _ensure_control_listener(self) -> None:
         """Start (once) the background thread that keeps a knob-only
-        MidiInput open on every plugged-in keyboard with a Voice CC or
-        Pitch CC configured — independent of whatever engine is open, so
+        MidiInput open on every plugged-in keyboard whose driver (see
+        keyboard_drivers/) has a voice or backing-pitch knob — independent
+        of whatever engine is open, so
         e.g. the QX25's K2 can tune the backing track during a guitar
         session, not only while the QX25 itself is being played. Only
         started by things that mean this backend really is driving the
@@ -3005,7 +3007,7 @@ class LocalBackend(Backend):
                 self._control_config = config
                 wanted = {
                     inst.midi_device.lower(): inst for inst in config.instruments
-                    if inst.is_midi and (inst.voice_cc or inst.backing_pitch_cc)
+                    if inst.is_midi and inst.keyboard_driver.handled_ccs
                 }
                 ports = list_midi_devices()
                 for device, midi_in in list(self._control_inputs.items()):
@@ -3041,9 +3043,10 @@ class LocalBackend(Backend):
         inst = next((i for i in config.instruments if i.is_midi and i.midi_device.lower() == device), None)
         if inst is None:
             return
-        if inst.backing_pitch_cc and cc == inst.backing_pitch_cc:
+        driver = inst.keyboard_driver
+        if driver.backing_pitch_cc and cc == driver.backing_pitch_cc:
             self.set_backing_pitch(knob_to_cents(value))
-        elif inst.voice_cc and cc == inst.voice_cc:
+        elif driver.voice_cc and cc == driver.voice_cc:
             from .audio.synth import SYNTH_VOICES
             # The knob's travel split evenly across the voices (left half
             # piano, right half organ) — a position, not a press, so it
@@ -3345,8 +3348,8 @@ class LocalBackend(Backend):
                 midi_input = MidiInput(
                     inst.midi_device, on_note_on=on_note_on, on_note_off=on_note_off,
                     on_sustain=on_sustain, on_volume=on_volume,
-                    on_expression=on_expression, volume_cc=inst.volume_cc,
-                    ignore_ccs=(inst.voice_cc, inst.backing_pitch_cc),
+                    on_expression=on_expression, volume_cc=inst.keyboard_driver.volume_cc,
+                    ignore_ccs=inst.keyboard_driver.handled_ccs,
                 )
             except MidiUnavailableError as e:
                 raise BackendError(str(e)) from e
@@ -3407,8 +3410,8 @@ class LocalBackend(Backend):
                 midi_in = MidiInput(
                     inst.midi_device, on_note_on=synth.note_on, on_note_off=synth.note_off,
                     on_sustain=synth.set_sustain, on_volume=synth.set_channel_volume,
-                    on_expression=synth.set_expression, volume_cc=inst.volume_cc,
-                    ignore_ccs=(inst.voice_cc, inst.backing_pitch_cc),
+                    on_expression=synth.set_expression, volume_cc=inst.keyboard_driver.volume_cc,
+                    ignore_ccs=inst.keyboard_driver.handled_ccs,
                 )
             except Exception:
                 continue  # not plugged in right now — monitor everything else

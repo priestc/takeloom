@@ -11,30 +11,29 @@ all is itself the detection.
 Alesis QX25's own labeled volume knob sends CC22, a number with no
 standard MIDI meaning at all, and there's no way to enumerate every
 manufacturer's own default in advance. So this supports two modes, via
-the `volume_cc` constructor param (see config.Instrument.volume_cc,
-which is where it actually comes from — a per-device setup fact, not
-something decided in here):
+the `volume_cc` constructor param (see keyboard_drivers/, which is where
+it actually comes from — each supported keyboard model's driver records
+which control is its volume; GENERIC_DRIVER, for any other keyboard, has
+none):
 
 - Pinned (volume_cc != 0): *only* that exact CC number drives volume.
-  Deterministic — once you know (or Studio Setup's "Vol CC" field
-  records) which control a specific keyboard's volume knob actually
-  sends, every other control on that same keyboard is left alone, no
-  matter what else gets touched.
-- Auto (volume_cc == 0, the default before anything's been pinned
-  down): any Control Change that isn't sustain (CC64) or the universal
+  Deterministic — once a keyboard's driver records which control its
+  volume knob actually sends, every other control on that same keyboard
+  is left alone, no matter what else gets touched.
+- Auto (volume_cc == 0, a keyboard with no driver yet): any Control Change that isn't sustain (CC64) or the universal
   modulation wheel (CC1 — too well-established a convention on too many
   keyboards to safely repurpose) is treated as volume-equivalent. A
   reasonable guess for a keyboard nobody's configured yet, but not
   reliable once more than one control might get touched — that's what
-  pinning volume_cc down is for.
+  writing a driver for it is for.
 
 CC11 (Expression) always gets its own separate, correct handling
 (independent, multiplicative — see Synth.set_expression) regardless of
 volume_cc, since unlike an arbitrary assignable knob it's an actual
 MIDI/GM standard with a defined meaning of its own. Every distinct CC
 number seen is still logged once (never spammed), so it's visible
-whether a given control is being treated as volume, and what to type
-into Studio Setup's "Vol CC" field to pin it down precisely.
+whether a given control is being treated as volume, and which number
+each control sends when writing a driver for a new keyboard.
 
 Uses python-rtmidi directly (not e.g. `mido`'s higher-level wrapper)
 because a callback-driven port — no polling loop of our own — is what

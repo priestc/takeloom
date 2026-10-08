@@ -127,37 +127,16 @@ class Instrument:
     # the Record page's dial while listening, same "round-trips through
     # this row unedited" reasoning as synth_voice above.
     instrument_volume: int = 100
-    # Which MIDI Control Change number this specific device's physical
-    # "volume" control sends — a hardware-wiring fact, like midi_device
-    # itself, not something this app can know in advance: confirmed in
-    # practice that it varies per manufacturer/model (an Alesis QX25's
-    # own volume knob sends CC22, a number with no standard MIDI meaning
-    # at all) and every device may differ. 0 means "not pinned down yet"
-    # — audio/midi_input.py then falls back to treating *any* incoming
-    # Control Change that isn't sustain (CC64) or the modulation wheel
-    # (CC1) as volume, which is a reasonable guess for an unconfigured
-    # device but isn't reliable once more than one control gets touched.
-    # Editable in Studio Setup's "Vol CC" column (see ui/studio_setup.py)
-    # — unlike instrument_volume/synth_voice above, this genuinely is a
-    # setup-time fact about the hardware, not a live performance choice.
-    # Once set to a specific number, *only* that exact CC drives this
-    # instrument's volume; every other CC is left alone.
-    volume_cc: int = 0
-    # Which MIDI Control Change number this keyboard's own "voice" control
-    # sends, if it has one (e.g. the Alesis QX25's K1 knob) — its position
-    # picks synth_voice, the knob's travel split evenly across
-    # MIDI_SYNTH_VOICES (see backend.py's _on_control_change). 0 means the
-    # keyboard has no such control (e.g. an M-Audio Keystation 61es), in
-    # which case the Stream Deck shows its own "Voice" key before a
-    # session starts instead. Edited in Studio Setup's "Voice CC" column.
-    voice_cc: int = 0
-    # Which CC this keyboard's "tune the backing track" knob sends, if any
-    # (e.g. the QX25's K2): its full travel shifts the backing track
-    # currently playing by -50..+50 cents, centre = untouched (see
-    # backend.py's set_backing_pitch). Works whatever instrument is being
-    # recorded, as long as this keyboard is plugged in. Studio Setup's
-    # "Pitch CC" column.
-    backing_pitch_cc: int = 0
+
+    @property
+    def keyboard_driver(self):
+        """The keyboard_drivers.KeyboardDriver describing this MIDI
+        instrument's physical controls — which CC is its volume, its voice
+        knob, its backing-pitch knob — matched by midi_device. GENERIC_DRIVER
+        for an analog instrument or an unrecognized keyboard. These are
+        hardware facts defined in code, not settings: see that package."""
+        from .keyboard_drivers import driver_for
+        return driver_for(self.midi_device)
 
     @property
     def is_midi(self) -> bool:
@@ -313,53 +292,6 @@ class StudioConfig:
                 errors.append(
                     f"Instrument '{inst.full_name or '(unnamed)'}' has an out-of-range volume "
                     f"({inst.instrument_volume}% — must be 0-{MAX_INSTRUMENT_VOLUME_PERCENT}%)."
-                )
-            if not (0 <= inst.volume_cc <= 127):
-                errors.append(
-                    f"Instrument '{inst.full_name or '(unnamed)'}' has an invalid Volume CC "
-                    f"({inst.volume_cc} — MIDI Control Change numbers run 0-127; use 0 for auto-detect)."
-                )
-            # 1 (modulation wheel), 11 (expression — has its own always-
-            # separate handling), and 64 (sustain pedal) are always
-            # handled as those specific controls, never as volume — see
-            # audio/midi_input.py — so pinning volume_cc to any of them
-            # would silently never fire.
-            elif inst.volume_cc in (1, 11, 64):
-                reserved_for = {1: "modulation wheel", 11: "expression", 64: "sustain pedal"}[inst.volume_cc]
-                errors.append(
-                    f"Instrument '{inst.full_name or '(unnamed)'}' has Volume CC set to "
-                    f"{inst.volume_cc}, which is reserved for the {reserved_for} and never treated "
-                    f"as volume — pick a different CC number (0 for auto-detect)."
-                )
-            if not (0 <= inst.voice_cc <= 127):
-                errors.append(
-                    f"Instrument '{inst.full_name or '(unnamed)'}' has an invalid Voice CC "
-                    f"({inst.voice_cc} — MIDI Control Change numbers run 0-127; use 0 for none)."
-                )
-            elif inst.voice_cc in (1, 11, 64):
-                reserved_for = {1: "modulation wheel", 11: "expression", 64: "sustain pedal"}[inst.voice_cc]
-                errors.append(
-                    f"Instrument '{inst.full_name or '(unnamed)'}' has Voice CC set to "
-                    f"{inst.voice_cc}, which is reserved for the {reserved_for} — pick a different "
-                    f"CC number (0 for none)."
-                )
-            if not (0 <= inst.backing_pitch_cc <= 127):
-                errors.append(
-                    f"Instrument '{inst.full_name or '(unnamed)'}' has an invalid Pitch CC "
-                    f"({inst.backing_pitch_cc} — MIDI Control Change numbers run 0-127; use 0 for none)."
-                )
-            elif inst.backing_pitch_cc in (1, 11, 64):
-                reserved_for = {1: "modulation wheel", 11: "expression", 64: "sustain pedal"}[inst.backing_pitch_cc]
-                errors.append(
-                    f"Instrument '{inst.full_name or '(unnamed)'}' has Pitch CC set to "
-                    f"{inst.backing_pitch_cc}, which is reserved for the {reserved_for} — pick a different "
-                    f"CC number (0 for none)."
-                )
-            assigned = [cc for cc in (inst.volume_cc, inst.voice_cc, inst.backing_pitch_cc) if cc]
-            if len(assigned) != len(set(assigned)):
-                errors.append(
-                    f"Instrument '{inst.full_name or '(unnamed)'}' uses the same CC number for more than "
-                    f"one of Vol CC / Voice CC / Pitch CC — each needs its own control."
                 )
         return errors
 
