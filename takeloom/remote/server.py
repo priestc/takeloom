@@ -348,7 +348,9 @@ class _ClientHandler(socketserver.StreamRequestHandler):
                 # Same as fetch_take_file, for a song's backing track (the
                 # Completed Takes mixer's "Backing track" strip) — see
                 # RemoteBackend.get_backing_playback_path.
-                path = self._owner.backend.ensure_backing_track_local(args["take_filename"])
+                # get_backing_playback_path, not ensure_backing_track_local:
+                # the copy with the song's saved pitch correction applied.
+                path = self._owner.backend.get_backing_playback_path(args["take_filename"])
                 self.send_file("take_file", Path(path), extra={"filename": Path(path).name})
                 result = {"filename": Path(path).name}  # real name/extension — mp3/m4a/... decode by suffix
             else:

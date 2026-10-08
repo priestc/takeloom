@@ -177,6 +177,46 @@ def save_song_mix(root: Path, track_name: str, volumes: dict[str, float], muted:
     return mix
 
 
+# --- backing track tuning ---
+#
+# Per backing-track-file pitch correction in cents (the QX25's K2 knob —
+# see backend.py's set_backing_pitch), keyed by the backing track's
+# filename so it follows that exact recording wherever it's used: every
+# session that loads it, and Completed Takes playback. One small JSON map
+# in the local vault, written by the server only — same as the song mixes
+# above.
+
+
+def _backing_tuning_path(root: Path) -> Path:
+    return root / "backing_tuning.json"
+
+
+def _load_backing_tuning_map(root: Path) -> dict[str, float]:
+    path = _backing_tuning_path(root)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return {str(k): float(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+
+def load_backing_tuning(root: Path, backing_track: str) -> float:
+    """Saved correction for `backing_track` (a filename), 0.0 if none."""
+    return _load_backing_tuning_map(root).get(backing_track, 0.0) if backing_track else 0.0
+
+
+def save_backing_tuning(root: Path, backing_track: str, cents: float) -> None:
+    tuning = _load_backing_tuning_map(root)
+    if cents:
+        tuning[backing_track] = round(float(cents), 2)
+    else:
+        tuning.pop(backing_track, None)
+    ensure_dir(root)
+    atomic_write_text(_backing_tuning_path(root), json.dumps(tuning, indent=2, sort_keys=True))
+
+
 def sync_and_maybe_prune(config: StudioConfig, session_dir: Path, log: LogFn | None = None) -> None:
     """Best-effort: push `session_dir` (already inside the vault) to the
     remote backup server if session_vault_mode is "remote" or "both", and

@@ -9,6 +9,7 @@ import numpy as np
 
 from .filters import CompressorSettings, apply_compressor
 from .formats import read_audio
+from .pitch_shift import SplicePitchShifter
 
 
 @dataclass
@@ -19,6 +20,10 @@ class MixSource:
     volume: float = 1.0
     active: bool = True
     original_data: np.ndarray | None = None  # full array before trim
+    # Live pitch correction (see set_pitch / audio/pitch_shift.py) — only
+    # ever set on the backing track. 0.0 plays `data` untouched.
+    pitch_cents: float = 0.0
+    shifter: SplicePitchShifter | None = None
 
 
 class Mixer:
@@ -163,6 +168,10 @@ class Mixer:
                 continue
             actual_end = min(end, src_len)
             n = actual_end - start
+            if source.shifter is not None:
+                shifted = source.shifter.process(source.data, start, n, source.pitch_cents)
+                output[:n] += shifted * source.volume
+                continue
             output[:n] += source.data[start:actual_end] * source.volume
         # Clip to prevent clipping distortion
         np.clip(output, -1.0, 1.0, out=output)
@@ -173,6 +182,25 @@ class Mixer:
             if source.name == name:
                 source.volume = volume
                 break
+
+    def set_pitch(self, name: str, cents: float) -> None:
+        """Live-safe: shift source `name` by `cents` (see audio/pitch_shift.
+        py — timing stays locked to the unshifted track). Takes effect on
+        the very next block, and can be changed every block (a knob being
+        turned). The shifter stays attached once created, so returning to
+        0 fades back onto the untouched audio rather than cutting over."""
+        for source in self.sources:
+            if source.name == name:
+                if source.shifter is None and cents != 0.0:
+                    source.shifter = SplicePitchShifter(self.sample_rate)
+                source.pitch_cents = cents
+                break
+
+    def get_pitch(self, name: str) -> float:
+        for source in self.sources:
+            if source.name == name:
+                return source.pitch_cents
+        return 0.0
 
     def set_trim(self, name: str, trim_frames: int) -> None:
         """Re-slice a source from its original_data with a new trim offset."""

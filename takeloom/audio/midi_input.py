@@ -176,8 +176,8 @@ class MidiInput:
         on_volume: Callable[[int], None] | None = None,
         on_expression: Callable[[int], None] | None = None,
         volume_cc: int = 0,
-        on_voice_key: Callable[[], None] | None = None,
-        voice_cc: int = 0,
+        ignore_ccs: tuple[int, ...] = (),
+        on_control_change: Callable[[int, int], None] | None = None,
     ) -> None:
         try:
             import rtmidi
@@ -194,14 +194,14 @@ class MidiInput:
         # 0 = auto-detect (see module docstring); otherwise only this
         # exact CC number is ever routed to on_volume.
         self._volume_cc = volume_cc
-        # 0 = this keyboard has no "switch voice" control configured (see
-        # config.Instrument.voice_cc). Otherwise pressing that CC (a value
-        # crossing up through 64, so a button's own release message
-        # doesn't count as a second press) calls on_voice_key — and that
-        # CC is never treated as volume, even in auto mode.
-        self._on_voice_key = on_voice_key
-        self._voice_cc = voice_cc
-        self._voice_key_down = False
+        # Controls handled elsewhere (a keyboard's voice/backing-pitch
+        # knobs — see backend.py's _on_control_change), so never treated
+        # as volume here, not even in auto mode, and never logged.
+        self._ignore_ccs = frozenset(cc for cc in ignore_ccs if cc)
+        # Raw hook: every Control Change as (cc, value), and nothing else
+        # done with it — no volume/sustain handling, no logging. What
+        # backend.py's always-open knob listener uses.
+        self._on_control_change = on_control_change
         self._lock = threading.Lock()
         self._closed = False
         # Every distinct CC number seen so far, logged once each (never
@@ -270,11 +270,10 @@ class MidiInput:
                 self._on_note_off(message[1])
         elif status == _CONTROL_CHANGE and len(message) >= 3:
             cc, value = message[1], message[2]
-            if self._voice_cc and cc == self._voice_cc:
-                down = value >= 64
-                if down and not self._voice_key_down and self._on_voice_key is not None:
-                    self._on_voice_key()
-                self._voice_key_down = down
+            if self._on_control_change is not None:
+                self._on_control_change(cc, value)
+                return
+            if cc in self._ignore_ccs:
                 return
             # Sustain and Expression are always their own thing,
             # regardless of volume_cc (see module docstring on why

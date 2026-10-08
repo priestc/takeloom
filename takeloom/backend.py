@@ -1592,6 +1592,38 @@ def _compressed_playback_path(path: Path, settings: CompressorSettings) -> Path:
     return out_path
 
 
+def _pitched_playback_path(path: Path, cents: float) -> Path:
+    """_compressed_playback_path's counterpart for a backing track's saved
+    pitch correction (vault.py's load_backing_tuning): a scratch copy
+    shifted by `cents` the same way a session plays it live (audio/
+    pitch_shift.py's render), or `path` itself when there's none."""
+    if not cents:
+        return path
+    work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_playback")
+    out_path = work_dir / f"{path.stem}.pitch{cents:+.2f}.flac"
+    key = (_file_signature(path), round(cents, 2))
+    if _playback_cache_hit(out_path, key):
+        return out_path
+    from .audio.formats import read_audio, write_flac
+    from .audio.pitch_shift import render
+    data, sr = read_audio(path)
+    if data.ndim == 1:
+        data = data[:, None]
+    write_flac(out_path, render(data, sr, cents), sr)
+    _playback_cache[out_path] = key
+    return out_path
+
+
+def knob_to_cents(value: int) -> float:
+    """A 0-127 knob position to a backing-track pitch correction: the full
+    travel spans -MAX_PITCH_CENTS..+MAX_PITCH_CENTS (one semitone end to
+    end), centre (64) exactly 0, with a ±1-cent dead zone so a knob left
+    "at the middle" really is untouched."""
+    from .audio.pitch_shift import MAX_PITCH_CENTS
+    cents = max(-MAX_PITCH_CENTS, min(MAX_PITCH_CENTS, (value - 64) / 63.0 * MAX_PITCH_CENTS))
+    return 0.0 if abs(cents) < 1.0 else cents
+
+
 class LocalBackend(Backend):
     """Direct local implementation — talks to this machine's config, disk,
     and audio/video hardware. Historical RecordFrame behavior, unchanged."""
@@ -1622,6 +1654,16 @@ class LocalBackend(Backend):
         # something's been identified, whatever's about to be played should
         # be heard, not whatever happened to be used last time.
         self._monitor_all_inputs = True
+        # The keyboard-knob listener (_ensure_control_listener): one
+        # knob-only MidiInput per plugged-in keyboard that has a Voice CC
+        # or Pitch CC, keyed by lowercased midi_device, plus the config
+        # snapshot its rtmidi-thread handler reads (refreshed every poll).
+        self._control_thread: threading.Thread | None = None
+        self._control_inputs: dict = {}
+        self._control_config: StudioConfig | None = None
+        self._voice_knob_zone: dict[str, int] = {}
+        self._tuning_save_timer: threading.Timer | None = None
+        self._last_emitted_pitch: int | None = None
         # Set by set_audio_hardware_present(False) — the always-running
         # server's hardware watcher (rig_watcher.py) saw the audio interface
         # get powered off. Keeps _start_monitoring_locked() — which every
@@ -2492,7 +2534,10 @@ class LocalBackend(Backend):
         return str(local_path)
 
     def get_backing_playback_path(self, take_filename: str) -> str:
-        return self.ensure_backing_track_local(take_filename)
+        path = Path(self.ensure_backing_track_local(take_filename))
+        from .vault import load_backing_tuning
+        cents = load_backing_tuning(Path(self.get_config().session_vault_path), path.name)
+        return str(_pitched_playback_path(path, cents))
 
     def get_take_playback_path(self, project_name: str, filename: str, label: str) -> str:
         path = Path(self.ensure_take_local(project_name, filename))
@@ -2932,22 +2977,129 @@ class LocalBackend(Backend):
         index = SYNTH_VOICES.index(voice) if voice in SYNTH_VOICES else -1
         return SYNTH_VOICES[(index + 1) % len(SYNTH_VOICES)]
 
-    def _on_keyboard_voice_key(self, instrument_name: str) -> None:
-        """A keyboard's own "switch voice" button (config.Instrument.
-        voice_cc) was pressed. Called from rtmidi's callback thread, so
-        the actual work — which takes self._record_lock, and may race a
-        teardown that's closing this very MidiInput — runs on a thread
-        of its own instead."""
-        def work() -> None:
-            from .audio.synth import DEFAULT_SYNTH_VOICE
-            inst = self.get_config().get_instrument(instrument_name)
-            if inst is None or not inst.is_midi:
-                return
+    # --- keyboard control knobs (voice / backing pitch) ---
+
+    def _ensure_control_listener(self) -> None:
+        """Start (once) the background thread that keeps a knob-only
+        MidiInput open on every plugged-in keyboard with a Voice CC or
+        Pitch CC configured — independent of whatever engine is open, so
+        e.g. the QX25's K2 can tune the backing track during a guitar
+        session, not only while the QX25 itself is being played. Only
+        started by things that mean this backend really is driving the
+        studio's hardware (start_monitoring/set_audio_hardware_present),
+        so a Tk UI that's only a Remote client never listens."""
+        if self._control_thread is not None:
+            return
+        self._control_thread = threading.Thread(target=self._run_control_listener, daemon=True, name="midi-knobs")
+        self._control_thread.start()
+
+    def _run_control_listener(self) -> None:
+        """Every 2s: (re)subscribe to each wanted keyboard that's plugged in
+        and drop any that went away or no longer have a knob configured —
+        so a keyboard plugged in mid-session, or a Studio Setup change,
+        is picked up without a restart."""
+        from .audio.midi_input import MidiInput, MidiUnavailableError, list_midi_devices, match_port
+        while True:
             try:
-                self.set_synth_voice(inst.full_name, self._next_synth_voice(inst.synth_voice or DEFAULT_SYNTH_VOICE))
-            except BackendError:
-                pass
-        threading.Thread(target=work, daemon=True).start()
+                config = self.get_config()
+                self._control_config = config
+                wanted = {
+                    inst.midi_device.lower(): inst for inst in config.instruments
+                    if inst.is_midi and (inst.voice_cc or inst.backing_pitch_cc)
+                }
+                ports = list_midi_devices()
+                for device, midi_in in list(self._control_inputs.items()):
+                    inst = wanted.get(device)
+                    if inst is None or match_port(inst.midi_device, ports) is None:
+                        midi_in.close()
+                        del self._control_inputs[device]
+                        self._voice_knob_zone.pop(device, None)
+                for device, inst in wanted.items():
+                    if device in self._control_inputs or match_port(inst.midi_device, ports) is None:
+                        continue
+                    try:
+                        self._control_inputs[device] = MidiInput(
+                            inst.midi_device,
+                            on_control_change=lambda cc, value, device=device: self._on_control_change(
+                                device, cc, value,
+                            ),
+                        )
+                    except MidiUnavailableError:
+                        pass
+            except Exception as e:  # never let the listener die
+                print(f"takeloom: MIDI knob listener error: {e}")
+            time.sleep(2.0)
+
+    def _on_control_change(self, device: str, cc: int, value: int) -> None:
+        """A knob-listener CC (see _run_control_listener). Runs on rtmidi's
+        callback thread, so only cheap, non-blocking work happens here;
+        anything that takes self._record_lock or writes config goes to a
+        thread of its own."""
+        config = self._control_config
+        if config is None:
+            return
+        inst = next((i for i in config.instruments if i.is_midi and i.midi_device.lower() == device), None)
+        if inst is None:
+            return
+        if inst.backing_pitch_cc and cc == inst.backing_pitch_cc:
+            self.set_backing_pitch(knob_to_cents(value))
+        elif inst.voice_cc and cc == inst.voice_cc:
+            from .audio.synth import SYNTH_VOICES
+            # The knob's travel split evenly across the voices (left half
+            # piano, right half organ) — a position, not a press, so it
+            # only acts when the knob actually crosses into another zone.
+            zone = min(len(SYNTH_VOICES) - 1, value * len(SYNTH_VOICES) // 128)
+            if self._voice_knob_zone.get(device) == zone:
+                return
+            self._voice_knob_zone[device] = zone
+            voice = SYNTH_VOICES[zone]
+            name = inst.full_name
+
+            def apply() -> None:
+                fresh = self.get_config().get_instrument(name)
+                if fresh is not None and fresh.synth_voice != voice:
+                    try:
+                        self.set_synth_voice(name, voice)
+                    except BackendError:
+                        pass
+            threading.Thread(target=apply, daemon=True).start()
+
+    def set_backing_pitch(self, cents: float) -> bool:
+        """Shift the backing track of the session's currently loaded song by
+        `cents` (clamped to ±MAX_PITCH_CENTS), live — see audio/pitch_
+        shift.py — and remember it for that backing track file (vault.py's
+        save_backing_tuning, written half a second after the knob stops
+        moving rather than on every message). Returns False, doing
+        nothing, if no session has a song loaded — there's no backing
+        playing to tune. Safe to call from rtmidi's callback thread: only
+        attribute reads and live-safe Mixer calls happen inline."""
+        from .audio.pitch_shift import MAX_PITCH_CENTS
+        session = self._active_session
+        track = session.current_track if session is not None else None
+        if track is None or not track.backing_track:
+            return False
+        cents = max(-MAX_PITCH_CENTS, min(MAX_PITCH_CENTS, float(cents)))
+        session.engine.mixer.set_pitch("backing", cents)
+        backing_track = track.backing_track
+        config = self._control_config or self.get_config()
+        root = Path(config.session_vault_path)
+
+        def save() -> None:
+            from .vault import save_backing_tuning
+            try:
+                save_backing_tuning(root, backing_track, cents)
+            except OSError as e:
+                print(f"takeloom: couldn't save backing tuning for '{backing_track}': {e}")
+        if self._tuning_save_timer is not None:
+            self._tuning_save_timer.cancel()
+        self._tuning_save_timer = threading.Timer(0.5, save)
+        self._tuning_save_timer.daemon = True
+        self._tuning_save_timer.start()
+        shown = round(cents)
+        if shown != self._last_emitted_pitch:
+            self._last_emitted_pitch = shown
+            self._emit("backing_pitch_changed", {"cents": shown, "track_name": track.name})
+        return True
 
     def benchmark_audio_modifiers(self) -> dict:
         from .audio.benchmark import run_audio_modifier_benchmark
@@ -3194,8 +3346,7 @@ class LocalBackend(Backend):
                     inst.midi_device, on_note_on=on_note_on, on_note_off=on_note_off,
                     on_sustain=on_sustain, on_volume=on_volume,
                     on_expression=on_expression, volume_cc=inst.volume_cc,
-                    on_voice_key=lambda name=inst.full_name: self._on_keyboard_voice_key(name),
-                    voice_cc=inst.voice_cc,
+                    ignore_ccs=(inst.voice_cc, inst.backing_pitch_cc),
                 )
             except MidiUnavailableError as e:
                 raise BackendError(str(e)) from e
@@ -3257,8 +3408,7 @@ class LocalBackend(Backend):
                     inst.midi_device, on_note_on=synth.note_on, on_note_off=synth.note_off,
                     on_sustain=synth.set_sustain, on_volume=synth.set_channel_volume,
                     on_expression=synth.set_expression, volume_cc=inst.volume_cc,
-                    on_voice_key=lambda name=inst.full_name: self._on_keyboard_voice_key(name),
-                    voice_cc=inst.voice_cc,
+                    ignore_ccs=(inst.voice_cc, inst.backing_pitch_cc),
                 )
             except Exception:
                 continue  # not plugged in right now — monitor everything else
@@ -3316,6 +3466,7 @@ class LocalBackend(Backend):
         start_latency_test(), which each call _close_active_monitor() first
         to take the hardware for themselves. Returns whether a monitor
         stream actually opened."""
+        self._ensure_control_listener()
         with self._record_lock:
             return self._start_monitoring_locked()
 
@@ -3398,6 +3549,7 @@ class LocalBackend(Backend):
         hardware direct monitor (see _apply_hardware_direct_monitor). The
         re-init is skipped if any stream is somehow still open, since
         terminating PortAudio under an open stream isn't safe."""
+        self._ensure_control_listener()
         if not present:
             self._audio_hardware_absent = True
             self.stop_auto_detect_instrument()
@@ -3549,6 +3701,13 @@ class LocalBackend(Backend):
                 "backing", backing_path, volume=track.volume / 100.0,
                 trim_frames=song_trim_start, trim_end_frames=song_trim_end,
             )
+            # This recording's own pitch correction, if it's ever been
+            # tuned (set_backing_pitch) — so it loads already in tune.
+            from .vault import load_backing_tuning
+            engine.mixer.set_pitch(
+                "backing", load_backing_tuning(Path(config.session_vault_path), track.backing_track),
+            )
+            self._last_emitted_pitch = None
 
         # For an inspiration-sourced track, an *other* project could have
         # recorded a take on this exact song too — merged in from the
@@ -4882,6 +5041,10 @@ class LocalBackend(Backend):
                 engine.mixer.add_source(
                     "backing", backing_path, volume=self._backing_volume / 100.0,
                     trim_frames=song_trim_start, trim_end_frames=song_trim_end,
+                )
+                from .vault import load_backing_tuning
+                engine.mixer.set_pitch(
+                    "backing", load_backing_tuning(Path(config.session_vault_path), track.backing_track),
                 )
 
             trim = int(config.latency_compensation_ms / 1000.0 * config.sample_rate)
