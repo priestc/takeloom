@@ -3,8 +3,9 @@ Control names are the labels printed on the keyboard."""
 
 from . import ROLE_BACKING_PITCH, ROLE_VOICE, ROLE_VOLUME, Control, KeyboardDriver
 
-# CC numbers confirmed on the hardware, MIDI channel 1: K1-K8 send CC 14-21
-# in order, and S1 sends CC 22.
+# Confirmed on the hardware, everything on MIDI channel 1: K1-K8 send CC
+# 14-21 in order, S1 sends CC 22, P1-P4 send notes 48-51, Mod sends CC 1,
+# Pitch sends pitch bend.
 DRIVER = KeyboardDriver(
     name="Alesis QX25",
     port_names=("QX25",),
@@ -20,12 +21,12 @@ DRIVER = KeyboardDriver(
         Control("K7", "knob", cc=20),
         Control("K8", "knob", cc=21),
         Control("S1", "slider", cc=22, role=ROLE_VOLUME),
-        Control("P1", "pad", notes="Message not measured yet. Not used."),
-        Control("P2", "pad", notes="Message not measured yet. Not used."),
-        Control("P3", "pad", notes="Message not measured yet. Not used."),
-        Control("P4", "pad", notes="Message not measured yet. Not used."),
-        Control("Pitch", "wheel", notes="Pitch Bend messages, not a CC. Not used."),
-        Control("Mod", "wheel", cc=1, notes="Standard modulation CC; never treated as volume. Not used."),
+        Control("P1", "pad", notes="Note 48 (C3), velocity-sensitive — the same notes as keys, so it plays the synth."),
+        Control("P2", "pad", notes="Note 49 (C#3), velocity-sensitive — the same notes as keys, so it plays the synth."),
+        Control("P3", "pad", notes="Note 50 (D3), velocity-sensitive — the same notes as keys, so it plays the synth."),
+        Control("P4", "pad", notes="Note 51 (D#3), velocity-sensitive — the same notes as keys, so it plays the synth."),
+        Control("Pitch", "wheel", notes="Pitch Bend messages (confirmed), not a CC. Not used."),
+        Control("Mod", "wheel", cc=1, notes="CC 1 (confirmed); never treated as volume. Not used."),
         Control("Sustain", "pedal", cc=64, notes="Pedal input — always handled (audio/midi_input.py)."),
     ),
 )
