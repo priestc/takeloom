@@ -66,6 +66,39 @@ _EXPRESSION_CC = 11   # "Expression" — always its own thing, a real MIDI/GM st
 _MODULATION_CC = 1
 
 
+class _SharedPort:
+    """One rtmidi port per MIDI device for the whole process, opened the
+    first time any MidiInput wants that device and then never closed —
+    every MidiInput on that device is just a subscriber to it.
+
+    Why never closed: rtmidi's close_port() holds the GIL while CoreMIDI's
+    MIDIPortDispose waits for any in-flight MIDI callback to return, and
+    that callback can't return without the GIL — so closing a port while a
+    message is arriving deadlocks the entire process (confirmed live:
+    auto-detect tearing its scan down as the detecting note was played
+    froze `takeloom server`, Ctrl+C included; closing from another thread
+    deadlocked the same way). Detection is *triggered* by playing, so that
+    overlap is the normal case, not a rare one. Unsubscribing is a plain
+    Python tuple swap instead, with no CoreMIDI call at all."""
+
+    def __init__(self, midi_in) -> None:
+        self.midi_in = midi_in
+        # Replaced wholesale, never mutated, so dispatch() can iterate it
+        # from rtmidi's thread without a lock.
+        self.subscribers: tuple = ()
+
+    def dispatch(self, event: tuple, _data: object = None) -> None:
+        for subscriber in self.subscribers:
+            try:
+                subscriber._on_message(event)
+            except Exception as e:  # one bad handler mustn't starve the others
+                print(f"takeloom: MIDI handler for '{subscriber.device_name}' failed: {e}")
+
+
+_shared_ports: dict[str, _SharedPort] = {}  # keyed by resolved port name
+_shared_ports_lock = threading.Lock()
+
+
 class MidiUnavailableError(Exception):
     """Raised when python-rtmidi isn't installed, or the named MIDI
     input device can't be opened right now (unplugged, claimed by
@@ -181,9 +214,8 @@ class MidiInput:
         # doesn't flood the console.
         self._logged_unknown_ccs: set[int] = set()
 
-        self._midi_in = rtmidi.MidiIn()
         try:
-            ports = _get_ports(self._midi_in)
+            ports = _get_ports(rtmidi.MidiIn())
         except Exception as e:
             raise MidiUnavailableError(f"Could not list MIDI devices: {e}") from e
         index = match_port(device_name, ports)
@@ -192,15 +224,24 @@ class MidiInput:
                 f"MIDI device '{device_name}' not found. "
                 f"Available: {', '.join(ports) if ports else '(none)'}"
             )
-        try:
-            self._midi_in.open_port(index)
-        except Exception as e:
-            raise MidiUnavailableError(f"Could not open MIDI device '{device_name}': {e}") from e
-        # Sysex/timing-clock/active-sensing messages are irrelevant here
-        # and, for timing clock especially, frequent enough to be worth
-        # not even delivering to _on_message.
-        self._midi_in.ignore_types(sysex=True, timing=True, active_sense=True)
-        self._midi_in.set_callback(self._on_message)
+        port_name = ports[index]
+        with _shared_ports_lock:
+            shared = _shared_ports.get(port_name)
+            if shared is None:
+                midi_in = rtmidi.MidiIn()
+                try:
+                    midi_in.open_port(index)
+                except Exception as e:
+                    raise MidiUnavailableError(f"Could not open MIDI device '{device_name}': {e}") from e
+                # Sysex/timing-clock/active-sensing messages are irrelevant
+                # here and, for timing clock especially, frequent enough to
+                # be worth not even delivering to _on_message.
+                midi_in.ignore_types(sysex=True, timing=True, active_sense=True)
+                shared = _SharedPort(midi_in)
+                midi_in.set_callback(shared.dispatch)
+                _shared_ports[port_name] = shared
+            self._shared = shared
+            shared.subscribers = shared.subscribers + (self,)
 
     def start(self) -> None:
         """No-op beyond construction — rtmidi's callback is already live
@@ -272,15 +313,13 @@ class MidiInput:
         self.close()
 
     def close(self) -> None:
+        """Stop delivering this device's messages to this MidiInput's
+        callbacks. Safe from any thread, including from inside one of
+        those callbacks — the underlying port stays open (see
+        _SharedPort for why it's never closed), so this never blocks."""
         with self._lock:
             if self._closed:
                 return
             self._closed = True
-        try:
-            self._midi_in.cancel_callback()
-        except Exception:
-            pass
-        try:
-            self._midi_in.close_port()
-        except Exception:
-            pass
+        with _shared_ports_lock:
+            self._shared.subscribers = tuple(s for s in self._shared.subscribers if s is not self)

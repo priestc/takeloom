@@ -4589,7 +4589,15 @@ class LocalBackend(Backend):
 
             def _on_note_on(_note: int, _velocity: int, inst=inst, label=label) -> None:
                 if on_channel_detected is not None:
-                    on_channel_detected(inst.full_name, 1.0)
+                    # Off rtmidi's callback thread: auto-detect's handler
+                    # tears every scan stream down (this MidiInput too) and
+                    # opens a new engine — slow, and closing a MIDI port
+                    # from that thread deadlocks (see MidiInput.close).
+                    # Same "fires from a background thread" contract the
+                    # analog classifiers' detections already have.
+                    threading.Thread(
+                        target=on_channel_detected, args=(inst.full_name, 1.0), daemon=True,
+                    ).start()
                 if on_channel_active is not None:
                     on_channel_active(label, True)
                     old = release_timer[0]
