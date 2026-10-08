@@ -1,4 +1,4 @@
-"""Alesis QX25 — 25 keys; knobs K1-K8, S1, P1-P4, Pitch and Mod wheels.
+"""Alesis QX25 — 25 keys; knobs K1-K8, slider S1, P1-P4, Pitch and Mod wheels.
 Control names are the labels printed on the keyboard."""
 
 from . import ROLE_BACKING_PITCH, ROLE_VOICE, ROLE_VOLUME, Control, KeyboardDriver
@@ -19,7 +19,7 @@ DRIVER = KeyboardDriver(
         Control("K6", "knob", cc=19),
         Control("K7", "knob", cc=20),
         Control("K8", "knob", cc=21),
-        Control("S1", "knob", cc=22, role=ROLE_VOLUME),
+        Control("S1", "slider", cc=22, role=ROLE_VOLUME),
         Control("P1", "pad", notes="Message not measured yet. Not used."),
         Control("P2", "pad", notes="Message not measured yet. Not used."),
         Control("P3", "pad", notes="Message not measured yet. Not used."),
