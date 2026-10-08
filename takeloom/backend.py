@@ -836,6 +836,27 @@ class Backend(ABC):
         ...
 
     @abstractmethod
+    def get_voice_switch(self) -> dict | None:
+        """The MIDI keyboard the Stream Deck's pre-session "Voice" key
+        would act on right now — {"instrument": full_name, "voice":
+        current synth voice} — or None if the key shouldn't be shown: no
+        session open, the keyboard is connected, and it has no "switch
+        voice" button of its own (config.Instrument.voice_cc == 0). Once
+        auto-detect has identified an instrument, only that one counts —
+        an identified guitar hides the key even with a keyboard plugged
+        in."""
+        ...
+
+    @abstractmethod
+    def cycle_synth_voice(self) -> dict | None:
+        """Advance get_voice_switch()'s keyboard to the next of audio.
+        synth.SYNTH_VOICES (wrapping around), exactly as set_synth_voice
+        would. Returns the updated get_voice_switch() dict, or None if
+        there's nothing to cycle. Raises BackendError mid-session — the
+        Stream Deck key is only for picking a voice before starting."""
+        ...
+
+    @abstractmethod
     def benchmark_audio_modifiers(self) -> dict:
         """Run audio.benchmark.run_audio_modifier_benchmark() against
         this machine's own current config (sample_rate/buffer_size, and
@@ -1460,6 +1481,9 @@ class _ActiveMonitor:
     midi_input: object | None = None
     all_inputs: bool = False
     midi_inputs: list = field(default_factory=list)
+    # The all-inputs monitor's Synth per keyboard, keyed by lowercased
+    # midi_device — so set_synth_voice can reach the right one live.
+    synths_by_device: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -2846,6 +2870,66 @@ class LocalBackend(Backend):
                 and engine.synth is not None
             ):
                 engine.synth.set_voice(voice)
+            monitor = self._active_monitor
+            if monitor is not None and monitor.all_inputs:
+                synth = monitor.synths_by_device.get(inst.midi_device.lower())
+                if synth is not None:
+                    synth.set_voice(voice)
+        self._emit("synth_voice_changed", {"instrument": inst.full_name, "voice": voice})
+
+    def get_voice_switch(self) -> dict | None:
+        from .audio.midi_input import list_midi_devices, match_port
+        from .audio.synth import DEFAULT_SYNTH_VOICE
+        with self._record_lock:
+            if self._active_session is not None:
+                return None
+            config = self.get_config()
+            if self._monitor_all_inputs:
+                candidates = [inst for inst in config.instruments if inst.is_midi]
+            else:
+                inst = config.get_instrument(config.last_selected_instrument)
+                candidates = [inst] if inst is not None and inst.is_midi else []
+        candidates = [inst for inst in candidates if not inst.voice_cc]
+        if not candidates:
+            return None
+        ports = list_midi_devices()
+        for inst in candidates:
+            if match_port(inst.midi_device, ports) is not None:
+                return {"instrument": inst.full_name, "voice": inst.synth_voice or DEFAULT_SYNTH_VOICE}
+        return None
+
+    def cycle_synth_voice(self) -> dict | None:
+        if self.is_session_active():
+            raise BackendError("The voice can only be changed from the Stream Deck before a session starts.")
+        target = self.get_voice_switch()
+        if target is None:
+            return None
+        voice = self._next_synth_voice(target["voice"])
+        self.set_synth_voice(target["instrument"], voice)
+        return {"instrument": target["instrument"], "voice": voice}
+
+    @staticmethod
+    def _next_synth_voice(voice: str) -> str:
+        from .audio.synth import SYNTH_VOICES
+        index = SYNTH_VOICES.index(voice) if voice in SYNTH_VOICES else -1
+        return SYNTH_VOICES[(index + 1) % len(SYNTH_VOICES)]
+
+    def _on_keyboard_voice_key(self, instrument_name: str) -> None:
+        """A keyboard's own "switch voice" button (config.Instrument.
+        voice_cc) was pressed. Called from rtmidi's callback thread, so
+        the actual work — which takes self._record_lock, and may race a
+        teardown that's closing this very MidiInput — runs on a thread
+        of its own instead."""
+        def work() -> None:
+            from .audio.synth import DEFAULT_SYNTH_VOICE
+            inst = self.get_config().get_instrument(instrument_name)
+            if inst is None or not inst.is_midi:
+                return
+            try:
+                self.set_synth_voice(inst.full_name, self._next_synth_voice(inst.synth_voice or DEFAULT_SYNTH_VOICE))
+            except BackendError:
+                pass
+        threading.Thread(target=work, daemon=True).start()
 
     def benchmark_audio_modifiers(self) -> dict:
         from .audio.benchmark import run_audio_modifier_benchmark
@@ -3092,6 +3176,8 @@ class LocalBackend(Backend):
                     inst.midi_device, on_note_on=on_note_on, on_note_off=on_note_off,
                     on_sustain=on_sustain, on_volume=on_volume,
                     on_expression=on_expression, volume_cc=inst.volume_cc,
+                    on_voice_key=lambda name=inst.full_name: self._on_keyboard_voice_key(name),
+                    voice_cc=inst.voice_cc,
                 )
             except MidiUnavailableError as e:
                 raise BackendError(str(e)) from e
@@ -3099,14 +3185,15 @@ class LocalBackend(Backend):
 
         return engine, midi_input, input_info
 
-    def _build_all_inputs_engine(self, config: StudioConfig) -> tuple[object, list]:
+    def _build_all_inputs_engine(self, config: StudioConfig) -> tuple[object, list, dict]:
         """Build (but don't start) the all-inputs monitor engine: every
         configured input channel on one device (the first input label's
         that resolves — channels on any other device are left out, since
         one duplex stream can only read one input device) summed together,
         plus a Synth for every MIDI keyboard that's connected right now,
         each fed by its own already-open MidiInput. Returns (engine,
-        midi_inputs); the caller owns closing midi_inputs.
+        midi_inputs, synths_by_device); the caller owns closing
+        midi_inputs.
 
         Nothing here is recorded or classified — it only exists so every
         input is audible until auto-detect picks one (see
@@ -3139,6 +3226,7 @@ class LocalBackend(Backend):
                 channels.append(il.channel - 1)
 
         synths = []
+        synths_by_device: dict = {}
         midi_inputs = []
         seen_devices: set[str] = set()
         for inst in config.instruments:
@@ -3151,10 +3239,13 @@ class LocalBackend(Backend):
                     inst.midi_device, on_note_on=synth.note_on, on_note_off=synth.note_off,
                     on_sustain=synth.set_sustain, on_volume=synth.set_channel_volume,
                     on_expression=synth.set_expression, volume_cc=inst.volume_cc,
+                    on_voice_key=lambda name=inst.full_name: self._on_keyboard_voice_key(name),
+                    voice_cc=inst.voice_cc,
                 )
             except Exception:
                 continue  # not plugged in right now — monitor everything else
             synths.append(synth)
+            synths_by_device[inst.midi_device.lower()] = synth
             midi_inputs.append(midi_in)
 
         if not channels and not synths:
@@ -3176,7 +3267,7 @@ class LocalBackend(Backend):
             for m in midi_inputs:
                 m.close()
             raise
-        return engine, midi_inputs
+        return engine, midi_inputs, synths_by_device
 
     def monitoring_description(self) -> str:
         """What ambient monitoring is listening to right now, for the
@@ -3229,7 +3320,7 @@ class LocalBackend(Backend):
         if self._monitor_all_inputs:
             midi_inputs: list = []
             try:
-                engine, midi_inputs = self._build_all_inputs_engine(config)
+                engine, midi_inputs, synths_by_device = self._build_all_inputs_engine(config)
                 engine.start()
             except Exception:
                 for m in midi_inputs:
@@ -3238,6 +3329,7 @@ class LocalBackend(Backend):
             self._apply_hardware_direct_monitor_all(config, self._monitoring_mode == "recording")
             self._active_monitor = _ActiveMonitor(
                 engine=engine, inst=None, all_inputs=True, midi_inputs=midi_inputs,
+                synths_by_device=synths_by_device,
             )
             return True
         inst = config.get_instrument(config.last_selected_instrument)

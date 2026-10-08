@@ -166,6 +166,10 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
     if op == "set_synth_voice":
         backend.set_synth_voice(args["instrument_name"], args["voice"])
         return {}
+    if op == "get_voice_switch":
+        return {"target": backend.get_voice_switch()}
+    if op == "cycle_synth_voice":
+        return {"target": backend.cycle_synth_voice()}
     if op == "benchmark_audio_modifiers":
         return backend.benchmark_audio_modifiers()
     if op == "get_monitoring_mode":

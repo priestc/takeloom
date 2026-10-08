@@ -143,6 +143,14 @@ class Instrument:
     # Once set to a specific number, *only* that exact CC drives this
     # instrument's volume; every other CC is left alone.
     volume_cc: int = 0
+    # Which MIDI Control Change number this keyboard's own "switch voice"
+    # button sends, if it has one — pressing it cycles synth_voice through
+    # MIDI_SYNTH_VOICES (see audio/midi_input.py's on_voice_key and
+    # backend.py's cycle_synth_voice). 0 means the keyboard has no such
+    # button (e.g. an M-Audio Keystation 61es), in which case the Stream
+    # Deck shows its own "Voice" key before a session starts instead.
+    # Edited in Studio Setup's "Voice CC" column, same as volume_cc.
+    voice_cc: int = 0
 
     @property
     def is_midi(self) -> bool:
@@ -315,6 +323,23 @@ class StudioConfig:
                     f"Instrument '{inst.full_name or '(unnamed)'}' has Volume CC set to "
                     f"{inst.volume_cc}, which is reserved for the {reserved_for} and never treated "
                     f"as volume — pick a different CC number (0 for auto-detect)."
+                )
+            if not (0 <= inst.voice_cc <= 127):
+                errors.append(
+                    f"Instrument '{inst.full_name or '(unnamed)'}' has an invalid Voice CC "
+                    f"({inst.voice_cc} — MIDI Control Change numbers run 0-127; use 0 for none)."
+                )
+            elif inst.voice_cc in (1, 11, 64):
+                reserved_for = {1: "modulation wheel", 11: "expression", 64: "sustain pedal"}[inst.voice_cc]
+                errors.append(
+                    f"Instrument '{inst.full_name or '(unnamed)'}' has Voice CC set to "
+                    f"{inst.voice_cc}, which is reserved for the {reserved_for} — pick a different "
+                    f"CC number (0 for none)."
+                )
+            elif inst.voice_cc and inst.voice_cc == inst.volume_cc:
+                errors.append(
+                    f"Instrument '{inst.full_name or '(unnamed)'}' uses CC {inst.voice_cc} for both "
+                    f"volume and voice switching — they need to be different controls."
                 )
         return errors
 

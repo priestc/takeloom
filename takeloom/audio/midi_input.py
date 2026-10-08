@@ -48,6 +48,7 @@ through some intermediate queue/thread.
 from __future__ import annotations
 
 import threading
+import time
 from typing import Callable
 
 _NOTE_ON = 0x90
@@ -71,6 +72,37 @@ class MidiUnavailableError(Exception):
     another app, etc.). Message is safe to show to the user."""
 
 
+def _get_ports(midi_in) -> list[str]:
+    """midi_in.get_ports(), retried briefly: CoreMIDI drops a just-
+    unplugged port from its count before rtmidi asks for each port's
+    name, so a call landing in that instant raises InvalidPortError
+    (confirmed live, unplugging a Keystation) instead of returning the
+    list as it now is."""
+    for attempt in range(3):
+        try:
+            return midi_in.get_ports()
+        except Exception:
+            if attempt == 2:
+                raise
+            time.sleep(0.05)
+    return []
+
+
+def match_port(device_name: str, ports: list[str]) -> int | None:
+    """Index of `device_name` in `ports` — exact match first, then a
+    case-insensitive substring match, since some backends append a
+    changing numeric client id to a port's name between launches (e.g.
+    "Keystation Mini 32 (0)" one time, "...(1)" the next). Same
+    tolerance as audio.devices.resolve_device."""
+    for i, name in enumerate(ports):
+        if name == device_name:
+            return i
+    for i, name in enumerate(ports):
+        if device_name.lower() in name.lower():
+            return i
+    return None
+
+
 def list_midi_devices() -> list[str]:
     """Every currently visible MIDI input port name. Re-enumerated fresh
     on each call (a throwaway rtmidi.MidiIn is opened just to ask, then
@@ -86,7 +118,7 @@ def list_midi_devices() -> list[str]:
         return []
     try:
         midi_in = rtmidi.MidiIn()
-        ports = midi_in.get_ports()
+        ports = _get_ports(midi_in)
         del midi_in
         return ports
     except Exception:
@@ -111,6 +143,8 @@ class MidiInput:
         on_volume: Callable[[int], None] | None = None,
         on_expression: Callable[[int], None] | None = None,
         volume_cc: int = 0,
+        on_voice_key: Callable[[], None] | None = None,
+        voice_cc: int = 0,
     ) -> None:
         try:
             import rtmidi
@@ -127,6 +161,14 @@ class MidiInput:
         # 0 = auto-detect (see module docstring); otherwise only this
         # exact CC number is ever routed to on_volume.
         self._volume_cc = volume_cc
+        # 0 = this keyboard has no "switch voice" control configured (see
+        # config.Instrument.voice_cc). Otherwise pressing that CC (a value
+        # crossing up through 64, so a button's own release message
+        # doesn't count as a second press) calls on_voice_key — and that
+        # CC is never treated as volume, even in auto mode.
+        self._on_voice_key = on_voice_key
+        self._voice_cc = voice_cc
+        self._voice_key_down = False
         self._lock = threading.Lock()
         self._closed = False
         # Every distinct CC number seen so far, logged once each (never
@@ -140,22 +182,11 @@ class MidiInput:
         self._logged_unknown_ccs: set[int] = set()
 
         self._midi_in = rtmidi.MidiIn()
-        ports = self._midi_in.get_ports()
-        index = None
-        for i, name in enumerate(ports):
-            if name == device_name:
-                index = i
-                break
-        if index is None:
-            # Partial-match fallback, same tolerance as audio.devices.
-            # resolve_device — useful since some backends append a
-            # changing numeric client id to a port's name between
-            # launches (e.g. "Keystation Mini 32 (0)" one time, "...(1)"
-            # the next).
-            for i, name in enumerate(ports):
-                if device_name.lower() in name.lower():
-                    index = i
-                    break
+        try:
+            ports = _get_ports(self._midi_in)
+        except Exception as e:
+            raise MidiUnavailableError(f"Could not list MIDI devices: {e}") from e
+        index = match_port(device_name, ports)
         if index is None:
             raise MidiUnavailableError(
                 f"MIDI device '{device_name}' not found. "
@@ -198,6 +229,12 @@ class MidiInput:
                 self._on_note_off(message[1])
         elif status == _CONTROL_CHANGE and len(message) >= 3:
             cc, value = message[1], message[2]
+            if self._voice_cc and cc == self._voice_cc:
+                down = value >= 64
+                if down and not self._voice_key_down and self._on_voice_key is not None:
+                    self._on_voice_key()
+                self._voice_key_down = down
+                return
             # Sustain and Expression are always their own thing,
             # regardless of volume_cc (see module docstring on why
             # Expression never doubles as volume). Otherwise: pinned

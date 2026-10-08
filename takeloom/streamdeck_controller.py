@@ -197,6 +197,15 @@ _RECORDING_START_LOCAL: tuple = (0, "record", "Start Local", "r", None, (0, 200,
 _RECORDING_START_STREAMING: tuple = (1, "record", "Start Streaming", "s", None, (230, 0, 120), (230, 0, 120))
 _RECORDING_REIDENTIFY: tuple = (2, "refresh", "Re-identify", "i", None, (90, 90, 210), (90, 90, 210))
 _RECORDING_PLAY: tuple = (0, "play", "Play", "p", None, (0, 200, 0), (0, 200, 0))
+# Shown in all three idle-family layouts, but only while a connected MIDI
+# keyboard with no "switch voice" button of its own is what's about to be
+# played (Backend.get_voice_switch) — cycles its synth voice. Painted by
+# update_recording_page with the current voice as its label (see
+# voice_key_visual), and gone the moment a session opens: it's for picking
+# the sound before starting, not mid-take.
+RECORDING_VOICE_KEY_INDEX = 3
+_RECORDING_VOICE: tuple = (RECORDING_VOICE_KEY_INDEX, None, None, "v", None, None, None)
+VOICE_KEY_COLOR = (200, 120, 0)
 RECORDING_IDLE_BUTTONS: list[tuple] = [_RECORDING_START_LOCAL, _RECORDING_START_STREAMING]
 RECORDING_IDENTIFYING_BUTTONS: list[tuple] = [_RECORDING_REIDENTIFY]
 RECORDING_IDENTIFIED_BUTTONS: list[tuple] = [_RECORDING_PLAY, _RECORDING_REIDENTIFY]
@@ -463,6 +472,16 @@ def _draw_icon(draw: "ImageDraw.ImageDraw", icon: str, cx: int, cy: int, size: i
             [(hx, hy), (hx - head, hy - head // 2), (hx - head // 3, hy + head)], fill=f,
         )
 
+    elif icon == "keys":       # three white piano keys with two black keys between
+        kw = (2 * r) // 3
+        for i in range(3):
+            x0 = cx - r + i * kw
+            draw.rectangle([x0, cy - r, x0 + kw - 2, cy + r], fill=f)
+        bw = max(2, kw // 2)
+        for i in (1, 2):
+            bx = cx - r + i * kw - bw // 2 - 1
+            draw.rectangle([bx, cy - r, bx + bw, cy + r // 6], fill=(0, 0, 0))
+
     elif icon in ("takes_dn", "takes_up"):
         # Three stacked horizontal bars (like track lanes in a DAW)
         bh = max(2, size // 10)
@@ -518,6 +537,12 @@ def recording_toggle_visual(phase: str, video_check_phase: str) -> tuple[str, st
     return icon, label, color
 
 
+def voice_key_visual(voice: str) -> tuple[str, str, tuple]:
+    """(icon, label, color) for the pre-session Voice key — see
+    _RECORDING_VOICE."""
+    return "keys", f"Voice:\n{voice.title()}", VOICE_KEY_COLOR
+
+
 def monitor_toggle_visual(mode: str) -> tuple[str, str, tuple]:
     """(icon, label, color) for the monitor-mode toggle key — see
     update_monitoring_mode()."""
@@ -546,8 +571,9 @@ class StreamDeckController:
         # Tracks which button table is currently painted: "idle"
         # (RECORDING_IDLE_BUTTONS), "identifying" (RECORDING_IDENTIFYING_
         # BUTTONS), "ready" (RECORDING_IDENTIFIED_BUTTONS), or "active"
-        # (_active_recording_buttons()) — see update_recording_page.
-        self._layout_state = "idle"
+        # (_active_recording_buttons()) — see update_recording_page —
+        # paired with whether the Voice key (_RECORDING_VOICE) is part of it.
+        self._layout_state = ("idle", False)
         self._dial_map: dict[int, tuple[str, str, str]] = dict(_SESSION_DIAL_MAP)
         self._lock = threading.Lock()
         # (icon, label, color) last painted on each key — every real key
@@ -701,7 +727,7 @@ class StreamDeckController:
         deck are dropped rather than drawn out of range (e.g. the 6-key
         Mini)."""
         self._dial_map = dict(_SESSION_DIAL_MAP)
-        self._layout_state = "idle"
+        self._layout_state = ("idle", False)
         self._apply_layout(list(RECORDING_IDLE_BUTTONS), skip_indices=frozenset())
 
     def _active_recording_buttons(self) -> list[tuple]:
@@ -815,7 +841,7 @@ class StreamDeckController:
     def update_recording_page(
         self, phase: str, video_check_phase: str = "idle", track_name: str | None = None,
         instrument_text: str | None = None, identify_state: str = "idle",
-        tuner_note: str | None = None, tuner_cents: float = 0.0,
+        tuner_note: str | None = None, tuner_cents: float = 0.0, voice: str | None = None,
     ) -> None:
         """Refresh the session toggle and dim/light Next/Restart/volume for
         the current phase, swapping the whole button layout the moment
@@ -854,7 +880,10 @@ class StreamDeckController:
         only, no touchscreen of its own — by the Tk UI's emulator via the
         same recording_toggle_visual()/button_visual() helpers). The
         monitor-mode toggle key (index 3) is refreshed separately — see
-        update_monitoring_mode() — and only exists in the active layout."""
+        update_monitoring_mode() — and only exists in the active layout.
+        `voice`, while idle, is the synth voice the Voice key (see
+        _RECORDING_VOICE) shows — None hides that key; ignored once a
+        session is open."""
         if not self.connected:
             return
         if track_name != self._touchscreen_track_name:
@@ -876,22 +905,29 @@ class StreamDeckController:
             desired_state = "idle"
         else:
             desired_state = "active"
-        if desired_state != self._layout_state:
-            self._layout_state = desired_state
-            if desired_state == "idle":
-                self._apply_layout(list(RECORDING_IDLE_BUTTONS), skip_indices=frozenset())
-            elif desired_state == "identifying":
-                self._apply_layout(list(RECORDING_IDENTIFYING_BUTTONS), skip_indices=frozenset())
-            elif desired_state == "ready":
-                self._apply_layout(list(RECORDING_IDENTIFIED_BUTTONS), skip_indices=frozenset())
+        show_voice = is_idle and voice is not None
+        if (desired_state, show_voice) != self._layout_state:
+            self._layout_state = (desired_state, show_voice)
+            idle_family = {
+                "idle": RECORDING_IDLE_BUTTONS,
+                "identifying": RECORDING_IDENTIFYING_BUTTONS,
+                "ready": RECORDING_IDENTIFIED_BUTTONS,
+            }
+            if desired_state in idle_family:
+                buttons = list(idle_family[desired_state])
+                if show_voice:
+                    buttons.append(_RECORDING_VOICE)
+                self._apply_layout(buttons, skip_indices=frozenset())
             else:
                 self._apply_layout(
                     self._active_recording_buttons(),
                     skip_indices=frozenset({0, RECORDING_MONITOR_TOGGLE_KEY_INDEX}),
                 )
         if is_idle:
-            if self._has_dials:
-                with self._lock:
+            with self._lock:
+                if show_voice and any(btn[0] == RECORDING_VOICE_KEY_INDEX for btn in self._buttons):
+                    self._paint_key(RECORDING_VOICE_KEY_INDEX, *voice_key_visual(voice))
+                if self._has_dials:
                     self._update_touchscreen()
             return
         record_icon, record_label, record_color = recording_toggle_visual(phase, video_check_phase)

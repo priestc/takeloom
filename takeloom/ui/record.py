@@ -1650,6 +1650,11 @@ class RecordFrame(ttk.Frame):
                 # result) — it's subscribed to this same event independently,
                 # regardless of whether Video Check was triggered by mouse or
                 # by the physical Stream Deck.
+        elif event == "synth_voice_changed":
+            # The Stream Deck's Voice key or a keyboard's own voice button
+            # changed it — keep the "Sound" picker showing the truth.
+            if (data.get("instrument") or "").lower() == (self._detected_instrument or "").lower():
+                self.synth_voice_var.set(data.get("voice") or DEFAULT_SYNTH_VOICE)
         elif event == "monitoring_mode_changed":
             # Fired by Backend.set_monitoring_mode() from any client — this
             # frame's own emulator "m" key, a physical Stream Deck, or a

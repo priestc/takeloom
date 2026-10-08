@@ -117,6 +117,12 @@ class RecordingDeckDriver:
         self.tuner_note: str | None = None
         self.tuner_cents: float = 0.0
         self._tuner_smoother = TunerSmoother()
+        # The synth voice the pre-session Voice key shows (see
+        # streamdeck_controller.py's _RECORDING_VOICE) — Backend.get_voice_
+        # switch()'s answer, or None to hide the key. Re-asked whenever
+        # something that could change it happens, plus once a tick while
+        # idle (see _run_ticker) so plugging a keyboard in shows the key.
+        self.voice: str | None = None
         self._events_subscribed = False
 
         # Physical Stream Deck key presses are handled off the deck's own
@@ -148,7 +154,12 @@ class RecordingDeckDriver:
     def _run_ticker(self) -> None:
         while True:
             time.sleep(_TICKER_INTERVAL_SECONDS)
-            if self.phase not in ("waiting", "recording") or not self.streamdeck.connected:
+            if not self.streamdeck.connected:
+                continue
+            if self.phase == "idle":
+                self._refresh_voice()
+                continue
+            if self.phase not in ("waiting", "recording"):
                 continue
             try:
                 position, duration = self._backend.get_playback_position()
@@ -199,10 +210,7 @@ class RecordingDeckDriver:
         if not self.streamdeck.connect(key_callback or self._dispatch_key, device_id=device_id):
             return False
         self.streamdeck.use_recording_layout()
-        self.streamdeck.update_recording_page(
-            self.phase, self.video_check_phase, self.track_name, self.detected_instrument,
-            self.identify_state, self.tuner_note, self.tuner_cents,
-        )
+        self._update_page()
         self._refresh_monitoring_mode()
         return True
 
@@ -246,12 +254,29 @@ class RecordingDeckDriver:
         self.identify_state = "idle"
         self._pending_streaming = False
         self.tuner_note = None
+        self.voice = None
         self._subscribe_backend_events()
+        self._update_page()
+        self._refresh_monitoring_mode()
+
+    def _update_page(self) -> None:
         self.streamdeck.update_recording_page(
             self.phase, self.video_check_phase, self.track_name, self.detected_instrument,
             self.identify_state, self.tuner_note, self.tuner_cents,
+            voice=self.voice if self.phase == "idle" else None,
         )
-        self._refresh_monitoring_mode()
+
+    def _refresh_voice(self) -> None:
+        """Re-ask the backend what the Voice key should show, repainting
+        only if that actually changed."""
+        try:
+            target = self._backend.get_voice_switch() if self.phase == "idle" else None
+        except BackendError:
+            target = None
+        voice = target["voice"] if target else None
+        if voice != self.voice:
+            self.voice = voice
+            self._update_page()
 
     def _refresh_monitoring_mode(self) -> None:
         try:
@@ -297,6 +322,12 @@ class RecordingDeckDriver:
             elif key == "p":
                 if self.phase == "idle" and self.identify_state == "ready":
                     self._confirm_start()
+            elif key == "v":
+                if self.phase == "idle":
+                    target = self._backend.cycle_synth_voice()
+                    if target is not None:
+                        self._log(f"StreamDeck: {target['instrument']} voice set to {target['voice']}.")
+                    self._refresh_voice()
             elif key == "n":
                 # No local phase pre-check — see "b"/"d" below for why:
                 # Backend.next_track() already raises its own clear
@@ -369,10 +400,7 @@ class RecordingDeckDriver:
         self.detected_instrument = "Detecting…"
         self.tuner_note = None
         self._tuner_smoother.reset()
-        self.streamdeck.update_recording_page(
-            self.phase, self.video_check_phase, self.track_name, self.detected_instrument,
-            self.identify_state, self.tuner_note, self.tuner_cents,
-        )
+        self._update_page()
         self._backend.start_auto_detect_instrument()
 
     def _redo_identify(self) -> None:
@@ -384,10 +412,7 @@ class RecordingDeckDriver:
         self.detected_instrument = "Detecting…"
         self.tuner_note = None
         self._tuner_smoother.reset()
-        self.streamdeck.update_recording_page(
-            self.phase, self.video_check_phase, self.track_name, self.detected_instrument,
-            self.identify_state, self.tuner_note, self.tuner_cents,
-        )
+        self._update_page()
         # Fire-and-forget the stop (a no-op if detection already committed
         # — "ready" means it has — since a finished scan already tore
         # itself down) then start a fresh one.
@@ -469,10 +494,7 @@ class RecordingDeckDriver:
                     # identify cycle was still in flight).
                     self.identify_state = "idle"
                     self.tuner_note = None
-                self.streamdeck.update_recording_page(
-                    self.phase, self.video_check_phase, self.track_name, self.detected_instrument,
-                    self.identify_state, self.tuner_note, self.tuner_cents,
-                )
+                self._update_page()
                 # update_recording_page blanks every key the idle layout
                 # doesn't use whenever phase crosses the idle boundary —
                 # including the monitor toggle (idx 3), which only exists
@@ -494,12 +516,13 @@ class RecordingDeckDriver:
                 self._log(data["status"])
             if "phase" in data:
                 self.video_check_phase = data["phase"]
-                self.streamdeck.update_recording_page(
-                    self.phase, self.video_check_phase, self.track_name, self.detected_instrument,
-                    self.identify_state, self.tuner_note, self.tuner_cents,
-                )
+                self._update_page()
             if self.video_check_phase == "idle" and "result_path" in data and self._on_video_check_result:
                 self._on_video_check_result(Path(data["result_path"]), bool(data.get("has_video")))
+        elif event == "synth_voice_changed":
+            # From this deck's own Voice key, the Record page's "Sound"
+            # picker, or a keyboard's own voice button.
+            self._refresh_voice()
         elif event == "monitoring_mode_changed":
             # Fired by set_monitoring_mode() from any client (this deck's
             # own "m" key, the Tk UI's radio toggle, or a Remote client) —
@@ -539,10 +562,10 @@ class RecordingDeckDriver:
                     # glance at it and finish tuning.
             elif phase == "stopped":
                 self.detected_instrument = None
-            self.streamdeck.update_recording_page(
-                self.phase, self.video_check_phase, self.track_name, self.detected_instrument,
-                self.identify_state, self.tuner_note, self.tuner_cents,
-            )
+            self._update_page()
+            # Detection can show or hide the Voice key — an identified
+            # guitar hides it, an identified Keystation keeps it.
+            self._refresh_voice()
         elif event == "tuner_status":
             # Meaningful throughout the whole identify cycle, not just
             # "identifying" — once auto-detect commits, Backend keeps the
@@ -560,7 +583,4 @@ class RecordingDeckDriver:
             note = data.get("note")
             self.tuner_note = note
             self.tuner_cents = self._tuner_smoother.update(note, float(data.get("cents", 0.0)))
-            self.streamdeck.update_recording_page(
-                self.phase, self.video_check_phase, self.track_name, self.detected_instrument,
-                self.identify_state, self.tuner_note, self.tuner_cents,
-            )
+            self._update_page()
