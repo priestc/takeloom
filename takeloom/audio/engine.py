@@ -35,6 +35,8 @@ class AudioEngine:
         monitor_instrument: bool = True,
         instrument_volume: float = 1.0,
         synth: Synth | None = None,
+        monitor_channels: list[int] | None = None,
+        extra_synths: list[Synth] | None = None,
     ) -> None:
         self.sample_rate = sample_rate
         self.buffer_size = buffer_size
@@ -68,6 +70,15 @@ class AudioEngine:
         # captured signal, which is what makes a MIDI take end up on
         # disk/in the session the same way an analog one would.
         self.synth = synth
+        # The all-inputs ambient monitor (see backend.py's
+        # _build_all_inputs_engine), used before auto-detect has settled
+        # on one instrument: every channel listed here is summed into
+        # `mono` instead of just monitor_channel, and every extra synth
+        # (one per connected MIDI keyboard) is mixed in on top. Never set
+        # on an engine that records anything — a sum of every input isn't
+        # a take.
+        self.monitor_channels = monitor_channels
+        self.extra_synths = extra_synths or []
 
         self.recorder: Recorder | None = None
         self.session_recorder: Recorder | None = None
@@ -189,11 +200,22 @@ class AudioEngine:
         # MIDI-driven instrument, synthesize it fresh for this block
         # instead (indata's actual contents are never touched in that
         # case; see self.synth's docstring above).
+        synth_mono = None
         if self.synth is not None:
             mono = self.synth.render(frames)
+        elif self.monitor_channels is not None:
+            mono = np.zeros((frames, 1), dtype=np.float32)
+            for ch in self.monitor_channels:
+                if ch < indata.shape[1]:
+                    mono += indata[:, ch:ch+1]
         else:
             ch = self.monitor_channel
             mono = indata[:, ch:ch+1].copy()
+        if self.extra_synths:
+            synth_mono = np.zeros((frames, 1), dtype=np.float32)
+            for extra in self.extra_synths:
+                synth_mono += extra.render(frames)
+            mono = mono + synth_mono
 
         # Record RAW input to disk — never through the compressor. Only
         # what's actually monitored/played back (below) reflects it; a
@@ -240,8 +262,16 @@ class AudioEngine:
             full_mix = mix[:, :1] + monitor_mono
         np.clip(full_mix, -1.0, 1.0, out=full_mix)
 
-        if self.monitor_instrument:
+        # A synth has no hardware direct-monitor path, so "recording"
+        # monitoring mode (monitor_instrument False) would leave a MIDI
+        # keyboard silent — it's always kept in the live feed instead.
+        if self.monitor_instrument or self.synth is not None:
             outdata[:] = full_mix
+        elif synth_mono is not None:
+            heard = mix[:, :self.output_channels].copy()
+            heard += synth_mono * self.instrument_volume
+            np.clip(heard, -1.0, 1.0, out=heard)
+            outdata[:] = heard
         else:
             outdata[:] = mix[:, :self.output_channels]
 

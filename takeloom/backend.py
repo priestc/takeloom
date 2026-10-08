@@ -30,7 +30,7 @@ from typing import Callable
 
 from .audio.filters import CompressorSettings
 from .audio.pitch import effective_tuning, nearest_target
-from .audio.scarlett2_direct_monitor import FOCUSRITE_DEVICE_NAME, set_channel_gain
+from .audio.scarlett2_direct_monitor import FOCUSRITE_DEVICE_NAME, set_channel_gains
 from .config import DEFAULT_CONFIG_PATH, INSTRUMENT_LABELS, MAX_INSTRUMENT_VOLUME_PERCENT, Instrument, StudioConfig
 from .project import Project, Setlist, TakeInfo, TrackEntry
 from .utils import atomic_write_text, ensure_dir, timestamp_now, wall_timestamp
@@ -1449,10 +1449,17 @@ class _ActiveMonitor:
     backend starts, so Production/Recording monitoring mode (and the
     Instrument Volume dial) has something to act on before Record is ever
     pressed. Superseded (see _close_active_monitor()/start_recording()) the
-    moment anything else needs the audio hardware."""
+    moment anything else needs the audio hardware.
+
+    `all_inputs`: this is the all-inputs monitor instead (see Backend.
+    _build_all_inputs_engine) — every input channel plus every connected
+    MIDI keyboard at once, `inst` None, and `midi_inputs` holding one open
+    MidiInput per keyboard."""
     engine: object
-    inst: object
+    inst: object | None
     midi_input: object | None = None
+    all_inputs: bool = False
+    midi_inputs: list = field(default_factory=list)
 
 
 @dataclass
@@ -1564,6 +1571,15 @@ class LocalBackend(Backend):
         # starts each launch in "production" (hear the full produced mix).
         # Video Check ignores this entirely and always runs "recording".
         self._monitoring_mode: str = "production"
+        # Whether ambient monitoring (_start_monitoring_locked) opens every
+        # input at once — each analog channel plus each connected MIDI
+        # keyboard — rather than just config.last_selected_instrument. True
+        # from launch / the audio interface being powered on until auto-
+        # detect commits to an instrument (or a session is opened for one
+        # directly), and again whenever a new auto-detect scan starts: until
+        # something's been identified, whatever's about to be played should
+        # be heard, not whatever happened to be used last time.
+        self._monitor_all_inputs = True
         # Set by set_audio_hardware_present(False) — the always-running
         # server's hardware watcher (rig_watcher.py) saw the audio interface
         # get powered off. Keeps _start_monitoring_locked() — which every
@@ -2865,6 +2881,8 @@ class LocalBackend(Backend):
                 fresh_inst = config.get_instrument(inst.full_name) or inst
                 input_info = config.resolve_input(fresh_inst.input_label)
                 self._apply_hardware_direct_monitor(input_info, mode == "recording", fresh_inst.instrument_volume)
+            elif engine is not None and self._active_monitor is not None and self._active_monitor.all_inputs:
+                self._apply_hardware_direct_monitor_all(self.get_config(), mode == "recording")
             self._emit("monitoring_mode_changed", {"mode": mode})
 
     def _apply_hardware_direct_monitor(self, input_info, enabled: bool, instrument_volume_percent: int) -> None:
@@ -2882,13 +2900,47 @@ class LocalBackend(Backend):
         whichever instrument it's actually acting on) rather than a fixed
         unity gain, so the dial reaches "recording" monitoring mode too,
         where the instrument is heard purely through this hardware path
-        — see adjust_instrument_volume."""
-        if input_info is None or input_info.device != FOCUSRITE_DEVICE_NAME:
+        — see adjust_instrument_volume.
+
+        Every *other* configured input channel on the interface is muted
+        at the same time, so once one instrument is selected nothing left
+        over from the all-inputs monitor (see _apply_hardware_direct_
+        monitor_all) keeps passing through. `input_info` None (a MIDI
+        instrument, which has no channel of its own) mutes them all."""
+        config = self.get_config()
+        volumes = {
+            il.channel: 0.0 for il in config.input_labels if il.device == FOCUSRITE_DEVICE_NAME
+        }
+        if input_info is not None and input_info.device == FOCUSRITE_DEVICE_NAME:
+            volumes[input_info.channel] = (instrument_volume_percent / 100.0) if enabled else 0.0
+        if not volumes:
             return
         try:
-            set_channel_gain(input_info.channel, (instrument_volume_percent / 100.0) if enabled else 0.0)
+            set_channel_gains(volumes)
         except Exception:
             pass
+
+    def _apply_hardware_direct_monitor_all(self, config: StudioConfig, enabled: bool) -> None:
+        """_apply_hardware_direct_monitor for the all-inputs monitor: every
+        configured channel on the interface open at once (each at the
+        loudest Instrument Volume of any instrument assigned to it), or all
+        of them muted. Same best-effort, never-surfaced failure handling."""
+        volumes: dict[int, float] = {}
+        for il in config.input_labels:
+            if il.device != FOCUSRITE_DEVICE_NAME:
+                continue
+            levels = [
+                inst.instrument_volume for inst in config.instruments
+                if not inst.is_midi and inst.input_label == il.label
+            ]
+            volumes[il.channel] = (max(levels, default=100) / 100.0) if enabled else 0.0
+        if not volumes:
+            return
+        try:
+            set_channel_gains(volumes)
+        except Exception:
+            pass
+
 
     def _resolve_midi_route(self, config: StudioConfig, sd, resolve_device) -> tuple[int | None, int]:
         """Best-effort analog (input_device, input_channels) to pair with
@@ -3047,6 +3099,98 @@ class LocalBackend(Backend):
 
         return engine, midi_input, input_info
 
+    def _build_all_inputs_engine(self, config: StudioConfig) -> tuple[object, list]:
+        """Build (but don't start) the all-inputs monitor engine: every
+        configured input channel on one device (the first input label's
+        that resolves — channels on any other device are left out, since
+        one duplex stream can only read one input device) summed together,
+        plus a Synth for every MIDI keyboard that's connected right now,
+        each fed by its own already-open MidiInput. Returns (engine,
+        midi_inputs); the caller owns closing midi_inputs.
+
+        Nothing here is recorded or classified — it only exists so every
+        input is audible until auto-detect picks one (see
+        _monitor_all_inputs). Raises BackendError if the output device
+        can't be resolved or there's nothing at all to monitor."""
+        import sounddevice as sd
+        from .audio.devices import resolve_device
+        from .audio.midi_input import MidiInput
+        from .audio.synth import Synth
+
+        out_dev = resolve_device(sd, config.output_device, "output")
+        if config.output_device and out_dev is None:
+            raise BackendError(f"Output device '{config.output_device}' not found.")
+        out_info = sd.query_devices(out_dev, "output")
+        output_channels = min(config.output_channels, out_info["max_output_channels"])
+
+        in_dev = None
+        max_in = 0
+        channels: list[int] = []
+        for il in config.input_labels:
+            dev = resolve_device(sd, il.device, "input")
+            if dev is None:
+                continue
+            if in_dev is None:
+                in_dev = dev
+                max_in = sd.query_devices(dev, "input")["max_input_channels"]
+            if dev != in_dev or not 1 <= il.channel <= max_in:
+                continue
+            if il.channel - 1 not in channels:
+                channels.append(il.channel - 1)
+
+        synths = []
+        midi_inputs = []
+        seen_devices: set[str] = set()
+        for inst in config.instruments:
+            if not inst.is_midi or inst.midi_device.lower() in seen_devices:
+                continue
+            seen_devices.add(inst.midi_device.lower())
+            synth = Synth(config.sample_rate, voice=inst.synth_voice)
+            try:
+                midi_in = MidiInput(
+                    inst.midi_device, on_note_on=synth.note_on, on_note_off=synth.note_off,
+                    on_sustain=synth.set_sustain, on_volume=synth.set_channel_volume,
+                    on_expression=synth.set_expression, volume_cc=inst.volume_cc,
+                )
+            except Exception:
+                continue  # not plugged in right now — monitor everything else
+            synths.append(synth)
+            midi_inputs.append(midi_in)
+
+        if not channels and not synths:
+            raise BackendError("No inputs available to monitor right now.")
+        if in_dev is None:
+            in_dev, _ = self._resolve_midi_route(config, sd, resolve_device)
+
+        from .audio.engine import AudioEngine
+        try:
+            engine = AudioEngine(
+                sample_rate=config.sample_rate, buffer_size=config.buffer_size,
+                input_device=in_dev, output_device=out_dev,
+                input_channels=(max(channels) + 1) if channels else 1,
+                output_channels=max(1, output_channels),
+                monitor_instrument=self._monitoring_mode == "production",
+                monitor_channels=channels, extra_synths=synths,
+            )
+        except Exception:
+            for m in midi_inputs:
+                m.close()
+            raise
+        return engine, midi_inputs
+
+    def monitoring_description(self) -> str:
+        """What ambient monitoring is listening to right now, for the
+        server's console log (see rig_watcher.py) — "" if nothing's open."""
+        with self._record_lock:
+            monitor = self._active_monitor
+            if monitor is None:
+                return ""
+            if monitor.all_inputs:
+                names = [il.label for il in self.get_config().input_labels]
+                names += [m.device_name for m in monitor.midi_inputs]
+                return f"all inputs ({', '.join(names)})" if names else "all inputs"
+            return f"'{monitor.inst.full_name}'"
+
     def start_monitoring(self) -> bool:
         """Best-effort: open a live, listen-only audio stream for
         config.last_selected_instrument, with nothing recorded to disk —
@@ -3082,6 +3226,20 @@ class LocalBackend(Backend):
         ):
             return False
         config = self.get_config()
+        if self._monitor_all_inputs:
+            midi_inputs: list = []
+            try:
+                engine, midi_inputs = self._build_all_inputs_engine(config)
+                engine.start()
+            except Exception:
+                for m in midi_inputs:
+                    m.close()
+                return False
+            self._apply_hardware_direct_monitor_all(config, self._monitoring_mode == "recording")
+            self._active_monitor = _ActiveMonitor(
+                engine=engine, inst=None, all_inputs=True, midi_inputs=midi_inputs,
+            )
+            return True
         inst = config.get_instrument(config.last_selected_instrument)
         if inst is None:
             return False
@@ -3107,6 +3265,8 @@ class LocalBackend(Backend):
             self._active_monitor.engine.stop()
             if self._active_monitor.midi_input is not None:
                 self._active_monitor.midi_input.close()
+            for midi_in in self._active_monitor.midi_inputs:
+                midi_in.close()
             self._active_monitor = None
 
     def set_audio_hardware_present(self, present: bool) -> bool:
@@ -3137,6 +3297,9 @@ class LocalBackend(Backend):
             return False
         with self._record_lock:
             self._audio_hardware_absent = False
+            # Freshly powered on: nothing's been identified for this sitting
+            # yet, so start out hearing every input — see _monitor_all_inputs.
+            self._monitor_all_inputs = True
             busy = any(a is not None for a in (
                 self._active_latency_test, self._active_video_check, self._active_session,
                 self._active_instrument_test, self._active_detect_all, self._active_auto_detect,
@@ -3164,8 +3327,14 @@ class LocalBackend(Backend):
     def restart_monitoring(self) -> bool:
         with self._record_lock:
             config = self.get_config()
-            if self._active_monitor is not None:
-                if self._active_monitor.inst.full_name.lower() == (config.last_selected_instrument or "").lower():
+            monitor = self._active_monitor
+            if monitor is not None:
+                if monitor.all_inputs and self._monitor_all_inputs:
+                    return True  # already monitoring the right thing
+                if (
+                    not monitor.all_inputs and not self._monitor_all_inputs
+                    and monitor.inst.full_name.lower() == (config.last_selected_instrument or "").lower()
+                ):
                     return True  # already monitoring the right thing
                 self._close_active_monitor()
             return self._start_monitoring_locked()
@@ -4399,7 +4568,14 @@ class LocalBackend(Backend):
                 raise BackendError("Another recording is already in progress.")
 
             config = self.get_config()
-            self._close_active_monitor()
+            # Every input stays audible while listening (alongside the
+            # scan's own input-only streams — CoreAudio/CoreMIDI both allow
+            # more than one client per device), until a detection narrows
+            # it to just that instrument (on_channel_detected, below).
+            self._monitor_all_inputs = True
+            if self._active_monitor is not None and not self._active_monitor.all_inputs:
+                self._close_active_monitor()
+            self._start_monitoring_locked()
             stop_event = threading.Event()
 
             def on_channel_detected(name: str, _confidence: float) -> None:
@@ -4423,6 +4599,9 @@ class LocalBackend(Backend):
                     if inst is not None:
                         config.last_selected_instrument = inst.full_name
                         config.save(self._config_path)
+                        # Identified — mute every other input from here on.
+                        self._monitor_all_inputs = False
+                        self._close_active_monitor()
                     self._start_monitoring_locked()
                     # _open_channel_classifier_streams' own TunerTracker
                     # instances just got torn down along with every other
@@ -4804,6 +4983,9 @@ class LocalBackend(Backend):
         inst = config.get_instrument(instrument_name)
         if inst is None:
             raise BackendError(f"Instrument '{instrument_name}' not found.")
+        # A session is for one known instrument — once it ends, ambient
+        # monitoring resumes on just that one, not every input.
+        self._monitor_all_inputs = False
 
         # All the setlist's network/heavy-disk work (song-set draws +
         # backing-track downloads) up front, before any capture hardware is

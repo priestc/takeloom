@@ -139,14 +139,12 @@ class RigWatcher:
         self._log(f"Audio interface connected ({', '.join(required) or 'default devices'}).")
         if self._backend.set_audio_hardware_present(True):
             self._log_monitoring(config)
-        elif config.last_selected_instrument:
-            self._monitor_retries_left = _MONITOR_RETRY_POLLS
         else:
-            self._log("No last-used instrument yet — monitoring starts once one is detected.")
+            self._monitor_retries_left = _MONITOR_RETRY_POLLS
         self._driver.streamdeck.notify("Ready", revert_after=2.0)
 
     def _log_monitoring(self, config) -> None:
-        self._log(f"Live-monitoring '{config.last_selected_instrument}'.")
+        self._log(f"Live-monitoring {self._backend.monitoring_description()}.")
 
     # --- Stream Deck ---
 

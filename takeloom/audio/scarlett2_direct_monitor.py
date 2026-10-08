@@ -194,9 +194,23 @@ def set_channel_gain(channel: int, volume: float) -> bool:
     callers should treat False as "fall back to the on-screen reminder",
     not as an error to surface to the user.
     """
-    crosspoint = _channel_to_crosspoint(channel)
-    if crosspoint is None:
-        return False
+    return set_channel_gains({channel: volume})
+
+
+def set_channel_gains(volumes: dict[int, float]) -> bool:
+    """set_channel_gain for several channels at once — one USB session and
+    at most one set_mix per bus, rather than reopening the device per
+    channel. Used to monitor every input at once, or to mute every input
+    but one (see backend.py's _apply_hardware_direct_monitor). Same
+    best-effort True/False contract as set_channel_gain."""
+    targets: dict[int, int] = {}
+    for channel, volume in volumes.items():
+        crosspoint = _channel_to_crosspoint(channel)
+        if crosspoint is None:
+            return False
+        targets[crosspoint] = int(DIRECT_MONITOR_GAIN * max(0.0, min(1.0, volume)))
+    if not targets:
+        return True
 
     try:
         import usb.core
@@ -207,11 +221,14 @@ def set_channel_gain(channel: int, volume: float) -> bool:
     try:
         with _Scarlett2Device(usb.core, usb.util) as dev:
             dev.init()
-            gain = int(DIRECT_MONITOR_GAIN * max(0.0, min(1.0, volume)))
             for bus in MONITOR_MIX_BUSES:
                 gains = dev.get_mix(bus)
-                if gains[crosspoint] != gain:
-                    gains[crosspoint] = gain
+                changed = False
+                for crosspoint, gain in targets.items():
+                    if gains[crosspoint] != gain:
+                        gains[crosspoint] = gain
+                        changed = True
+                if changed:
                     dev.set_mix(bus, gains)
         return True
     except Exception:
