@@ -98,6 +98,10 @@ class AudioEngine:
         self._on_song_end: Callable[[], None] | None = None
         self._stream_sink: Callable[[np.ndarray], None] | None = None
         self._instrument_sink: Callable[[np.ndarray], None] | None = None
+        # Extra consumers of the raw, full multi-channel `indata` block —
+        # see add_input_sink. A tuple, replaced wholesale (never mutated in
+        # place), so the callback can iterate it without a lock.
+        self._input_sinks: tuple = ()
 
     @property
     def peak_level(self) -> float:
@@ -130,6 +134,20 @@ class AudioEngine:
         classifier itself only does cheap work here and defers the actual
         analysis to a background thread."""
         self._instrument_sink = sink
+
+    def add_input_sink(self, sink: Callable[[np.ndarray, int, object, object], None]) -> None:
+        """Live-safe: also hand every raw input block (all channels, before
+        anything else touches it) to `sink`, with the same (indata, frames,
+        time_info, status) signature an sd.InputStream callback gets. Lets
+        auto-detect's classifiers listen through this engine's stream
+        instead of opening a second stream on the same device — which
+        PortAudio's macOS backend can't do: both streams die with
+        "PaMacCore (AUHAL) err=-50" (confirmed on the Scarlett 4i4). Called
+        from the realtime thread, so `sink` must not block."""
+        self._input_sinks = self._input_sinks + (sink,)
+
+    def remove_input_sink(self, sink: Callable[[np.ndarray, int, object, object], None]) -> None:
+        self._input_sinks = tuple(s for s in self._input_sinks if s is not sink)
 
     def set_compressor_settings(self, settings: CompressorSettings) -> None:
         """Swap in new compressor settings, live — safe to call from any
@@ -196,6 +214,8 @@ class AudioEngine:
         status: sd.CallbackFlags,
     ) -> None:
         """Audio stream callback — runs in real-time audio thread."""
+        for sink in self._input_sinks:
+            sink(indata, frames, time_info, status)
         # Capture mono input from the instrument's channel — or, for a
         # MIDI-driven instrument, synthesize it fresh for this block
         # instead (indata's actual contents are never touched in that

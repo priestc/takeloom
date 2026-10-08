@@ -1462,6 +1462,24 @@ class _ActiveVideoCheck:
     midi_input: object | None = None
 
 
+class _EngineInputTap:
+    """One of auto-detect's classifier callbacks, fed from an already-
+    running AudioEngine's input (AudioEngine.add_input_sink) rather than
+    its own sd.InputStream — same stop()/close() shape, so it sits in the
+    same `streams` list and gets torn down the same way."""
+
+    def __init__(self, engine, callback) -> None:
+        self._engine = engine
+        self._callback = callback
+        engine.add_input_sink(callback)
+
+    def stop(self) -> None:
+        self._engine.remove_input_sink(self._callback)
+
+    def close(self) -> None:
+        self.stop()
+
+
 @dataclass
 class _ActiveMonitor:
     """A live-listening-only audio stream — no recorder/session attached,
@@ -4328,7 +4346,7 @@ class LocalBackend(Backend):
 
     def _open_channel_classifier_streams(
         self, config: StudioConfig, on_channel_detected, on_channel_active=None, on_channel_stats=None,
-        on_channel_tuner=None,
+        on_channel_tuner=None, shared_engine=None,
     ) -> tuple[list, list[str], list[str]]:
         """Shared scanning core behind start_detect_all and start_auto_
         detect_instrument: opens one raw sd.InputStream per distinct
@@ -4395,8 +4413,15 @@ class LocalBackend(Backend):
         the deck's "identifying" phase is listening (see recording_
         driver.py); start_detect_all leaves it None.
 
+        `shared_engine`, if given, is an already-running AudioEngine (the
+        all-inputs monitor — see start_auto_detect_instrument) whose input
+        device is tapped via AudioEngine.add_input_sink instead of opening
+        a second sd.InputStream on it, which PortAudio's macOS backend
+        can't do (both streams die — see add_input_sink). The tap goes in
+        `streams` as a _EngineInputTap, whose stop()/close() remove it.
+
         Caller must hold self._record_lock and have already called
-        self._close_active_monitor(). Returns (streams, skipped_
+        self._close_active_monitor() (unless passing shared_engine). Returns (streams, skipped_
         instrument_names, immediately_detected_names) — skipped is every
         instrument whose input couldn't be resolved right now (e.g. its
         interface is powered off), left out rather than failing the
@@ -4523,6 +4548,13 @@ class LocalBackend(Backend):
         try:
             for in_dev, entries in by_device.items():
                 channel_count = max(ch for _, ch, _ in entries) + 1
+                if (
+                    shared_engine is not None and shared_engine.input_device == in_dev
+                    and channel_count <= shared_engine.input_channels
+                ):
+                    tap = _EngineInputTap(shared_engine, make_callback(entries))
+                    streams.append(tap)
+                    continue
                 stream = sd.InputStream(
                     device=in_dev, channels=channel_count,
                     samplerate=config.sample_rate, blocksize=config.buffer_size,
@@ -4750,8 +4782,10 @@ class LocalBackend(Backend):
             # "first one wins". A MIDI instrument is only picked once a
             # note is actually played on it (_on_note_on still calls
             # on_channel_detected).
+            monitor = self._active_monitor
             streams, skipped, _immediate = self._open_channel_classifier_streams(
                 config, on_channel_detected, on_channel_tuner=on_channel_tuner,
+                shared_engine=monitor.engine if monitor is not None and monitor.all_inputs else None,
             )
             self._active_auto_detect = _ActiveAutoDetect(streams=streams, stop_event=stop_event)
 
