@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -193,8 +194,19 @@ class Mixer:
             if source.name == name:
                 if source.shifter is None and cents != 0.0:
                     source.shifter = SplicePitchShifter(self.sample_rate)
+                    self._prepare_shifter(source)
                 source.pitch_cents = cents
                 break
+
+    @staticmethod
+    def _prepare_shifter(source: MixSource) -> None:
+        """Give the shifter its onset map of source.data (see SplicePitch-
+        Shifter.prepare) on a background thread — a whole-file pass that
+        mustn't run on the audio callback or hold up the caller (rtmidi's
+        thread, for a knob)."""
+        shifter, data = source.shifter, source.data
+        if shifter is not None:
+            threading.Thread(target=shifter.prepare, args=(data,), daemon=True).start()
 
     def get_pitch(self, name: str) -> float:
         for source in self.sources:
@@ -210,4 +222,5 @@ class Mixer:
                     source.data = source.original_data[trim_frames:]
                 else:
                     source.data = source.original_data
+                self._prepare_shifter(source)
                 break

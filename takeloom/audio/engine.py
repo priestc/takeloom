@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -13,6 +14,8 @@ from .recorder import Recorder
 from .mixer import Mixer
 from .filters import Compressor, CompressorSettings
 from .synth import Synth
+
+_DROPOUT_REPORT_SECONDS = 5.0
 
 
 class AudioEngine:
@@ -93,6 +96,7 @@ class AudioEngine:
         self.compressor = Compressor(sample_rate, compressor_settings)
         self._stream: sd.Stream | None = None
         self._running = False
+        self._dropouts = 0  # see _report_dropouts
         self._peak_level: float = 0.0
         self._backing_peak_level: float = 0.0
         self._on_song_end: Callable[[], None] | None = None
@@ -214,6 +218,8 @@ class AudioEngine:
         status: sd.CallbackFlags,
     ) -> None:
         """Audio stream callback — runs in real-time audio thread."""
+        if status.output_underflow or status.input_overflow:
+            self._dropouts += 1
         for sink in self._input_sinks:
             sink(indata, frames, time_info, status)
         # Capture mono input from the instrument's channel — or, for a
@@ -340,6 +346,24 @@ class AudioEngine:
         )
         self._stream.start()
         self._running = True
+        threading.Thread(target=self._report_dropouts, name="audio-dropouts", daemon=True).start()
+
+    def _report_dropouts(self) -> None:
+        """Log audio dropouts (buffer under/overflows — the callback missing
+        its deadline) to stdout, the server log, at most every few
+        seconds — so "it sounded glitchy" can be told apart from a
+        dropout vs. something in the audio itself."""
+        reported = self._dropouts
+        while self._running:
+            time.sleep(_DROPOUT_REPORT_SECONDS)
+            count = self._dropouts
+            if count != reported:
+                print(
+                    f"[{time.strftime('%H:%M:%S')}] Audio dropouts: {count - reported} in the last "
+                    f"{_DROPOUT_REPORT_SECONDS:.0f}s ({count} since the stream started).",
+                    flush=True,
+                )
+                reported = count
 
     def stop(self) -> None:
         """Stop the audio stream and all recorders."""
