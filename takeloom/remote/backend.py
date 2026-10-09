@@ -160,6 +160,10 @@ class RemoteBackend(Backend):
             "process_pending_session", {"session_dir": session_dir}, timeout=DOWNLOAD_TIMEOUT,
         )["summary"]
 
+    def delete_session(self, session_dir: str) -> dict:
+        # The studio may need an SSH round-trip to the backup server.
+        return self._client.call("delete_session", {"session_dir": session_dir}, timeout=DOWNLOAD_TIMEOUT)
+
     def correct_session_instrument(self, session_dir: str, new_instrument: str) -> None:
         self._client.call(
             "correct_session_instrument", {"session_dir": session_dir, "new_instrument": new_instrument},

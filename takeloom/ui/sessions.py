@@ -163,10 +163,15 @@ class SessionsFrame(ttk.Frame):
         # Big — the session's start time, spelled out (day of week, date,
         # time of day — see backend.py's _format_session_datetime), the
         # one fact everything else here is organized under.
+        header = ttk.Frame(self.detail_frame)
+        header.pack(fill="x", pady=(0, 6))
         ttk.Label(
-            self.detail_frame, text=detail.get("date_display") or detail.get("date", ""),
+            header, text=detail.get("date_display") or detail.get("date", ""),
             font=("TkDefaultFont", 18, "bold"),
-        ).pack(anchor="w", pady=(0, 6))
+        ).pack(side="left", anchor="w")
+        delete_button = ttk.Button(header, text="Delete session…")
+        delete_button.configure(command=lambda: self._on_delete_session(detail, delete_button))
+        delete_button.pack(side="right")
 
         # Everything else about the session, completionist — one line per
         # fact, skipped entirely (not shown blank) when this particular
@@ -319,6 +324,43 @@ class SessionsFrame(ttk.Frame):
         ttk.Label(row, textvariable=play_var, foreground="#666666").pack(side="left", padx=(0, 4))
 
     # --- actions ---
+
+    def _on_delete_session(self, detail: dict, button: ttk.Button) -> None:
+        session_dir = detail["session_dir"]
+        takes = [take for track in detail.get("tracks", []) for take in track.get("takes", [])]
+        lines = [f"Permanently delete the session from {detail.get('date_display') or detail.get('date', '')}?", ""]
+        lines.append(
+            "Its recording (audio, video, MIDI) is removed from this machine and the backup server."
+        )
+        if takes:
+            word = "take" if len(takes) == 1 else "takes"
+            lines.append(
+                f"\nThe {len(takes)} {word} it recorded will also be deleted, and those songs will "
+                "have no take for that instrument:"
+            )
+            for track in detail.get("tracks", []):
+                for take in track.get("takes", []):
+                    lines.append(f"  • {track['track_name']} — {take['instrument']} take {take['take_number']}")
+        lines.append("\nThis can't be undone.")
+        if not messagebox.askyesno("Delete session", "\n".join(lines), icon="warning", default="no"):
+            return
+        button.configure(state="disabled", text="Deleting…")
+        backend = self.app_state.backend
+        self._run_backend(
+            lambda: backend.delete_session(session_dir),
+            lambda result, error: self._on_session_deleted(button, error),
+        )
+
+    def _on_session_deleted(self, button: ttk.Button, error: str | None) -> None:
+        if not self.winfo_exists():
+            return
+        if error:
+            if button.winfo_exists():
+                button.configure(state="normal", text="Delete session…")
+            messagebox.showerror("Could not delete session", error)
+            return
+        self._selected_session_dir = None
+        self._load()
 
     def _on_play_take(self, project_name: str, filename: str, label: str, status_var: tk.StringVar) -> None:
         # "Loading..." matters most over a Remote connection, where this

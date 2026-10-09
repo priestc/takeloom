@@ -362,6 +362,23 @@ class Backend(ABC):
         ...
 
     @abstractmethod
+    def delete_session(self, session_dir: str) -> dict:
+        """Permanently delete `session_dir` and everything it produced:
+        its directory (raw flac/video/MIDI and session_log.json) locally
+        and on the backup server, plus every take its "takes" snapshot
+        lists (see get_session_detail) — the take files themselves
+        (.flac/.mp4/.mid, local and backup server) and their entries in
+        every project setlist and the shared inspiration-take index, so
+        each such track is left with no take for that label (an older
+        take file of the same song isn't promoted in its place). The
+        backup server is cleaned first; if that fails nothing local is
+        touched. Returns {"takes_deleted": N}. Raises BackendError while
+        any session is recording or still processing (its in-memory
+        setlist could write deleted takes back), or if `session_dir`
+        isn't found."""
+        ...
+
+    @abstractmethod
     def correct_session_instrument(self, session_dir: str, new_instrument: str) -> None:
         """Fix the historical record alone: rewrite session_log.json's
         instrument/instrument_label fields (pulled from `new_instrument`
@@ -2241,6 +2258,69 @@ class LocalBackend(Backend):
         from .vault import sync_and_maybe_prune
         sync_and_maybe_prune(config, session_dir_path)
         return summary
+
+    def delete_session(self, session_dir: str) -> dict:
+        if not session_dir or "/" in session_dir or "\\" in session_dir or session_dir in (".", ".."):
+            raise BackendError(f"Invalid session name '{session_dir}'.")
+        with self._record_lock:
+            if self._active_session is not None:
+                raise BackendError("A session is recording — end it before deleting a session.")
+        thread = self._processing_thread
+        if thread is not None and thread.is_alive():
+            raise BackendError("A session is still being processed — try again once it's done.")
+
+        config = self.get_config()
+        from .vault import load_inspiration_index, save_inspiration_index, vault_root
+        root = vault_root(config)
+        local_dir = self._local_session_dir_path(session_dir)
+        try:
+            _, data = self._read_session_log(session_dir)
+        except BackendError:
+            if local_dir is None:
+                raise
+            data = {}  # a local session with a missing/corrupt log: still deletable
+
+        # label -> filename for every take this session filed.
+        takes = [
+            (t.get("instrument", ""), t["filename"])
+            for entries in (data.get("takes") or {}).values() for t in entries if t.get("filename")
+        ]
+        take_files = [
+            f"{Path(filename).stem}{ext}" for _, filename in takes for ext in (".flac", ".mp4", ".mid")
+        ]
+
+        remote = config.backup_server if config.session_vault_mode in ("remote", "both") else ""
+        if remote:
+            from .sync import delete_remote_vault_paths
+            relatives = [f"sessions/{session_dir}"] + [f"completed_takes/{name}" for name in take_files]
+            if not delete_remote_vault_paths(remote, relatives):
+                raise BackendError(f"Could not delete '{session_dir}' from the backup server ({remote}) — nothing was deleted.")
+
+        filenames = {filename for _, filename in takes}
+
+        def drop(entry: TrackEntry) -> bool:
+            stale = [label for label, take in entry.preferred_takes.items() if take.filename in filenames]
+            for label in stale:
+                del entry.preferred_takes[label]
+            return bool(stale)
+
+        if filenames:
+            for path in Project.list_projects(Path(config.projects_dir)):
+                try:
+                    project = Project.open(path, root)
+                except Exception:
+                    continue
+                if any([drop(track) for track in project.setlist.tracks]):
+                    project.save_setlist()
+            index = load_inspiration_index(root)
+            if any([drop(entry) for entry in index.values()]):
+                save_inspiration_index(root, index)
+            for name in take_files:
+                (root / "completed_takes" / name).unlink(missing_ok=True)
+
+        if local_dir is not None:
+            shutil.rmtree(local_dir)
+        return {"takes_deleted": len(filenames)}
 
     def correct_session_instrument(self, session_dir: str, new_instrument: str) -> None:
         config = self.get_config()

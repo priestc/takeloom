@@ -194,6 +194,37 @@ def write_remote_session_log(remote: str, session_dir_name: str, data: dict) -> 
         return sync_vault_file_up(local_path, vault_relative, remote)
 
 
+def delete_remote_vault_paths(remote: str, vault_relatives: list[str]) -> bool:
+    """Permanently delete each of `vault_relatives` (paths relative to the
+    vault root — a session directory, take files) on the backup server,
+    in one SSH round-trip; a path that isn't there is fine. Used by
+    backend.py's delete_session. Returns whether it succeeded — callers
+    check this before touching anything local, so a failed remote delete
+    never leaves the vault half-deleted."""
+    if not vault_relatives:
+        return True
+    if ":" not in remote:
+        # A plain local/mounted path as the backup "server".
+        import shutil
+        try:
+            for rel in vault_relatives:
+                target = Path(remote) / rel
+                if target.is_dir():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink(missing_ok=True)
+            return True
+        except OSError:
+            return False
+    host, path = remote.split(":", 1)
+    targets = " ".join(shlex.quote(os.path.join(path, rel)) for rel in vault_relatives)
+    try:
+        result = subprocess.run(["ssh", host, f"rm -rf -- {targets}"], capture_output=True, text=True, timeout=60)
+        return result.returncode == 0
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
+
+
 # Marks where one session's session_log.json contents begin in
 # fetch_remote_session_logs' single combined SSH round-trip — chosen to be
 # extremely unlikely to collide with anything inside real JSON content.
