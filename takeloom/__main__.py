@@ -379,6 +379,13 @@ def server_command(disable_color: bool) -> None:
 
     def request_authorization(ip: str, client_name: str) -> bool:
         log(f"\nPairing request from '{client_name}' ({ip})")
+        if not sys.stdin.isatty():
+            # Running headless — e.g. as the launchd service (see
+            # service.py): ask on the Mac's own screen instead.
+            approved = _approve_via_dialog(client_name, ip)
+            if approved is not None:
+                log(f"Pairing {'approved' if approved else 'denied'} via on-screen dialog.")
+                return approved
         try:
             return click.confirm("Approve this connection?", default=False)
         except click.exceptions.Abort:
@@ -462,6 +469,15 @@ def server_command(disable_color: bool) -> None:
 
     log("Press Ctrl+C to stop.\n")
 
+    # launchd (takeloom service stop/restart) stops the server with SIGTERM,
+    # not Ctrl+C — route it through the same graceful shutdown below so an
+    # active session still gets ended and processed.
+    import signal
+
+    def on_sigterm(signum, frame) -> None:
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, on_sigterm)
+
     try:
         while True:
             time.sleep(0.5)
@@ -479,6 +495,119 @@ def server_command(disable_color: bool) -> None:
         except BackendError as e:
             log(f"Error ending session: {e}", err=True)
         backend.join_session_processing()
+
+
+@main.group(name="service")
+def service_group() -> None:
+    """Run `takeloom server` as a background launchd service (macOS) — starts
+    at login, restarts after a crash. See takeloom/service.py."""
+
+
+def _service_call(fn) -> None:
+    from .service import ServiceError
+    try:
+        fn()
+    except ServiceError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+
+
+@service_group.command(name="install")
+def service_install() -> None:
+    """Install (or update) the service and start it now."""
+    from . import service
+    _service_call(service.install)
+    click.echo(f"Installed {service.PLIST_PATH}")
+    click.echo(f"Server started; logs: {service.LOG_PATH}  (takeloom service logs)")
+
+
+@service_group.command(name="uninstall")
+def service_uninstall() -> None:
+    """Stop the service and remove it (no longer starts at login)."""
+    from . import service
+    _service_call(service.uninstall)
+    click.echo("Service stopped and removed.")
+
+
+@service_group.command(name="start")
+def service_start() -> None:
+    """Start the installed service."""
+    from . import service
+    _service_call(service.start)
+    click.echo("Service started.")
+
+
+@service_group.command(name="stop")
+def service_stop() -> None:
+    """Stop the server (gracefully — waits for an active session to finish
+    processing). It starts again at next login, or with `service start`."""
+    from . import service
+    click.echo("Stopping server...")
+    _service_call(service.stop)
+    click.echo("Service stopped.")
+
+
+@service_group.command(name="restart")
+def service_restart() -> None:
+    """Gracefully restart the server — picks up new code."""
+    from . import service
+    click.echo("Restarting server...")
+    _service_call(service.restart)
+    click.echo("Service restarted.")
+
+
+@service_group.command(name="status")
+def service_status() -> None:
+    """Show whether the service is installed and running."""
+    from . import service
+    if not service.is_installed():
+        click.echo("Not installed (takeloom service install).")
+        return
+    pid = service.running_pid()
+    if pid:
+        click.echo(f"Running (pid {pid}).")
+    elif service.is_loaded():
+        click.echo("Loaded but not running — see `takeloom service logs`.")
+    else:
+        click.echo("Installed but stopped (takeloom service start).")
+    click.echo(f"Logs: {service.LOG_PATH}")
+
+
+@service_group.command(name="logs")
+@click.option("-n", "lines", default=50, show_default=True, help="Lines of history to show first.")
+def service_logs(lines: int) -> None:
+    """Follow the server log (Ctrl+C to quit)."""
+    import os
+    from . import service
+    if not service.LOG_PATH.exists():
+        click.echo(f"No log yet at {service.LOG_PATH}.", err=True)
+        raise SystemExit(1)
+    os.execvp("tail", ["tail", "-n", str(lines), "-F", str(service.LOG_PATH)])
+
+
+def _approve_via_dialog(client_name: str, ip: str) -> bool | None:
+    """A macOS Approve/Deny dialog for a server pairing request when there's
+    no terminal to prompt in. None if it couldn't be shown at all (not macOS,
+    no GUI session) — the caller falls back to the terminal path. Gives up
+    (denies) after 2 minutes so an unattended request can't hang a client."""
+    if sys.platform != "darwin":
+        return None
+    import subprocess
+
+    def quote(text: str) -> str:
+        return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    script = (
+        f"display dialog {quote(f'{client_name} ({ip}) wants to connect to this takeloom server.')} "
+        f'with title "takeloom pairing request" buttons {{"Deny", "Approve"}} '
+        f'default button "Deny" giving up after 120'
+    )
+    try:
+        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=130)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 and "-128" not in result.stderr:  # -128: dialog cancelled
+        return None
+    return "button returned:Approve" in result.stdout
 
 
 def _prompt_instrument_label() -> str:
