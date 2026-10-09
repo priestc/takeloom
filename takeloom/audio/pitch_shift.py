@@ -144,9 +144,13 @@ class SplicePitchShifter:
         else:
             region_start, region_end = q + lo, q + hi + c
         if region_start >= 0 and region_end <= n and q + c <= n:
-            mono = data.mean(axis=1) if data.ndim == 2 else data
-            current = mono[q:q + c].astype(np.float64)
-            region = mono[region_start:region_end].astype(np.float64)
+            # Mix down only the two slices compared — never the whole
+            # file, which on a full song took ~60 ms, blowing the audio
+            # callback's budget at every splice (choppy playback).
+            def mono(a: np.ndarray) -> np.ndarray:
+                return (a.mean(axis=1) if a.ndim == 2 else a).astype(np.float64)
+            current = mono(data[q:q + c])
+            region = mono(data[region_start:region_end])
             if np.any(current):
                 corr = np.correlate(region, current, mode="valid")
                 sq = np.concatenate([[0.0], np.cumsum(region * region)])
