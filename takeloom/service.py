@@ -24,6 +24,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 LABEL = "com.takeloom.server"
@@ -146,6 +147,14 @@ def stop() -> None:
     result = _launchctl("bootout", _target())
     if result.returncode != 0:
         raise ServiceError(f"launchctl bootout failed: {(result.stderr or result.stdout).strip()}")
+    # bootout returns as soon as SIGTERM is sent; the job stays loaded
+    # until the process actually exits, and bootstrapping it again before
+    # then is a no-op — so wait (restart depends on this).
+    deadline = time.monotonic() + EXIT_TIMEOUT_SECONDS + 10
+    while is_loaded():
+        if time.monotonic() > deadline:
+            raise ServiceError("Timed out waiting for the server to exit.")
+        time.sleep(0.25)
 
 
 def restart() -> None:

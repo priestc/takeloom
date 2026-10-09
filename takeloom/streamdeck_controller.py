@@ -765,7 +765,9 @@ class StreamDeckController:
                 self._deck.set_key_image(key_index, self._make_key_image(icon, label, flash))
         except Exception:
             return
-        threading.Timer(0.18, self._restore_key, args=(key_index,)).start()
+        timer = threading.Timer(0.18, self._restore_key, args=(key_index,))
+        timer.daemon = True  # cosmetic — never hold up process exit
+        timer.start()
 
     def _restore_key(self, key_index: int) -> None:
         face = self._key_faces.get(key_index)
@@ -800,7 +802,11 @@ class StreamDeckController:
                 )
         except Exception:
             return
-        threading.Timer(max(0.5, revert_after), self._revert_touchscreen, args=(gen,)).start()
+        # Daemon: a non-daemon timer here held up process exit for up to
+        # revert_after (30 s for "Waiting for audio interface…").
+        timer = threading.Timer(max(0.5, revert_after), self._revert_touchscreen, args=(gen,))
+        timer.daemon = True
+        timer.start()
 
     def _revert_touchscreen(self, gen: int) -> None:
         if gen != self._notify_gen or not self.connected or not self._has_dials:
