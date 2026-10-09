@@ -92,8 +92,9 @@ class RecordingDeckDriver:
         # recording under a stale last-picked instrument with no way to
         # see what was actually about to be used). "Detecting…" while a
         # scan is in progress, the label (e.g. "ELECTRIC-BASS") once one's
-        # found — only reset once a *new* scan actually starts for the
-        # next take, not merely because a session opened or closed. The
+        # found — reset when a *new* scan starts for the next take, and
+        # when a session ends (_reset_after_session: the deck goes fully
+        # back to its starting state), not merely because one opened. The
         # scan itself is only ever started by _begin_identify()/_redo_
         # identify() below (a Start button or Re-identify actually
         # pressed) — there's deliberately no "kick off a scan the instant
@@ -303,6 +304,24 @@ class RecordingDeckDriver:
             except Exception as e:  # never let the worker thread die on a press
                 self._log(f"StreamDeck: key '{key}' failed: {e}")
 
+    def _reset_after_session(self) -> None:
+        """A session just ended (Stop, or its last song finishing): put the
+        deck back exactly where a fresh connection starts — Start Local/
+        Start Streaming, no instrument shown, no tuner — so the next
+        session begins from scratch rather than from leftovers of this
+        one."""
+        if self.identify_state != "idle":
+            try:
+                self._backend.stop_auto_detect_instrument()
+            except BackendError:
+                pass
+        self.identify_state = "idle"
+        self._pending_streaming = False
+        self.track_name = None
+        self.detected_instrument = None
+        self.tuner_note = None
+        self._tuner_smoother.reset()
+
     def handle_key(self, key: str) -> None:
         try:
             if key == "r":
@@ -482,7 +501,10 @@ class RecordingDeckDriver:
             if "track_name" in data:
                 self.track_name = data["track_name"]
             if "phase" in data:
+                session_ended = data["phase"] == "idle" and self.phase != "idle"
                 self.phase = data["phase"]
+                if session_ended:
+                    self._reset_after_session()
                 if self.phase == "idle":
                     self.track_name = None
                 else:

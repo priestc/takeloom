@@ -4017,7 +4017,9 @@ class LocalBackend(Backend):
             "track_name": track.name,
         })
 
-    def _advance_locked(self, session: "_ActiveSession", status_prefix: str = "") -> TrackEntry | None:
+    def _advance_locked(
+        self, session: "_ActiveSession", status_prefix: str = "", announce_done: bool = True,
+    ) -> TrackEntry | None:
         """Find and load the next setlist track after the current one that
         still needs a take for the session's instrument's label (takes
         are filed by label — see TrackEntry.preferred_takes — so any
@@ -4026,8 +4028,10 @@ class LocalBackend(Backend):
         (the setlist doesn't learn about those until post-processing).
         Returns the loaded track (resolved, if the setlist position found
         is a song set slot — see _resolve_filter_slot_for_session), or None
-        (emitting a "waiting" status) when nothing's left. Called with
-        self._record_lock held; playback must already be stopped."""
+        (emitting a "waiting" status, unless announce_done is False — the
+        caller is about to end the session instead) when nothing's left.
+        Called with self._record_lock held; playback must already be
+        stopped."""
         tracks = session.project.setlist.tracks
         start = (session.current_track_index + 1) if session.current_track_index is not None else 0
         config = self.get_config()
@@ -4043,11 +4047,12 @@ class LocalBackend(Backend):
             session.current_track = None
             session.current_track_index = None
             session.engine.mixer.clear()
-            self._emit("recording_status", {
-                "phase": "waiting",
-                "status": status_prefix + "No more tracks need a take — press Stop to end the session.",
-                "track_name": None,
-            })
+            if announce_done:
+                self._emit("recording_status", {
+                    "phase": "waiting",
+                    "status": status_prefix + "No more tracks need a take — press Stop to end the session.",
+                    "track_name": None,
+                })
             return None
         track = self._resolve_filter_slot_for_session(session, config, tracks[index], index)
         self._load_track_locked(session, track, index, config)
@@ -4194,7 +4199,9 @@ class LocalBackend(Backend):
         end — the moment a take completes. Logs song_end (post-processing
         turns that into the actual take file later; nothing is finalized
         here) and auto-advances: the next track that needs a take starts
-        playing by itself after a short breather, no key press needed."""
+        playing by itself after a short breather, no key press needed. If
+        that was the last one, the session ends right here — same as
+        pressing Stop — rather than sitting open waiting for it."""
         with self._record_lock:
             session = self._active_session
             if session is None or not session.playing or session.current_track is None:
@@ -4207,10 +4214,14 @@ class LocalBackend(Backend):
             session.completed_track_indices.add(session.current_track_index)
             session.engine.mixer.set_playing(False)
             session.playing = False
-            loaded = self._advance_locked(
-                session, status_prefix=f"Completed take for '{finished.name}'. ",
-            )
-            if loaded is not None:
+            loaded = self._advance_locked(session, announce_done=False)
+            if loaded is None:
+                self._emit("recording_status", {
+                    "phase": "waiting",
+                    "status": f"Completed take for '{finished.name}' — that was the last song; ending the session.",
+                    "track_name": None,
+                })
+            else:
                 self._emit("recording_status", {
                     "phase": "waiting",
                     "status": f"Completed take for '{finished.name}' — '{loaded.name}' starts "
@@ -4219,6 +4230,7 @@ class LocalBackend(Backend):
                 })
 
         if loaded is None:
+            self._end_session(missing_ok=True)
             return
         # The breather happens outside the lock so keys stay live; whoever
         # pressed one meanwhile (Next, Stop, a manual track load) wins —
