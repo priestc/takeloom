@@ -129,6 +129,35 @@ class Backend(ABC):
     @abstractmethod
     def save_config(self, config: StudioConfig) -> None: ...
 
+    # --- remote vault pairing (see vault_client.py) ---
+    #
+    # Backend methods rather than something the UI does itself, so pairing
+    # runs on — and stores its token in the config of — the machine that
+    # actually records and uploads sessions, even when the Studio Setup tab
+    # is being driven from a Remote connection.
+
+    @abstractmethod
+    def begin_vault_pairing(self, address: str) -> dict:
+        """Ask the vault server at `address` to pair with this machine.
+        Returns {"url", "request_id", "code"}: show `code` to the user to
+        approve on the vault's web page, then poll_vault_pairing()."""
+        ...
+
+    @abstractmethod
+    def poll_vault_pairing(self, url: str, request_id: str) -> dict:
+        """{"status": "pending"|"approved"|"denied"|"expired"}. On
+        "approved", the vault URL and its new token have already been saved
+        to this backend's config, and are also returned as "url"/"token" so
+        an open Studio Setup tab can update its own copy of the config
+        (rather than its next Save overwriting them with stale values)."""
+        ...
+
+    @abstractmethod
+    def check_vault_server(self) -> dict:
+        """{"ok": bool, "message": str} — whether the configured vault
+        server is reachable and accepts this machine's token."""
+        ...
+
     # --- devices ---
 
     @abstractmethod
@@ -365,13 +394,13 @@ class Backend(ABC):
     def delete_session(self, session_dir: str) -> dict:
         """Permanently delete `session_dir` and everything it produced:
         its directory (raw flac/video/MIDI and session_log.json) locally
-        and on the backup server, plus every take its "takes" snapshot
+        and on the remote vault, plus every take its "takes" snapshot
         lists (see get_session_detail) — the take files themselves
-        (.flac/.mp4/.mid, local and backup server) and their entries in
+        (.flac/.mp4/.mid, local and remote vault) and their entries in
         every project setlist and the shared inspiration-take index, so
         each such track is left with no take for that label (an older
         take file of the same song isn't promoted in its place). The
-        backup server is cleaned first; if that fails nothing local is
+        remote vault is cleaned first; if that fails nothing local is
         touched. Returns {"takes_deleted": N}. Raises BackendError while
         any session is recording or still processing (its in-memory
         setlist could write deleted takes back), or if `session_dir`
@@ -477,13 +506,13 @@ class Backend(ABC):
         project_name's completed_takes_dir — as named in a get_session_
         detail/reassign_take/analyze_take take dict) actually exists on
         *this machine's* local disk, downloading it from the configured
-        backup server if it doesn't (same reasoning as vault.
+        remote vault if it doesn't (same reasoning as vault.
         ensure_setlist_files_local, just for one arbitrary already-named
         file rather than everything a setlist currently needs — a
         Sessions tab take can be one no project currently has as its
         *preferred* take at all, e.g. superseded by a later reassign_
         take). Returns the local absolute path as a string. Raises
-        BackendError if it's not local and either no backup server is
+        BackendError if it's not local and either no remote vault is
         configured or the download fails.
 
         Local-only: on a Remote connection this would download to the
@@ -499,7 +528,7 @@ class Backend(ABC):
         """Make sure the backing track of the song `take_filename` (any one
         of its current takes — resolved the same way edit_backing_track
         does) exists on *this machine's* vault disk — downloading it from
-        the inspiration server or the backup server if not — and return
+        the inspiration server or the remote vault if not — and return
         its path. Local-only, like ensure_take_local: RemoteBackend
         refuses; see get_backing_playback_path for the Remote-capable
         equivalent."""
@@ -1773,6 +1802,44 @@ class LocalBackend(Backend):
             raise BackendError("\n".join(errors))
         config.save(self._config_path)
 
+    def begin_vault_pairing(self, address: str) -> dict:
+        from .vault_client import VaultClient, VaultError, normalize_vault_url
+        url = normalize_vault_url(address)
+        if not url:
+            raise BackendError("Enter the remote vault server's address first (e.g. tank2).")
+        try:
+            req = VaultClient(url).begin_pairing()
+        except VaultError as e:
+            raise BackendError(str(e)) from e
+        return {"url": url, "request_id": req["request_id"], "code": req["code"]}
+
+    def poll_vault_pairing(self, url: str, request_id: str) -> dict:
+        from .vault_client import VaultClient, VaultError
+        try:
+            result = VaultClient(url).poll_pairing(request_id)
+        except VaultError as e:
+            raise BackendError(str(e)) from e
+        if result.get("status") != "approved":
+            return {"status": result.get("status", "expired")}
+        config = self.get_config()
+        config.vault_server, config.vault_server_token = url, result["token"]
+        config.save(self._config_path)  # not save_config: pairing shouldn't hinge on unrelated validation
+        return {"status": "approved", "url": url, "token": result["token"]}
+
+    def check_vault_server(self) -> dict:
+        from .vault_client import VaultClient, VaultError
+        config = self.get_config()
+        if not config.vault_server:
+            return {"ok": False, "message": "No remote vault server set."}
+        if not config.vault_server_token:
+            return {"ok": False, "message": f"Not paired with {config.vault_server} yet."}
+        client = VaultClient(config.vault_server, config.vault_server_token)
+        try:
+            info = client.ping()
+        except VaultError as e:
+            return {"ok": False, "message": str(e)}
+        return {"ok": True, "message": f"Paired with {client.url} ({info.get('hostname', '?')})."}
+
     # --- devices ---
 
     def list_audio_devices(self) -> list[dict]:
@@ -1993,21 +2060,21 @@ class LocalBackend(Backend):
         not an error, once session_vault_mode "remote" has pushed and
         pruned it (see vault.sync_and_maybe_prune). Callers needing its
         session_log.json either way should go through _read_session_log,
-        which falls back to the backup server transparently."""
+        which falls back to the remote vault transparently."""
         from .vault import vault_root
         path = vault_root(self.get_config()) / "sessions" / session_dir
         return path if path.is_dir() else None
 
     def _read_session_log(self, session_dir: str) -> tuple[Path | None, dict]:
         """session_dir's session_log.json, from local disk if it's there,
-        else fetched fresh from the backup server (see sync.
-        fetch_remote_session_log) if session_vault_mode allows it —
+        else fetched fresh from the remote vault (see vault_client.
+        VaultClient.fetch_session_log) if session_vault_mode allows it —
         never written to local disk in that case, so there's nothing
         left behind to double as a second, possibly-stale copy; the
         vault (wherever it currently lives) stays the only copy. Returns
         (log_path, data) — log_path is None for a remote-only session,
         which correct_session_instrument checks to decide whether to
-        write the correction back to disk or over SSH instead."""
+        write the correction back to disk or to the vault server instead."""
         local_dir = self._local_session_dir_path(session_dir)
         if local_dir is not None:
             log_path = local_dir / "session_log.json"
@@ -2019,10 +2086,10 @@ class LocalBackend(Backend):
                 raise BackendError(f"Session '{session_dir}' has a corrupt session_log.json: {e}") from e
             return log_path, data
 
-        config = self.get_config()
-        if config.session_vault_mode in ("remote", "both") and config.backup_server:
-            from .sync import fetch_remote_session_log
-            data = fetch_remote_session_log(config.backup_server, session_dir)
+        from .vault import remote_vault
+        client = remote_vault(self.get_config())
+        if client is not None:
+            data = client.fetch_session_log(session_dir)
             if data is not None:
                 return None, data
         raise BackendError(f"Session '{session_dir}' not found.")
@@ -2030,7 +2097,7 @@ class LocalBackend(Backend):
     def list_sessions(self) -> list[dict]:
         """Every past session this machine can currently see: whatever's
         on local disk, plus — if session_vault_mode allows a backup
-        server — whatever's on the backup server that isn't already
+        server — whatever's on the remote vault that isn't already
         accounted for locally (the common case in "remote" mode: vault.
         sync_and_maybe_prune deletes each session's local directory
         right after syncing it, so almost everything normally lives only
@@ -2057,9 +2124,10 @@ class LocalBackend(Backend):
                 results.append(self._session_summary(session_dir.name, data))
                 seen.add(session_dir.name)
 
-        if config.session_vault_mode in ("remote", "both") and config.backup_server:
-            from .sync import fetch_remote_session_logs
-            for name, data in fetch_remote_session_logs(config.backup_server).items():
+        from .vault import remote_vault
+        client = remote_vault(config)
+        if client is not None:
+            for name, data in client.list_session_logs().items():
                 if name in seen:
                     continue
                 results.append(self._session_summary(name, data))
@@ -2289,12 +2357,12 @@ class LocalBackend(Backend):
             f"{Path(filename).stem}{ext}" for _, filename in takes for ext in (".flac", ".mp4", ".mid")
         ]
 
-        remote = config.backup_server if config.session_vault_mode in ("remote", "both") else ""
-        if remote:
-            from .sync import delete_remote_vault_paths
+        from .vault import remote_vault
+        client = remote_vault(config)
+        if client is not None:
             relatives = [f"sessions/{session_dir}"] + [f"completed_takes/{name}" for name in take_files]
-            if not delete_remote_vault_paths(remote, relatives):
-                raise BackendError(f"Could not delete '{session_dir}' from the backup server ({remote}) — nothing was deleted.")
+            if not client.delete_paths(relatives):
+                raise BackendError(f"Could not delete '{session_dir}' from the vault at {client.url} — nothing was deleted.")
 
         filenames = {filename for _, filename in takes}
 
@@ -2340,12 +2408,13 @@ class LocalBackend(Backend):
             log_path.write_text(json.dumps(data, indent=2))
             return
         # Remote-only session (see _read_session_log) — write the
-        # correction back over SSH instead of to a local file, so the
-        # backup server stays the one true copy rather than this machine
-        # quietly growing a local fork of it.
-        from .sync import write_remote_session_log
-        if not write_remote_session_log(config.backup_server, session_dir, data):
-            raise BackendError(f"Could not write the correction back to {config.backup_server}.")
+        # correction back to the vault server instead of to a local file,
+        # so the remote vault stays the one true copy rather than this
+        # machine quietly growing a local fork of it.
+        from .vault import remote_vault
+        client = remote_vault(config)
+        if client is None or not client.write_session_log(session_dir, data):
+            raise BackendError(f"Could not write the correction back to the vault at {config.vault_server}.")
 
     def _move_take_file(
         self, project: Project, track_name: str, new_instrument: str, take: TakeInfo, source: str,
@@ -2418,10 +2487,10 @@ class LocalBackend(Backend):
         if log_path is not None:
             log_path.write_text(json.dumps(data, indent=2))
         else:
-            from .sync import write_remote_session_log
-            config = self.get_config()
-            if config.backup_server:
-                write_remote_session_log(config.backup_server, session_dir, data)
+            from .vault import remote_vault
+            client = remote_vault(self.get_config())
+            if client is not None:
+                client.write_session_log(session_dir, data)
 
     def reassign_take(self, session_dir: str, track_name: str, old_instrument: str, new_instrument: str) -> None:
         config = self.get_config()
@@ -2580,11 +2649,12 @@ class LocalBackend(Backend):
         local_path = project.completed_takes_dir / filename
         if local_path.exists():
             return str(local_path)
-        if not config.backup_server:
-            raise BackendError(f"'{filename}' isn't available locally, and no backup server is configured.")
-        from .sync import sync_vault_file_down
-        if not sync_vault_file_down(config.backup_server, f"completed_takes/{filename}", local_path):
-            raise BackendError(f"Could not download '{filename}' from {config.backup_server}.")
+        from .vault import remote_vault
+        client = remote_vault(config)
+        if client is None:
+            raise BackendError(f"'{filename}' isn't available locally, and no paired remote vault is configured.")
+        if not client.download_file(f"completed_takes/{filename}", local_path):
+            raise BackendError(f"Could not download '{filename}' from the vault at {client.url}.")
         return str(local_path)
 
     def ensure_backing_track_local(self, take_filename: str) -> str:
@@ -2605,13 +2675,14 @@ class LocalBackend(Backend):
             except InspirationError as e:
                 raise BackendError(f"Could not download the backing track for '{entry.name}': {e}") from e
             return str(local_path)
-        if not config.backup_server:
+        from .vault import remote_vault
+        client = remote_vault(config)
+        if client is None:
             raise BackendError(
-                f"Backing track '{entry.backing_track}' isn't available locally, and no backup server is configured."
+                f"Backing track '{entry.backing_track}' isn't available locally, and no paired remote vault is configured."
             )
-        from .sync import sync_vault_file_down
-        if not sync_vault_file_down(config.backup_server, f"backing_tracks/{entry.backing_track}", local_path):
-            raise BackendError(f"Could not download '{entry.backing_track}' from {config.backup_server}.")
+        if not client.download_file(f"backing_tracks/{entry.backing_track}", local_path):
+            raise BackendError(f"Could not download '{entry.backing_track}' from the vault at {client.url}.")
         return str(local_path)
 
     def get_backing_playback_path(self, take_filename: str) -> str:

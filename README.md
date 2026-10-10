@@ -25,7 +25,7 @@ pipx install git+https://github.com/priestc/takeloom.git
 Configure your studio in three steps. Each command reads and updates `~/studio_config.json` independently, so you can re-run one without redoing the others.
 
 ```bash
-takeloom setup-studio              # studio name, location, musician, backup server
+takeloom setup-studio              # studio name, location, musician, remote vault server
 takeloom setup-recording-devices   # sample rate, buffer size, output device, input labels, camera
 takeloom setup-instruments         # assign instruments to input channels
 ```
@@ -36,10 +36,17 @@ records video alongside the audio (see [Recording Session](#recording-session)).
 `setup-studio` also configures the **Studio Session Vault** — shared storage for everything
 a project used to keep to itself: recorded sessions, backing tracks, and completed takes
 (see [Project Structure](#project-structure)). A project is just a setlist file now. Three
-vault modes: local only (default, under `~/Documents`), remote only (pushed to the backup
-server and removed locally once that's verified), or both (pushed but also kept locally).
-Starting a session downloads whatever that project's setlist needs from the remote first,
-in remote-only mode. If you have projects from before the vault existed, run
+vault modes: local only (default, under `~/Documents`), remote only (uploaded to the remote
+vault server and removed locally once every file's checksum is verified), or both (uploaded
+but also kept locally). Starting a session downloads whatever that project's setlist needs
+from the remote first, in remote-only mode.
+
+The remote vault is a separate small server, `takeloom-vault` (this repo's
+[`vault_server/`](vault_server/README.md) folder), running on the storage machine. It also
+serves a web page for browsing sessions and watching their videos. Takeloom pairs with it
+the same way Remote mode pairs: click **Pair...** next to "Remote vault server" in Studio
+Setup (or run `takeloom vault pair tank2`), then approve the code shown on the vault's web
+page. `takeloom vault status` checks the connection. If you have projects from before the vault existed, run
 `takeloom migrate-sessions-to-vault` once to move everything in — safe to re-run,
 already-migrated projects are skipped.
 

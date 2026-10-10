@@ -19,8 +19,9 @@ No TLS. A client with no token (or an unrecognized one) triggers an
 interactive pairing request on the server — the local user approves or
 denies it, and on approval the server mints a token just for that client
 and returns it once in `hello_ack`. Recognized tokens are compared with
-`hmac.compare_digest`. This is a LAN-trust feature (like the existing
-rsync-based backup_server), not meant for untrusted networks.
+`hmac.compare_digest`. This is a LAN-trust feature (like the remote
+vault server's own pairing — see takeloom/vault_client.py), not meant for
+untrusted networks.
 
 `dispatch()` is the server-side op table: every `Backend` method that's safe
 to expose directly over the wire. `subscribe_preview`/`unsubscribe_preview`
@@ -51,6 +52,12 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
     if op == "save_config":
         backend.save_config(StudioConfig.from_dict(args["config"]))
         return {}
+    if op == "begin_vault_pairing":
+        return backend.begin_vault_pairing(args["address"])
+    if op == "poll_vault_pairing":
+        return backend.poll_vault_pairing(args["url"], args["request_id"])
+    if op == "check_vault_server":
+        return backend.check_vault_server()
     if op == "list_audio_devices":
         return {"devices": backend.list_audio_devices()}
     if op == "list_cameras":

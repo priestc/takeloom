@@ -53,7 +53,7 @@ def _resolve_project(config: StudioConfig, name: str | None) -> Project:
 
 @main.command()
 def setup_studio() -> None:
-    """Configure studio name, location, musician, and backup server."""
+    """Configure studio name, location, musician, and remote vault server."""
     click.echo("=== Studio Setup ===\n")
 
     existing = StudioConfig.load()
@@ -61,7 +61,7 @@ def setup_studio() -> None:
     existing.studio_name = click.prompt("Studio name", default=existing.studio_name, show_default=bool(existing.studio_name))
     existing.studio_location = click.prompt("Studio location", default=existing.studio_location, show_default=bool(existing.studio_location))
     existing.studio_musician = click.prompt("Studio musician (default performer)", default=existing.studio_musician, show_default=bool(existing.studio_musician))
-    existing.backup_server = click.prompt("Backup server (user@host:/path, or empty to skip)", default=existing.backup_server, show_default=bool(existing.backup_server))
+    existing.vault_server = click.prompt("Remote vault server (e.g. http://tank2:51824, or empty to skip)", default=existing.vault_server, show_default=bool(existing.vault_server))
     existing.inspiration_server = click.prompt("Inspiration server URL (or empty to skip)", default=existing.inspiration_server, show_default=bool(existing.inspiration_server))
     existing.inspiration_api_key = click.prompt("Inspiration API key (or empty to skip)", default=existing.inspiration_api_key, show_default=bool(existing.inspiration_api_key))
 
@@ -687,43 +687,110 @@ def new_project() -> None:
 
     name = click.prompt("Project name")
     project = Project.create_new(projects_dir, name, Path(config.session_vault_path))
-    if config.backup_server:
-        project.setlist.backup_server = config.backup_server
-        project.save_setlist()
 
     click.echo(f"Created project: {project.setlist_path}")
     click.echo(f"Add backing tracks to the shared vault's backing_tracks/ folder, then run:")
     click.echo(f"  takeloom update-setlist {name!r}")
 
 
+def _paired_vault_client(config: StudioConfig):
+    from .vault_client import VaultClient
+    if not config.vault_server or not config.vault_server_token:
+        click.echo("Error: No paired remote vault. Set its address in Studio Setup (or 'takeloom setup-studio'), "
+                   "then run 'takeloom vault pair'.", err=True)
+        raise SystemExit(1)
+    return VaultClient(config.vault_server, config.vault_server_token)
+
+
 @main.command()
 def sync_push() -> None:
-    """Push every project's setlist file to the backup server. A project
-    is just <projects_dir>/<name>.json — this pushes them all at once.
-    Recorded sessions, backing tracks, and completed takes sync
-    separately via the Studio Session Vault (see 'takeloom setup-studio')."""
+    """Push every project's setlist file to the remote vault's projects/
+    folder. A project is just <projects_dir>/<name>.json — this pushes
+    them all at once. Recorded sessions, backing tracks, and completed
+    takes sync separately via the Studio Session Vault itself."""
+    from .vault_client import VaultError
     config = StudioConfig.load()
-    remote = config.backup_server
-    if not remote:
-        click.echo("Error: No backup server configured. Set it via 'takeloom setup-studio'.", err=True)
-        raise SystemExit(1)
-
-    from .sync import sync_up
-    sync_up(Path(config.projects_dir), remote)
+    client = _paired_vault_client(config)
+    failed = 0
+    for path in sorted(Path(config.projects_dir).iterdir()):
+        if not path.is_file() or path.name.startswith("."):
+            continue
+        try:
+            client.upload_file(path, f"projects/{path.name}")
+            click.echo(f"Pushed {path.name}")
+        except VaultError as e:
+            click.echo(f"Warning: could not push {path.name}: {e}", err=True)
+            failed += 1
+    click.echo("Sync push complete." if not failed else f"Sync push finished with {failed} failure(s).")
 
 
 @main.command()
 def sync_pull() -> None:
-    """Pull every project's setlist file from the backup server. See
-    sync-push for why this operates on all projects at once."""
+    """Pull every project's setlist file from the remote vault's projects/
+    folder, overwriting local copies. See sync-push."""
     config = StudioConfig.load()
-    remote = config.backup_server
-    if not remote:
-        click.echo("Error: No backup server configured. Set it via 'takeloom setup-studio'.", err=True)
+    client = _paired_vault_client(config)
+    files = client.list_files("projects")
+    if files is None:
+        click.echo(f"Error: could not reach the vault at {client.url}.", err=True)
         raise SystemExit(1)
+    for f in files:
+        ok = client.download_file(f"projects/{f['name']}", Path(config.projects_dir) / f["name"])
+        click.echo(f"Pulled {f['name']}" if ok else f"Warning: could not pull {f['name']}")
+    click.echo("Sync pull complete.")
 
-    from .sync import sync_down
-    sync_down(Path(config.projects_dir), remote)
+
+@main.group(name="vault")
+def vault_group() -> None:
+    """Pair with / check the remote vault server (takeloom-vault)."""
+
+
+@vault_group.command(name="pair")
+@click.argument("address", required=False)
+def vault_pair(address: str | None) -> None:
+    """Pair this machine with the remote vault server at ADDRESS (default:
+    the configured one). Prints a code to approve on the vault's web page."""
+    from .vault_client import VaultClient, VaultError, normalize_vault_url
+    config = StudioConfig.load()
+    url = normalize_vault_url(address or config.vault_server)
+    if not url:
+        click.echo("Error: give the vault server's address, e.g. 'takeloom vault pair tank2'.", err=True)
+        raise SystemExit(1)
+    client = VaultClient(url)
+    try:
+        req = client.begin_pairing()
+        click.echo(f"Open {url} in a browser and approve pairing code {req['code']}...")
+        while True:
+            time.sleep(2)
+            result = client.poll_pairing(req["request_id"])
+            if result["status"] != "pending":
+                break
+    except VaultError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+    if result["status"] != "approved":
+        click.echo(f"Pairing {result['status']}.", err=True)
+        raise SystemExit(1)
+    config = StudioConfig.load()  # re-read: don't clobber anything saved meanwhile
+    config.vault_server, config.vault_server_token = url, result["token"]
+    config.save()
+    click.echo(f"Paired with {url}.")
+
+
+@vault_group.command(name="status")
+def vault_status() -> None:
+    """Check that the remote vault server is reachable and accepts this
+    machine's token."""
+    from .vault_client import VaultError
+    config = StudioConfig.load()
+    client = _paired_vault_client(config)
+    try:
+        info = client.ping()
+    except VaultError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+    click.echo(f"OK: {client.url} ({info.get('hostname')}) knows this machine as '{info.get('client')}'. "
+               f"Vault mode: {config.session_vault_mode}.")
 
 
 @main.command()
@@ -987,7 +1054,7 @@ def start_session(instrument: str, project_name: str | None) -> None:
     click.echo("Processing session takes...")
     backend.join_session_processing()
     # Recorded session, backing tracks, and completed takes are already
-    # synced to the backup server by LocalBackend itself as part of
+    # uploaded to the remote vault by LocalBackend itself as part of
     # ending the session (see vault.py) — nothing further to do here.
     # If this project's own setlist.json needs pushing too (e.g. another
     # machine will pick it up), run 'takeloom sync-push'.

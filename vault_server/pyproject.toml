@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "takeloom-vault"
+version = "0.1.0"
+description = "Takeloom Studio Vault server: stores recorded sessions and serves a web browser/player for them"
+requires-python = ">=3.9"
+# Deliberately stdlib-only: this runs headless on the storage box (tank2),
+# which has none of takeloom's audio/video/Stream Deck stack — and doesn't
+# need it. Keep it that way so `pipx install` there never needs a compiler.
+dependencies = []
+
+[project.scripts]
+takeloom-vault = "takeloom_vault.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["takeloom_vault"]

@@ -25,11 +25,14 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from .config import StudioConfig
 from .project import Project, TakeInfo, TrackEntry
 from .utils import atomic_write_text, ensure_dir
+
+if TYPE_CHECKING:
+    from .vault_client import VaultClient
 
 LogFn = Callable[[str], None]
 
@@ -123,9 +126,6 @@ def record_inspiration_take(
     save_inspiration_index(root, index)
 
 
-# --- syncing session dirs and individual vault files to/from the remote ---
-
-
 # --- saved song mixes ---
 #
 # The Completed Takes tab's mixer (ui/song_mixer.py) saves each song's
@@ -217,36 +217,48 @@ def save_backing_tuning(root: Path, backing_track: str, cents: float) -> None:
     atomic_write_text(_backing_tuning_path(root), json.dumps(tuning, indent=2, sort_keys=True))
 
 
-def sync_and_maybe_prune(config: StudioConfig, session_dir: Path, log: LogFn | None = None) -> None:
-    """Best-effort: push `session_dir` (already inside the vault) to the
-    remote backup server if session_vault_mode is "remote" or "both", and
-    — only for "remote" mode, and only once that push is verified
-    successful — delete the local copy, so the remote ends up as the sole
-    copy. Does nothing for "local" mode, or if no backup_server is
-    configured (there's nowhere to push to). `log`, if given, reports
-    progress — an emitted event from a live session's background
-    processing thread, or plain stdout from the migration CLI command;
-    either way this function never raises, matching this codebase's other
-    best-effort sync/hardware paths."""
-    log = log or (lambda msg: None)
-    mode = config.session_vault_mode
-    if mode not in ("remote", "both"):
-        return
-    if not config.backup_server:
-        log(f"Vault sync skipped for {session_dir.name}: no backup server configured.")
-        return
+def remote_vault(config: StudioConfig, log: LogFn | None = None) -> "VaultClient | None":
+    """A client for the remote vault server, or None if session_vault_mode
+    is "local" or no vault server is set/paired (logging which, if `log`
+    is given). Every remote-vault access goes through this."""
+    if config.session_vault_mode not in ("remote", "both"):
+        return None
+    if not config.vault_server:
+        if log:
+            log("Remote vault skipped: no vault server configured.")
+        return None
+    if not config.vault_server_token:
+        if log:
+            log(f"Remote vault skipped: not paired with {config.vault_server} yet (Studio Setup → Pair).")
+        return None
+    from .vault_client import VaultClient
+    return VaultClient(config.vault_server, config.vault_server_token)
 
-    from .sync import sync_vault_session_up
-    relative = session_dir.relative_to(vault_root(config))
-    log(f"Syncing '{relative}' to {config.backup_server}...")
-    ok = sync_vault_session_up(session_dir, str(relative), config.backup_server)
-    if not ok:
-        log(f"Vault sync failed for '{relative}' — kept locally.")
+
+def sync_and_maybe_prune(config: StudioConfig, session_dir: Path, log: LogFn | None = None) -> None:
+    """Best-effort: upload `session_dir` (already inside the vault) to the
+    remote vault server if session_vault_mode is "remote" or "both", and
+    — only for "remote" mode, and only once every file's upload was
+    checksum-verified by the server — delete the local copy, so the
+    remote ends up as the sole copy. Does nothing for "local" mode, or if
+    no vault server is configured/paired (there's nowhere to push to).
+    `log`, if given, reports progress — an emitted event from a live
+    session's background processing thread, or plain stdout from the
+    migration CLI command; either way this function never raises,
+    matching this codebase's other best-effort sync/hardware paths."""
+    log = log or (lambda msg: None)
+    client = remote_vault(config, log)
+    if client is None:
         return
-    log(f"Synced '{relative}'.")
-    if mode == "remote":
+    name = session_dir.name
+    log(f"Uploading session '{name}' to the vault at {client.url}...")
+    if not client.upload_session(session_dir, name, log=log):
+        log(f"Vault upload failed for '{name}' — kept locally.")
+        return
+    log(f"Uploaded '{name}' to the vault.")
+    if config.session_vault_mode == "remote":
         shutil.rmtree(session_dir, ignore_errors=True)
-        log(f"Removed local copy of '{relative}' (remote-only vault mode).")
+        log(f"Removed local copy of '{name}' (remote-only vault mode).")
 
 
 def _files_used_by_track(project: Project, track: TrackEntry, config: StudioConfig) -> set[tuple[Path, str]]:
@@ -289,7 +301,7 @@ def ensure_setlist_files_local(config: StudioConfig, project: Project, log: LogF
     need — every track's backing track, and every instrument's take
     already recorded on it (including, for inspiration-sourced tracks,
     whatever the shared index knows from *other* projects) — actually
-    exists on local disk, downloading from the remote backup server for
+    exists on local disk, downloading from the remote vault server for
     whatever's missing. Only matters in "remote" vault mode, where a file
     can legitimately have been pruned locally after its own session
     synced; in "local"/"both" modes everything's already local, so this
@@ -297,15 +309,15 @@ def ensure_setlist_files_local(config: StudioConfig, project: Project, log: LogF
     raised — the session still starts, just possibly missing that one
     backing track or layered take."""
     log = log or (lambda msg: None)
-    if not config.backup_server:
+    client = remote_vault(config)
+    if client is None:
         return
-    from .sync import sync_vault_file_down
     needed = set()
     for track in project.setlist.tracks:
         needed |= _files_used_by_track(project, track, config)
     for local_path, relative in sorted(needed, key=lambda pair: pair[1]):
         if local_path.exists():
             continue
-        log(f"Downloading '{relative}' from vault remote...")
-        if not sync_vault_file_down(config.backup_server, relative, local_path):
-            log(f"Could not download '{relative}' — it may not exist on the remote either.")
+        log(f"Downloading '{relative}' from the vault at {client.url}...")
+        if not client.download_file(relative, local_path):
+            log(f"Could not download '{relative}' from {client.url} — it may not exist there either.")

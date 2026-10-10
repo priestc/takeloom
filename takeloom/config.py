@@ -181,6 +181,18 @@ def _dedupe_known_remotes(remotes: list[KnownRemote]) -> list[KnownRemote]:
     return [merged[h] for h in order]
 
 
+def _migrate_backup_server(data: dict) -> None:
+    """The remote vault used to be an rsync destination ("backup_server":
+    "host:/path"); it's a takeloom-vault server on that same host now.
+    Carry the host over so only pairing is left to do."""
+    old = (data.pop("backup_server", "") or "").strip()
+    if old and not data.get("vault_server") and ":" in old:
+        host = old.split(":", 1)[0].rsplit("@", 1)[-1]
+        if host:
+            from .vault_client import normalize_vault_url
+            data["vault_server"] = normalize_vault_url(host)
+
+
 @dataclass
 class AuthorizedClient:
     """A remote takeloom instance authorized to connect to this machine's server."""
@@ -202,12 +214,16 @@ class StudioConfig:
     # flac, session_video.mp4, session_log.json, ...) are stored, separate
     # from a project (setlist.json, backing_tracks/, completed_takes/ —
     # the actual song-level outputs) — see takeloom/vault.py.
-    # "local" | "remote" | "both". "remote" pushes to backup_server (below)
-    # and then deletes the local copy once that's verified; "both" pushes
+    # "local" | "remote" | "both". "remote" uploads to vault_server (below)
+    # and then deletes the local copy once that's verified; "both" uploads
     # but keeps the local copy too; "local" never syncs.
     session_vault_mode: str = "local"
     session_vault_path: str = str(Path.home() / "Documents" / "Takeloom Studio Vault")
-    backup_server: str = ""  # e.g. "user@host:/path/to/backups" — also the Vault's remote destination
+    # The remote vault: a `takeloom-vault` server (this repo's vault_server/
+    # folder), e.g. "http://tank2:51824" — see takeloom/vault_client.py.
+    # vault_server_token is what pairing with it issued ("" = not paired).
+    vault_server: str = ""
+    vault_server_token: str = ""
     inspiration_server: str = ""  # e.g. "http://myserver:8000"
     inspiration_api_key: str = ""
     inspiration_volume: float = 1.0
@@ -273,8 +289,8 @@ class StudioConfig:
             errors.append("Streaming is enabled but no YouTube stream key is set.")
         if self.session_vault_mode not in ("local", "remote", "both"):
             errors.append(f"Invalid vault mode: {self.session_vault_mode}. Must be 'local', 'remote', or 'both'.")
-        if self.session_vault_mode in ("remote", "both") and not self.backup_server.strip():
-            errors.append(f"Vault mode is '{self.session_vault_mode}' but no backup server is set.")
+        if self.session_vault_mode in ("remote", "both") and not self.vault_server.strip():
+            errors.append(f"Vault mode is '{self.session_vault_mode}' but no remote vault server is set.")
         for inst in self.instruments:
             if not inst.full_name.strip():
                 errors.append("Every instrument needs a full name (manufacturer/model).")
@@ -346,6 +362,7 @@ class StudioConfig:
             return {k: v for k, v in d.items() if k in dc.__dataclass_fields__}
 
         data = dict(data)
+        _migrate_backup_server(data)
         input_labels = [InputLabel(**_filtered(il, InputLabel)) for il in data.pop("input_labels", [])]
         instruments = [Instrument(**_filtered(i, Instrument)) for i in data.pop("instruments", [])]
         known_remotes_raw = [KnownRemote(**_filtered(r, KnownRemote)) for r in data.pop("known_remotes", [])]

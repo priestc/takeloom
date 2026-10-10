@@ -71,6 +71,15 @@ class RemoteBackend(Backend):
     def save_config(self, config: StudioConfig) -> None:
         self._client.call("save_config", {"config": config.to_dict()})
 
+    def begin_vault_pairing(self, address: str) -> dict:
+        return self._client.call("begin_vault_pairing", {"address": address})
+
+    def poll_vault_pairing(self, url: str, request_id: str) -> dict:
+        return self._client.call("poll_vault_pairing", {"url": url, "request_id": request_id})
+
+    def check_vault_server(self) -> dict:
+        return self._client.call("check_vault_server", {})
+
     # --- devices ---
 
     def list_audio_devices(self) -> list[dict]:
@@ -161,7 +170,7 @@ class RemoteBackend(Backend):
         )["summary"]
 
     def delete_session(self, session_dir: str) -> dict:
-        # The studio may need an SSH round-trip to the backup server.
+        # The studio may need a round-trip to the remote vault server.
         return self._client.call("delete_session", {"session_dir": session_dir}, timeout=DOWNLOAD_TIMEOUT)
 
     def correct_session_instrument(self, session_dir: str, new_instrument: str) -> None:

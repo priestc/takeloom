@@ -308,7 +308,7 @@ class SessionsFrame(ttk.Frame):
         # (self.player), from the local file backend.py's
         # get_take_playback_path produces. Works identically pointed at local
         # hardware or a Remote connection: locally it just needs the file
-        # to exist (downloading it from the backup server first if
+        # to exist (downloading it from the remote vault first if
         # "remote" vault mode already pruned it — see ensure_take_local),
         # remotely the server does that same local-availability step on
         # its own end and streams the bytes back to actually play here.
@@ -330,7 +330,7 @@ class SessionsFrame(ttk.Frame):
         takes = [take for track in detail.get("tracks", []) for take in track.get("takes", [])]
         lines = [f"Permanently delete the session from {detail.get('date_display') or detail.get('date', '')}?", ""]
         lines.append(
-            "Its recording (audio, video, MIDI) is removed from this machine and the backup server."
+            "Its recording (audio, video, MIDI) is removed from this machine and the remote vault."
         )
         if takes:
             word = "take" if len(takes) == 1 else "takes"

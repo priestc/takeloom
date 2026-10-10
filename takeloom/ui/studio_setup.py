@@ -50,7 +50,7 @@ FIELDS = [
 # _on_save still writes both back from self._vars, same as any FIELDS entry.
 VAULT_FIELDS = [
     ("session_vault_path", "Local vault"),
-    ("backup_server", "Remote vault (user@host:/path)"),
+    ("vault_server", "Remote vault server"),
 ]
 
 _VAULT_MODE_LABELS = [("local", "Local only"), ("remote", "Remote only"), ("both", "Both")]
@@ -630,6 +630,23 @@ class StudioSetupFrame(ttk.Frame):
                 ttk.Button(path_row, text="Browse...", command=self._on_browse_local_vault).grid(
                     row=0, column=1, padx=(6, 0)
                 )
+            elif attr == "vault_server":
+                server_row = ttk.Frame(self.content)
+                server_row.grid(row=row, column=1, sticky="ew")
+                server_row.columnconfigure(0, weight=1)
+                ttk.Entry(server_row, textvariable=var).grid(row=0, column=0, sticky="ew")
+                self.pair_button = ttk.Button(server_row, text="Pair...", command=self._on_pair_vault)
+                self.pair_button.grid(row=0, column=1, padx=(6, 0))
+                ttk.Button(server_row, text="Check", command=self._on_check_vault).grid(row=0, column=2, padx=(6, 0))
+                row += 1
+                self.vault_pair_var = tk.StringVar(
+                    value="Paired." if self.config_obj.vault_server_token else
+                    "Not paired — enter the vault server's address (e.g. tank2) and click Pair."
+                )
+                ttk.Label(
+                    self.content, textvariable=self.vault_pair_var, foreground="#666666", wraplength=440,
+                    justify="left",
+                ).grid(row=row, column=1, sticky="w")
             else:
                 ttk.Entry(self.content, textvariable=var, width=42).grid(row=row, column=1, sticky="ew")
             row += 1
@@ -650,6 +667,73 @@ class StudioSetupFrame(ttk.Frame):
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 10))
         row += 1
         return row
+
+    # --- remote vault pairing ---
+    #
+    # Runs through the backend (see Backend.begin_vault_pairing), so on a
+    # Remote connection it's the studio machine that pairs and keeps the
+    # token — the one that actually uploads sessions.
+
+    def _run_in_background(self, work, on_done) -> None:
+        """work() on a worker thread; on_done(result, error) back on Tk."""
+        def worker() -> None:
+            try:
+                result, error = work(), None
+            except BackendError as e:
+                result, error = None, str(e)
+            self.after(0, lambda: self.winfo_exists() and on_done(result, error))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_pair_vault(self) -> None:
+        backend = self.app_state.backend
+        address = self._vars["vault_server"].get().strip()
+        self.pair_button.state(["disabled"])
+        self.vault_pair_var.set(f"Contacting {address or 'vault'}...")
+
+        def started(req, error) -> None:
+            if error:
+                self.pair_button.state(["!disabled"])
+                self.vault_pair_var.set(f"Pairing failed: {error}")
+                return
+            self._vars["vault_server"].set(req["url"])
+            self.vault_pair_var.set(
+                f"Open {req['url']} in a browser and approve pairing code {req['code']}. Waiting..."
+            )
+            self._poll_vault_pairing(req["url"], req["request_id"])
+
+        self._run_in_background(lambda: backend.begin_vault_pairing(address), started)
+
+    def _poll_vault_pairing(self, url: str, request_id: str) -> None:
+        backend = self.app_state.backend
+
+        def polled(result, error) -> None:
+            if error:
+                self.pair_button.state(["!disabled"])
+                self.vault_pair_var.set(f"Pairing failed: {error}")
+                return
+            status = result["status"]
+            if status == "pending":
+                self.after(2000, lambda: self._poll_vault_pairing(url, request_id))
+                return
+            self.pair_button.state(["!disabled"])
+            if status == "approved":
+                # Already saved by the backend; mirror it here so this tab's
+                # next Save doesn't write the old values back over it.
+                self.config_obj.vault_server = result["url"]
+                self.config_obj.vault_server_token = result["token"]
+                self.vault_pair_var.set(f"Paired with {result['url']}.")
+            else:
+                self.vault_pair_var.set(f"Pairing {status}. Click Pair to try again.")
+
+        self._run_in_background(lambda: backend.poll_vault_pairing(url, request_id), polled)
+
+    def _on_check_vault(self) -> None:
+        backend = self.app_state.backend
+        self.vault_pair_var.set("Checking...")
+        self._run_in_background(
+            backend.check_vault_server,
+            lambda result, error: self.vault_pair_var.set(error or result["message"]),
+        )
 
     def _on_browse_local_vault(self) -> None:
         initial = self._vars["session_vault_path"].get().strip()
@@ -920,6 +1004,13 @@ class StudioSetupFrame(ttk.Frame):
     def _on_save(self) -> None:
         for attr, _label in FIELDS:
             setattr(self.config_obj, attr, self._vars[attr].get())
+        from ..vault_client import normalize_vault_url
+        new_vault_server = normalize_vault_url(self._vars["vault_server"].get())
+        if new_vault_server != normalize_vault_url(self.config_obj.vault_server):
+            # A token is only good for the server that issued it.
+            self.config_obj.vault_server_token = ""
+            self.vault_pair_var.set("Not paired with this address yet — click Pair.")
+        self._vars["vault_server"].set(new_vault_server)
         for attr, _label in VAULT_FIELDS:
             setattr(self.config_obj, attr, self._vars[attr].get())
         for value, label in _VAULT_MODE_LABELS:
