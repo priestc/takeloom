@@ -247,6 +247,14 @@ class RemoteBackend(Backend):
             cache_key=f"backing:{take_filename}", local_name="backing_{filename}",
         ))
 
+    def get_take_video_path(self, filename: str) -> str:
+        # The studio end produces the clip (see LocalBackend.get_take_video_path)
+        # and streams it back the same way as a take's audio.
+        return str(self._fetch_file(
+            "fetch_take_video", {"filename": filename}, cache_key=f"video:{filename}",
+            local_name=Path(filename).stem + ".mp4",
+        ))
+
     def _fetch_take_file(self, project_name: str, filename: str) -> Path:
         """Download one take file to this machine's own disk — the
         Remote-capable equivalent of LocalBackend.ensure_take_local,

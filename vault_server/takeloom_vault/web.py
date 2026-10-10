@@ -188,8 +188,10 @@ def session_page(vault: Vault, name: str, data: dict) -> str:
             links = []
             if (vault.root / "completed_takes" / filename).exists():
                 links.append(f"<a href='{_media_url('completed_takes/' + filename)}'>audio</a>")
-            if take.get("has_video") and (vault.root / "completed_takes" / f"{stem}.mp4").exists():
-                links.append(f"<a href='{_media_url('completed_takes/' + stem + '.mp4')}'>video</a>")
+            # Cut from the session video on first click (see takes.py), so
+            # the first open of a long take takes a little while.
+            if take.get("video") or (vault.root / "completed_takes" / f"{stem}.mp4").exists():
+                links.append(f"<a href='/takes/{quote(filename, safe='')}/video'>video</a>")
             take_links.append(
                 f"<span class='pill'>{escape(take.get('instrument', ''))} take {take.get('take_number', '')}</span>"
                 + " ".join(links)

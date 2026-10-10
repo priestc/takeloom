@@ -20,17 +20,23 @@ from . import DEFAULT_PORT
 
 STATE_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "takeloom-vault"
 CLIENTS_FILE = STATE_DIR / "clients.json"
+DEFAULT_CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "takeloom-vault" / "take-videos"
 SERVICE_NAME = "takeloom-vault.service"
 
 
 def _cmd_serve(args) -> None:
     from .auth import Auth
     from .server import serve
+    from .server import log
     from .store import Vault
+    from .takes import TakeVideoCache
     vault = Vault(Path(args.vault))
     if not vault.root.is_dir():
         sys.exit(f"Vault folder does not exist: {vault.root}")
-    serve(vault, Auth.load(CLIENTS_FILE), args.host, args.port)
+    take_videos = TakeVideoCache(
+        vault, Path(args.cache_dir).expanduser(), args.cache_max_age_days, int(args.cache_max_gb * 1e9), log,
+    )
+    serve(vault, Auth.load(CLIENTS_FILE), take_videos, args.host, args.port)
 
 
 def _cmd_clients(_args) -> None:
@@ -60,7 +66,10 @@ def _cmd_install_service(args) -> None:
     unit_dir = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "systemd" / "user"
     unit_dir.mkdir(parents=True, exist_ok=True)
     unit = unit_dir / SERVICE_NAME
-    exec_start = " ".join(shlex.quote(a) for a in [exe, "serve", "--vault", str(vault), "--port", str(args.port)])
+    exec_start = " ".join(shlex.quote(a) for a in [
+        exe, "serve", "--vault", str(vault), "--port", str(args.port), "--cache-dir", str(args.cache_dir),
+        "--cache-max-age-days", str(args.cache_max_age_days), "--cache-max-gb", str(args.cache_max_gb),
+    ])
     unit.write_text(
         "[Unit]\n"
         "Description=Takeloom Studio Vault server\n"
@@ -81,6 +90,15 @@ def _cmd_install_service(args) -> None:
     print(f"Started. Logs: journalctl --user -u {SERVICE_NAME} -f")
 
 
+def _add_cache_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR),
+                   help="where take videos cut on demand are kept (default: %(default)s)")
+    p.add_argument("--cache-max-age-days", type=float, default=14,
+                   help="evict a cached take video not requested for this long (default: %(default)s)")
+    p.add_argument("--cache-max-gb", type=float, default=20,
+                   help="evict least-recently-used take videos past this total size (default: %(default)s)")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="takeloom-vault", description="Takeloom Studio Vault server")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -89,6 +107,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--vault", required=True, help="the vault folder (holds sessions/, completed_takes/, ...)")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=DEFAULT_PORT)
+    _add_cache_args(p)
     p.set_defaults(func=_cmd_serve)
 
     p = sub.add_parser("clients", help="list paired devices")
@@ -101,6 +120,7 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("install-service", help="install + start as a systemd user service")
     p.add_argument("--vault", required=True)
     p.add_argument("--port", type=int, default=DEFAULT_PORT)
+    _add_cache_args(p)
     p.set_defaults(func=_cmd_install_service)
 
     args = parser.parse_args(argv)

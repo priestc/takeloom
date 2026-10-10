@@ -35,6 +35,9 @@ _TIMEOUT = 20
 # Per-socket-operation timeout during a transfer, not for the whole file:
 # a multi-GB session upload is fine as long as bytes keep moving.
 _TRANSFER_TIMEOUT = 120
+# Cutting a long take out of its session video (a re-encode) on the vault
+# server, before the first byte comes back.
+_CLIP_TIMEOUT = 1800
 _CHUNK = 1024 * 1024
 
 LogFn = Callable[[str], None]
@@ -205,12 +208,22 @@ class VaultClient:
         into place only once the whole body arrived — a dropped transfer
         never leaves a truncated file under the real name. Returns whether
         it succeeded (and the file now exists)."""
+        return self._download(f"/api/files/{self._q(vault_relative)}", local_path, _TRANSFER_TIMEOUT)
+
+    def download_take_video(self, take_filename: str, local_path: Path) -> bool:
+        """The video of completed take `take_filename`, which the server
+        cuts from its session video on first request (and caches) — see
+        take_video.py. The first request for a take can sit silent for
+        minutes while that encode runs, hence the long timeout."""
+        return self._download(
+            f"/api/takes/{quote(take_filename, safe='')}/video", local_path, _CLIP_TIMEOUT,
+        )
+
+    def _download(self, path: str, local_path: Path, timeout: float) -> bool:
         local_path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(prefix=".download-", dir=local_path.parent)
         try:
-            with os.fdopen(fd, "wb") as out, self._request(
-                "GET", f"/api/files/{self._q(vault_relative)}", timeout=_TRANSFER_TIMEOUT,
-            ) as resp:
+            with os.fdopen(fd, "wb") as out, self._request("GET", path, timeout=timeout) as resp:
                 expected = int(resp.headers.get("Content-Length") or -1)
                 written = 0
                 while chunk := resp.read(_CHUNK):

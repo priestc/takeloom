@@ -40,8 +40,8 @@ def _record_output_args(framerate: int) -> list[str]:
     kill it. With empty_moov + a fragment per keyframe the file is
     playable up to its last fragment however ffmpeg dies, and a keyframe
     every 2 s bounds what's lost to about that. Everything downstream
-    (processing/splicer.py's clip_session_video/mux_video_audio) re-muxes
-    into a normal faststart MP4, so nothing else sees the difference."""
+    (processing/splicer.py's mux_video_audio) re-muxes into a normal
+    faststart MP4, so nothing else sees the difference."""
     return [
         "-pix_fmt", "yuv420p", "-g", str(framerate * 2),
         "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
@@ -347,74 +347,6 @@ def mux_video_audio(
         "-disposition:a:0", "0",
         "-disposition:a:1", "default",
         "-shortest",
-        "-movflags", "+faststart",
-        str(output_path),
-    ]
-
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if watermark_png is not None:
-        watermark_png.unlink(missing_ok=True)
-    return result.returncode == 0
-
-
-def clip_session_video(
-    raw_video: Path,
-    mix_flac: Path,
-    instrument_flac: Path,
-    output_path: Path,
-    mix_start_s: float,
-    duration_s: float,
-    watermark_text: str | None = None,
-    video_offset_ms: float = 0.0,
-) -> bool:
-    """Cut one take's segment out of a continuous session recording: video
-    from the session's raw camera file, "Mix" audio from the session mix
-    flac (both seeked to the take's position on the mix/video timeline),
-    and the lossless instrument-only track from the take's own already-
-    spliced flac. Same two-audio-track output layout as mux_video_audio.
-
-    `mix_start_s` is where the take begins on the mix/video timeline;
-    video_offset_ms (the Latency tab's camera measurement) shifts the video
-    seek the same way mux_video_audio's -itsoffset shifts a whole-file mux.
-    The video is re-encoded — input seeking with a re-encode is frame-
-    accurate, where a stream copy could only start at a keyframe."""
-    if not ffmpeg_available() or duration_s <= 0:
-        return False
-
-    watermark_png: Path | None = None
-    if watermark_text:
-        try:
-            width, height = probe_video_size(raw_video)
-            watermark_png = output_path.with_name(output_path.stem + "_watermark.png")
-            render_watermark_image(watermark_text, width, height, watermark_png)
-        except Exception:
-            watermark_png = None
-
-    video_start_s = max(0.0, mix_start_s - video_offset_ms / 1000.0)
-    cmd = [
-        FFMPEG, "-y",
-        "-ss", f"{video_start_s:.6f}", "-i", str(raw_video),
-        "-ss", f"{max(0.0, mix_start_s):.6f}", "-i", str(mix_flac),
-        "-i", str(instrument_flac),
-    ]
-    if watermark_png is not None:
-        cmd += [
-            "-i", str(watermark_png),
-            "-filter_complex", "[0:v][3:v]overlay=0:main_h-overlay_h[outv]",
-            "-map", "[outv]",
-        ]
-    else:
-        cmd += ["-map", "0:v"]
-    cmd += [
-        "-map", "1:a", "-map", "2:a",
-        "-t", f"{duration_s:.6f}",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-c:a:0", "aac",
-        "-c:a:1", "flac",
-        "-metadata:s:a:0", "title=Mix",
-        "-metadata:s:a:1", "title=Instrument Only",
-        "-disposition:a:0", "0",
-        "-disposition:a:1", "default",
         "-movflags", "+faststart",
         str(output_path),
     ]

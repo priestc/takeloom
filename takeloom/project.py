@@ -27,9 +27,10 @@ class TakeInfo:
     take_number: int
     filename: str
     volume: float = 1.0
-    # Derived fresh from disk by Project.open() (see _sync_derived_take_flags) rather
-    # than trusted as persisted truth — self-heals if the video mux failed,
-    # was never attempted, or the .mp4 was later removed by hand.
+    # Derived fresh from disk by Project.open() (see _sync_derived_take_flags)
+    # rather than trusted as persisted truth: true if the take has a legacy
+    # .mp4 of its own or a ref to cut one from its session video on demand
+    # (see take_video.py).
     has_video: bool = False
     # Same self-healing treatment as has_video, for the take's sliced-out
     # raw MIDI performance (see audio/midi_log.py/processing/splicer.py) —
@@ -217,16 +218,18 @@ class Project:
         return proj
 
     def _sync_derived_take_flags(self) -> None:
-        """Set each take's has_video/has_midi flags from whether its
-        companion .mp4/.mid actually exist in completed_takes_dir, rather
-        than from whatever was last persisted — so a take is correctly
-        flagged "audio only" whether video/MIDI was never recorded (or,
-        for video, muxing failed), or the file was since deleted."""
+        """Set each take's has_video/has_midi flags from what's actually in
+        completed_takes_dir (a .mp4 or take_video.py's .video.json ref; a
+        .mid), rather than from whatever was last persisted — so a take is
+        correctly flagged "audio only" whether video/MIDI was never
+        recorded (or, for video, muxing failed), or the file was since
+        deleted."""
+        from .take_video import take_has_video
         for track in self.setlist.tracks:
             for take in track.preferred_takes.values():
-                stem = Path(take.filename).stem
-                take.has_video = (self.completed_takes_dir / f"{stem}.mp4").exists()
-                take.has_midi = (self.completed_takes_dir / f"{stem}.mid").exists()
+                audio = self.completed_takes_dir / take.filename
+                take.has_video = take_has_video(audio)
+                take.has_midi = audio.with_suffix(".mid").exists()
 
     @classmethod
     def create_new(cls, parent_dir: Path, name: str, vault_root: Path) -> Project:

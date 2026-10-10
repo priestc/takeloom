@@ -77,6 +77,7 @@ def _scan_song_take_files(stems: list[str], entry: TrackEntry, completed_dir: Pa
     song name, other audio) is left out, since it wouldn't line up; an
     untagged one (from before tags existed) is kept."""
     import re
+    from .take_video import take_has_video
     from .utils import _backing_track_id, sanitize_filename
 
     prefix = f"{sanitize_filename(entry.name)} - "
@@ -92,7 +93,7 @@ def _scan_song_take_files(stems: list[str], entry: TrackEntry, completed_dir: Pa
             continue
         found.setdefault(m.group("label"), []).append({
             "take_number": int(m.group("n")), "filename": f"{stem}.flac",
-            "has_video": (completed_dir / f"{stem}.mp4").exists(),
+            "has_video": take_has_video(completed_dir / f"{stem}.flac"),
             "has_midi": (completed_dir / f"{stem}.mid").exists(),
         })
     for takes in found.values():
@@ -541,6 +542,18 @@ class Backend(ABC):
         (fetched from the studio over Remote) for the Completed Takes
         mixer's "Backing track" strip. Raises BackendError if it can't be
         made available."""
+        ...
+
+    @abstractmethod
+    def get_take_video_path(self, filename: str) -> str:
+        """A local, playable video of completed take `filename` (as named in
+        a take dict), cut from its session's video on demand — see
+        take_video.py. Uses a legacy per-take .mp4 if one exists; else cuts
+        the clip here if the session is on local disk; else has the remote
+        vault server cut it (it caches the result) and downloads that. The
+        returned file lives in a temp cache, not the vault. Raises
+        BackendError if the take has no video or it can't be produced.
+        Can take a while (a re-encode) the first time for a given take."""
         ...
 
     @abstractmethod
@@ -2354,7 +2367,8 @@ class LocalBackend(Backend):
             for entries in (data.get("takes") or {}).values() for t in entries if t.get("filename")
         ]
         take_files = [
-            f"{Path(filename).stem}{ext}" for _, filename in takes for ext in (".flac", ".mp4", ".mid")
+            f"{Path(filename).stem}{ext}" for _, filename in takes
+            for ext in (".flac", ".mp4", ".mid", ".video.json")
         ]
 
         from .vault import remote_vault
@@ -2431,6 +2445,7 @@ class LocalBackend(Backend):
         old_audio_path = project.completed_takes_dir / take.filename
         old_video_path = project.completed_takes_dir / f"{old_stem}.mp4"
         old_midi_path = project.completed_takes_dir / f"{old_stem}.mid"
+        old_ref_path = project.completed_takes_dir / f"{old_stem}.video.json"
         ext = Path(take.filename).suffix.lstrip(".") or "flac"
 
         new_take_number = next_take_number(project.completed_takes_dir, track_name, new_instrument)
@@ -2442,9 +2457,12 @@ class LocalBackend(Backend):
 
         if old_audio_path.exists():
             shutil.move(str(old_audio_path), str(new_audio_path))
-        has_video = take.has_video and old_video_path.exists()
-        if has_video:
+        if old_video_path.exists():
             shutil.move(str(old_video_path), str(new_video_path))
+        if old_ref_path.exists():  # see take_video.py
+            shutil.move(str(old_ref_path), str(project.completed_takes_dir / f"{new_stem}.video.json"))
+        from .take_video import take_has_video
+        has_video = take_has_video(new_audio_path)
         has_midi = take.has_midi and old_midi_path.exists()
         if has_midi:
             shutil.move(str(old_midi_path), str(new_midi_path))
@@ -2690,6 +2708,39 @@ class LocalBackend(Backend):
         from .vault import load_backing_tuning
         cents = load_backing_tuning(Path(self.get_config().session_vault_path), path.name)
         return str(_pitched_playback_path(path, cents))
+
+    def get_take_video_path(self, filename: str) -> str:
+        from .take_video import clip_take_video, read_take_video_ref
+        from .vault import remote_vault, vault_root
+        if not filename or "/" in filename or "\\" in filename:
+            raise BackendError(f"Invalid take name '{filename}'.")
+        config = self.get_config()
+        root = vault_root(config)
+        audio = root / "completed_takes" / filename
+        legacy = audio.with_suffix(".mp4")
+        if legacy.exists():
+            return str(legacy)
+        ref = read_take_video_ref(audio)
+        if ref is None:
+            raise BackendError(f"'{filename}' has no video.")
+        cache_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_take_videos")
+        out = cache_dir / f"{audio.stem}.mp4"
+        if out.exists():
+            return str(out)
+        session_video = root / "sessions" / ref["session"] / "session_video.mp4"
+        if session_video.exists():
+            if not clip_take_video(session_video, ref, out):
+                raise BackendError(f"Could not cut '{filename}' out of {session_video}.")
+            return str(out)
+        client = remote_vault(config)
+        if client is None:
+            raise BackendError(
+                f"The session video for '{filename}' ({ref['session']}) isn't on this machine, "
+                "and no paired remote vault is configured."
+            )
+        if not client.download_take_video(filename, out):
+            raise BackendError(f"Could not get the video for '{filename}' from the vault at {client.url}.")
+        return str(out)
 
     def get_take_playback_path(self, project_name: str, filename: str, label: str) -> str:
         path = Path(self.ensure_take_local(project_name, filename))

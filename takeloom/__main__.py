@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import select
 import termios
@@ -775,6 +776,109 @@ def vault_pair(address: str | None) -> None:
     config.vault_server, config.vault_server_token = url, result["token"]
     config.save()
     click.echo(f"Paired with {url}.")
+
+
+@vault_group.command(name="migrate-take-videos")
+@click.option("--delete", is_flag=True, help="Also delete each migrated take's own .mp4 (local and on the vault).")
+def vault_migrate_take_videos(delete: bool) -> None:
+    """Point takes processed before on-demand take videos existed at their
+    session video (see take_video.py), so their own .mp4 copies are no
+    longer needed. Without --delete this only records the refs and reports
+    how much space deleting the .mp4s would free. Safe to re-run.
+
+    A take whose clip boundaries can't be recomputed exactly from its
+    session log (e.g. one recovered from a crash), or whose session has no
+    session_video.mp4, is left alone, .mp4 and all."""
+    from .processing.splicer import parse_session_log
+    from .take_video import read_take_video_ref, take_video_ref, write_take_video_ref
+    from .utils import atomic_write_text
+    from .vault import vault_root
+
+    config = StudioConfig.load()
+    root = vault_root(config)
+    completed_dir = root / "completed_takes"
+    client = None
+    if config.vault_server and config.vault_server_token:
+        from .vault_client import VaultClient
+        client = VaultClient(config.vault_server, config.vault_server_token)
+    remote_mp4s = {}
+    if client is not None:
+        remote_mp4s = {f["name"]: f["size"] for f in client.list_files("completed_takes") or [] if f["name"].endswith(".mp4")}
+
+    # Every session we can see: local first, then the remote vault's.
+    sessions: dict[str, tuple[dict, bool]] = {}  # name -> (log, is_local)
+    sessions_dir = root / "sessions"
+    if sessions_dir.is_dir():
+        for d in sessions_dir.iterdir():
+            if (d / "session_log.json").is_file():
+                try:
+                    sessions[d.name] = (json.loads((d / "session_log.json").read_text()), True)
+                except ValueError:
+                    pass
+    if client is not None:
+        for name, data in client.list_session_logs().items():
+            sessions.setdefault(name, (data, False))
+
+    migrated = skipped = 0
+    freed_local = freed_remote = 0
+    remote_deletes: list[str] = []
+    for name, (data, is_local) in sorted(sessions.items()):
+        if "takes" not in data:
+            continue
+        if is_local:
+            has_session_video = (sessions_dir / name / "session_video.mp4").exists()
+        else:
+            files = client.list_files(f"sessions/{name}") or []
+            has_session_video = any(f["name"] == "session_video.mp4" for f in files)
+        if not has_session_video:
+            continue
+
+        by_index: dict[int, list] = {}
+        for take in parse_session_log(data):
+            by_index.setdefault(take.track_index, []).append(take)
+        sample_rate = data.get("sample_rate") or 48000
+        mix_start = data.get("mix_start_frame") or 0
+        changed = False
+        for index, entries in data["takes"].items():
+            segments = by_index.get(int(index), [])
+            if len(segments) != len(entries):
+                click.echo(f"  skip {name} track {index}: can't match {len(entries)} take(s) to the log exactly")
+                skipped += len(entries)
+                continue
+            for entry, seg in zip(entries, segments):
+                filename = entry.get("filename", "")
+                audio = completed_dir / filename
+                ref = entry.get("video") or take_video_ref(
+                    name, max(0, seg.start_frame), seg.end_frame, mix_start, sample_rate,
+                    config.video_latency_compensation_ms,
+                )
+                if not entry.get("video"):
+                    entry["video"] = ref
+                    entry["has_video"] = True
+                    changed = True
+                if audio.exists() and read_take_video_ref(audio) is None:
+                    write_take_video_ref(audio, ref)
+                migrated += 1
+                mp4 = audio.with_suffix(".mp4")
+                if mp4.exists():
+                    freed_local += mp4.stat().st_size
+                    if delete:
+                        mp4.unlink()
+                if mp4.name in remote_mp4s:
+                    freed_remote += remote_mp4s[mp4.name]
+                    remote_deletes.append(f"completed_takes/{mp4.name}")
+        if changed:
+            if is_local:
+                atomic_write_text(sessions_dir / name / "session_log.json", json.dumps(data, indent=2))
+            elif not client.write_session_log(name, data):
+                click.echo(f"  warning: couldn't write refs back to {name} on {client.url}", err=True)
+
+    if delete and remote_deletes and not client.delete_paths(remote_deletes):
+        click.echo(f"Error: couldn't delete the take .mp4s on {client.url}.", err=True)
+        raise SystemExit(1)
+    verb = "Freed" if delete else "Deleting their .mp4s (--delete) would free"
+    click.echo(f"{migrated} take(s) now cut from their session video on demand; {skipped} skipped.")
+    click.echo(f"{verb} {freed_local / 1e9:.2f} GB locally and {freed_remote / 1e9:.2f} GB on the vault.")
 
 
 @vault_group.command(name="status")

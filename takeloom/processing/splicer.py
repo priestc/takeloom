@@ -1,6 +1,7 @@
 """Post-session processing: replay a session's event log to find completed
-takes, clip them (and their videos) out of the continuous session recording,
-and update the setlist.
+takes, clip their audio out of the continuous session recording, and update
+the setlist. A take's video isn't clipped here — only where it sits in the
+session video is recorded; see take_video.py.
 
 This is the deferred half of the session-centric recording model (see the
 recording section of backend.py): while a session is live, nothing is
@@ -67,6 +68,7 @@ import soundfile as sf
 
 from ..config import StudioConfig
 from ..project import Project, TakeInfo
+from ..take_video import take_video_ref, write_take_video_ref
 from ..utils import atomic_write_text, take_filename, next_take_number, ensure_dir
 from ..vault import record_inspiration_take, vault_root
 
@@ -273,6 +275,25 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
 
     completed = parse_session_log(data, total_frames=total_frames)
 
+    # The whole-session archive video, watermarked once for the session —
+    # built *before* the takes, since a take's video is no longer a file of
+    # its own: it's a pointer into this one (see take_video_ref), cut out
+    # on demand only when someone actually wants to watch it (the vault
+    # server's take-video endpoint / Backend.get_take_video_path).
+    session_video_ok = False
+    if have_video:
+        from ..video.capture import format_watermark_text, mux_video_audio
+        start_wall = next((e.get("wall_time", "") for e in data.get("events", [])
+                           if e.get("event_type") == "session_start"), "")
+        # No song name: the watermark is on every take cut from this video,
+        # and most of them aren't the session's first song.
+        watermark = format_watermark_text(musician, instrument, start_wall, "")
+        session_video_ok = mux_video_audio(
+            session_video_raw, session_mix_flac, session_flac,
+            session_dir / "session_video.mp4",
+            watermark_text=watermark, video_offset_ms=video_offset_ms,
+        )
+
     saved = 0
     videos = 0
     # Exactly which take(s) *this* session produced, per track_index — a
@@ -356,22 +377,14 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                 flac_name = take_filename(track_name, take_label, take_num, take_source, take_backing_track, "flac")
                 _copy_flac_segment(src, start, end, completed_dir / flac_name)
 
-                has_video = False
-                if have_video:
-                    from ..video.capture import clip_session_video, format_watermark_text
-                    watermark = format_watermark_text(
-                        musician, take_full_name, take.start_wall_time, track_name,
+                video_ref = None
+                if session_video_ok:
+                    video_ref = take_video_ref(
+                        session_dir.name, start, end, mix_start_frame, sample_rate, video_offset_ms,
                     )
-                    has_video = clip_session_video(
-                        session_video_raw, session_mix_flac, completed_dir / flac_name,
-                        completed_dir / take_filename(
-                            track_name, take_label, take_num, take_source, take_backing_track, "mp4",
-                        ),
-                        mix_start_s=(start - mix_start_frame) / sample_rate,
-                        duration_s=(end - start) / sample_rate,
-                        watermark_text=watermark, video_offset_ms=video_offset_ms,
-                    )
-                    videos += has_video
+                    write_take_video_ref(completed_dir / flac_name, video_ref)
+                    videos += 1
+                has_video = video_ref is not None
 
                 # Only for a MIDI take (synth_voice set — see take_label
                 # above): the same [start, end) range, cut from the raw
@@ -429,7 +442,8 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                 # takes of different songs under one track_index, and
                 # get_session_detail needs to show each under its own song.
                 session_takes.setdefault(take.track_index, []).append(
-                    {"instrument": take_label, "track_name": track_name, **asdict(take_info)}
+                    {"instrument": take_label, "track_name": track_name, **asdict(take_info),
+                     **({"video": video_ref} if video_ref else {})}
                 )
                 saved += 1
 
@@ -442,29 +456,16 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
         data["takes"] = {str(k): v for k, v in session_takes.items()}
         atomic_write_text(log_path, json.dumps(data, indent=2))
 
-    # The whole-session archive video, watermarked once for the session.
-    session_video_ok = False
-    if have_video:
-        from ..video.capture import format_watermark_text, mux_video_audio
-        first_track = next((e.get("track_name", "") for e in data.get("events", [])
-                            if e.get("event_type") == "record_start"), "")
-        start_wall = next((e.get("wall_time", "") for e in data.get("events", [])
-                           if e.get("event_type") == "session_start"), "")
-        watermark = format_watermark_text(musician, instrument, start_wall, first_track)
-        session_video_ok = mux_video_audio(
-            session_video_raw, session_mix_flac, session_flac,
-            session_dir / "session_video.mp4",
-            watermark_text=watermark, video_offset_ms=video_offset_ms,
-        )
-        if session_video_ok:
-            session_video_raw.unlink(missing_ok=True)
-            session_mix_flac.unlink(missing_ok=True)
-            # The instrument-only track muxed into session_video.mp4 above is a
-            # lossless, bit-identical copy of session.flac's samples, so once
-            # the mux succeeds this standalone file is pure redundancy. Kept
-            # only for audio-only sessions (no camera), where it's the sole
-            # recording.
-            session_flac.unlink(missing_ok=True)
+    # Only now that every take has been spliced out of session.flac above.
+    if session_video_ok:
+        session_video_raw.unlink(missing_ok=True)
+        session_mix_flac.unlink(missing_ok=True)
+        # The instrument-only track muxed into session_video.mp4 above is a
+        # lossless, bit-identical copy of session.flac's samples, so once
+        # the mux succeeds this standalone file is pure redundancy. Kept
+        # only for audio-only sessions (no camera), where it's the sole
+        # recording.
+        session_flac.unlink(missing_ok=True)
 
     take_word = "take" if saved == 1 else "takes"
     summary = f"Session processed: {saved} completed {take_word} saved"

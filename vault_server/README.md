@@ -50,6 +50,22 @@ stored (in `~/.config/takeloom-vault/clients.json`).
 
 No login: anyone on the local network can browse. The API needs a paired token.
 
+## Take videos
+
+Completed takes don't get their own video file. Each session log's `takes` snapshot
+records where each take sits in `session_video.mp4` (see `takeloom/take_video.py`). The
+first request for a take's video (`/takes/<take filename>/video` in the browser,
+`/api/takes/<take filename>/video` for takeloom) cuts it out with ffmpeg and caches it. An
+hourly sweep evicts clips nobody has requested for `--cache-max-age-days` (default 14), and
+the least recently used ones once the cache passes `--cache-max-gb` (default 20). The cache
+lives in `~/.cache/takeloom-vault/take-videos` unless `--cache-dir` says otherwise.
+Evicting is safe, since any clip can be cut again. The first cut of a long take takes a
+little while; after that it's served straight from the cache.
+
+Takes recorded before this have their own `.mp4`. Running `takeloom vault migrate-take-videos`
+on the studio machine records the refs for them, and adding `--delete` removes those `.mp4`
+duplicates.
+
 ## API
 
 See the docstring at the top of `takeloom_vault/server.py`. Uploads are `PUT

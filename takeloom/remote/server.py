@@ -50,7 +50,7 @@ _READ_ONLY_OPS = {
     "list_projects", "get_setlist", "get_filter_slot_previews",
     "search_inspiration_artists", "search_inspiration_by_filter", "find_inspiration_track",
     "is_recording", "get_monitoring_mode", "get_voice_switch", "poll_vault_pairing", "check_vault_server",
-    "list_sessions", "get_session_detail", "analyze_take", "fetch_take_file", "fetch_backing_file",
+    "list_sessions", "get_session_detail", "analyze_take", "fetch_take_file", "fetch_backing_file", "fetch_take_video",
     "list_completed_takes", "benchmark_audio_modifiers", "get_song_mix",
 }
 
@@ -344,6 +344,12 @@ class _ClientHandler(socketserver.StreamRequestHandler):
                 path = self._owner.backend.ensure_take_local(args["project_name"], args["filename"])
                 self.send_file("take_file", Path(path), extra={"filename": args["filename"]})
                 result = {}
+            elif op == "fetch_take_video":
+                # Same as fetch_take_file, for a take's video — cut from its
+                # session video on this end first (see get_take_video_path).
+                path = self._owner.backend.get_take_video_path(args["filename"])
+                self.send_file("take_file", Path(path), extra={"filename": Path(path).name})
+                result = {"filename": Path(path).name}
             elif op == "fetch_backing_file":
                 # Same as fetch_take_file, for a song's backing track (the
                 # Completed Takes mixer's "Backing track" strip) — see

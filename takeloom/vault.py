@@ -275,9 +275,8 @@ def _files_used_by_track(project: Project, track: TrackEntry, config: StudioConf
 
     def add_take(take: TakeInfo) -> None:
         needed.add((project.completed_takes_dir / take.filename, f"completed_takes/{take.filename}"))
-        if take.has_video:
-            video_name = Path(take.filename).stem + ".mp4"
-            needed.add((project.completed_takes_dir / video_name, f"completed_takes/{video_name}"))
+        # No take video here: recording never needs it, and it's cut from
+        # the session video on demand anyway (see take_video.py).
         if take.has_midi:
             midi_name = Path(take.filename).stem + ".mid"
             needed.add((project.completed_takes_dir / midi_name, f"completed_takes/{midi_name}"))

@@ -11,6 +11,8 @@ API — every route except /api/pair* needs `Authorization: Bearer <token>`:
     PUT    /api/sessions/<name>/log     <- session_log.json (existing session only)
     GET    /api/list/<dir>              -> {"files": [{"name", "size"}]}
     GET    /api/files/<vault path>      -> raw bytes
+    GET    /api/takes/<filename>/video  -> a completed take's video, cut from its session video
+                                           on first request and cached (see takes.py)
     PUT    /api/files/<vault path>      <- raw bytes, X-Content-SHA256 header required
     POST   /api/delete                  {"paths": [...]} -> {}
 
@@ -20,6 +22,7 @@ Browser UI:
     GET  /sessions/<name>        one session: video, songs, files
     GET  /clients                paired devices
     GET  /media/<vault path>     file download/stream, with Range support (for <video> seeking)
+    GET  /takes/<filename>/video  a take's video (as the API route above)
     POST /pairing/<id>/approve|deny,  POST /clients/<id>/revoke
 """
 
@@ -40,6 +43,7 @@ from urllib.parse import unquote, urlsplit
 from . import web
 from .auth import Auth
 from .store import Vault, VaultPathError
+from .takes import TakeVideoCache, TakeVideoError
 
 # Tailscale hands out addresses from the CGNAT block, which Python doesn't
 # count as "private" — but it's every bit as much "our own network".
@@ -85,9 +89,10 @@ class _HTTPError(Exception):
 class VaultHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, vault: Vault, auth: Auth) -> None:
+    def __init__(self, address, vault: Vault, auth: Auth, take_videos: TakeVideoCache) -> None:
         self.vault = vault
         self.auth = auth
+        self.take_videos = take_videos
         super().__init__(address, _Handler)
 
 
@@ -239,6 +244,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._html(web.session_page(vault, m.group(1), data))
         if path.startswith("/media/"):
             return self._send_file(vault.resolve(path[len("/media/"):]))
+        if m := re.fullmatch(r"/takes/([^/]+)/video", path):
+            return self._send_take_video(m.group(1))
         if path == "/favicon.ico":
             return self._send(HTTPStatus.NO_CONTENT, b"", "image/x-icon")
         raise _HTTPError(HTTPStatus.NOT_FOUND, "Not found")
@@ -265,6 +272,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json({})
         if (m := re.fullmatch(r"/list/(.+)", path)) and method == "GET":
             return self._json({"files": vault.list_dir(m.group(1))})
+        if (m := re.fullmatch(r"/takes/([^/]+)/video", path)) and method in ("GET", "HEAD"):
+            return self._send_take_video(m.group(1))
         if path.startswith("/files/"):
             relative = path[len("/files/"):]
             if method in ("GET", "HEAD"):
@@ -300,6 +309,13 @@ class _Handler(BaseHTTPRequestHandler):
             raise _HTTPError(HTTPStatus.UNPROCESSABLE_ENTITY, str(e)) from e
         log(f"{label} ({self.ip}) uploaded {relative} ({result['size']:,} bytes)")
         self._json(result)
+
+    def _send_take_video(self, take_filename: str) -> None:
+        try:
+            path = self.server.take_videos.path_for(take_filename)
+        except TakeVideoError as e:
+            raise _HTTPError(HTTPStatus.NOT_FOUND, str(e)) from e
+        self._send_file(path)
 
     def _send_file(self, path) -> None:
         if not path.is_file():
@@ -340,8 +356,9 @@ class _Handler(BaseHTTPRequestHandler):
                 remaining -= len(chunk)
 
 
-def serve(vault: Vault, auth: Auth, host: str, port: int) -> None:
-    httpd = VaultHTTPServer((host, port), vault, auth)
+def serve(vault: Vault, auth: Auth, take_videos: TakeVideoCache, host: str, port: int) -> None:
+    take_videos.start_sweeper()
+    httpd = VaultHTTPServer((host, port), vault, auth, take_videos)
     log(f"takeloom-vault serving {vault.root} on http://{socket.gethostname()}:{port} (pid {os.getpid()})")
     try:
         httpd.serve_forever()
