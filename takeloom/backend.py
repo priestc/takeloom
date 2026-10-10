@@ -5663,7 +5663,11 @@ class LocalBackend(Backend):
                 # Ends the RTMP connection too, if streaming was on: it's the
                 # same ffmpeg process (see _begin_session_locked), and this
                 # stop() is what finalizes it.
-                session.video_recorder.stop()
+                if not session.video_recorder.stop():
+                    self._emit("recording_status", {
+                        "status": "Camera recording didn't stop cleanly (camera powered off?) — "
+                                  "its video is kept up to the last couple of seconds.",
+                    })
                 self._preview.resume()
                 self._emit("preview_resumed", {})
             if session.youtube_broadcast_id is not None:

@@ -28,6 +28,26 @@ def _input_args(device: str, framerate: int) -> list[str]:
     raise RuntimeError(f"Camera capture is not supported on platform: {sys.platform}")
 
 
+def _record_output_args(framerate: int) -> list[str]:
+    """Encoding/muxing options for the recorded file itself.
+
+    Fragmented MP4: a regular MP4's index (the moov atom) is only written
+    when ffmpeg exits cleanly, so a capture that gets killed leaves an
+    unplayable file — which is exactly what happened to every session
+    ended by powering off the rig: the webcam loses power along with the
+    audio interface, ffmpeg's avfoundation input blocks on the vanished
+    device and never acts on stop()'s 'q', and stop() eventually has to
+    kill it. With empty_moov + a fragment per keyframe the file is
+    playable up to its last fragment however ffmpeg dies, and a keyframe
+    every 2 s bounds what's lost to about that. Everything downstream
+    (processing/splicer.py's clip_session_video/mux_video_audio) re-muxes
+    into a normal faststart MP4, so nothing else sees the difference."""
+    return [
+        "-pix_fmt", "yuv420p", "-g", str(framerate * 2),
+        "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+    ]
+
+
 def _build_capture_cmd(
     device: str, output_path: Path, framerate: int, stream_preview: bool,
     stream_target: "StreamTarget | None" = None,
@@ -42,7 +62,7 @@ def _build_capture_cmd(
             "-i", str(stream_target.audio_fifo),
         ]
     if not stream_preview and stream_target is None:
-        return cmd + ["-pix_fmt", "yuv420p", str(output_path)]
+        return cmd + [*_record_output_args(framerate), str(output_path)]
 
     # Split the decoded camera feed into up to three branches: "rec" (always,
     # encoded to the local output file exactly as before), "prev" (scaled
@@ -67,7 +87,7 @@ def _build_capture_cmd(
         filter_parts.append(f"[streamv]{stream_filter}[streamout]")
 
     cmd += ["-filter_complex", ";".join(filter_parts)]
-    cmd += ["-map", "[rec]", "-pix_fmt", "yuv420p", str(output_path)]
+    cmd += ["-map", "[rec]", *_record_output_args(framerate), str(output_path)]
     if stream_preview:
         cmd += ["-map", "[prevout]", "-f", "mjpeg", "-q:v", "5", "pipe:1"]
     if stream_target is not None:
@@ -178,16 +198,22 @@ class VideoRecorder:
         except (OSError, ValueError):
             pass
 
-    def stop(self, timeout: float = 10.0) -> None:
-        """Signal ffmpeg to finish and finalize the output file."""
+    def stop(self, timeout: float = 10.0) -> bool:
+        """Signal ffmpeg to finish and finalize the output file. Returns
+        False if it didn't exit on its own and had to be terminated/killed
+        (typically: the camera lost power mid-recording) — the fragmented
+        output (see _record_output_args) is still playable up to roughly
+        its last couple of seconds, but the caller should say so."""
         proc = self._proc
         self._proc = None
+        clean = True
         if proc is not None and proc.poll() is None:
             try:
                 proc.stdin.write(b"q")
                 proc.stdin.flush()
                 proc.wait(timeout=timeout)
             except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+                clean = False
                 proc.terminate()
                 try:
                     proc.wait(timeout=5.0)
@@ -196,6 +222,7 @@ class VideoRecorder:
         if self._preview_thread is not None:
             self._preview_thread.join(timeout=2.0)
             self._preview_thread = None
+        return clean
 
     @property
     def is_running(self) -> bool:
