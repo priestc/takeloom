@@ -89,17 +89,21 @@ class TakeVideoCache:
         if ref is None:
             raise TakeVideoError(f"No video is recorded for take {take_filename!r}.")
         session_video = self.vault.session_dir(ref["session"]) / "session_video.mp4"
-        # Keyed by the ref too, not just the name: a session_log correction
-        # that moves the ref must not keep serving a stale clip.
-        key = hashlib.sha256(json.dumps([take_filename, ref], sort_keys=True).encode()).hexdigest()[:24]
+        if not session_video.is_file():
+            raise TakeVideoError(f"Session video for {take_filename!r} is missing ({ref['session']}).")
+        # Keyed by the ref and the session video's size/mtime too, not just
+        # the name: a corrected ref or a rebuilt session video must never
+        # keep serving a clip cut from what was there before.
+        st = session_video.stat()
+        key = hashlib.sha256(json.dumps(
+            [take_filename, ref, st.st_size, st.st_mtime_ns], sort_keys=True,
+        ).encode()).hexdigest()[:24]
         out = self.dir / f"{key}.mp4"
 
         with self._lock_for(key):
             if out.exists():
                 out.touch()  # last-used time, for eviction
                 return out
-            if not session_video.is_file():
-                raise TakeVideoError(f"Session video for {take_filename!r} is missing ({ref['session']}).")
             tmp = self.dir / f"{PARTIAL_PREFIX}{key}.mp4"
             started = time.monotonic()
             result = subprocess.run(clip_cmd(session_video, ref, tmp), capture_output=True, text=True)
