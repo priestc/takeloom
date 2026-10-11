@@ -787,10 +787,16 @@ def vault_migrate_take_videos(delete: bool) -> None:
     how much space deleting the .mp4s would free. Safe to re-run.
 
     A take whose clip boundaries can't be recomputed exactly from its
-    session log (e.g. one recovered from a crash), or whose session has no
-    session_video.mp4, is left alone, .mp4 and all."""
+    session log (e.g. one recovered from a crash), whose session has no
+    session_video.mp4, or that falls past the end of that video (a capture
+    that died early), keeps its .mp4. Every take not covered by a session
+    video is also archived — its .flac/.mp4/.mid uploaded to the vault's
+    completed_takes/ — since nothing else holds a copy of it."""
+    import subprocess
+    from urllib.parse import quote
+    from .ffmpeg_bin import FFPROBE
     from .processing.splicer import parse_session_log
-    from .take_video import read_take_video_ref, take_video_ref, write_take_video_ref
+    from .take_video import read_take_video_ref, sidecar_path, take_video_ref, write_take_video_ref
     from .utils import atomic_write_text
     from .vault import vault_root
 
@@ -825,13 +831,20 @@ def vault_migrate_take_videos(delete: bool) -> None:
     for name, (data, is_local) in sorted(sessions.items()):
         if "takes" not in data:
             continue
-        if is_local:
-            has_session_video = (sessions_dir / name / "session_video.mp4").exists()
-        else:
-            files = client.list_files(f"sessions/{name}") or []
-            has_session_video = any(f["name"] == "session_video.mp4" for f in files)
-        if not has_session_video:
-            continue
+        # The session video's real length (ffprobe only reads its header,
+        # even over HTTP): a take past its end can't be cut from it.
+        source = (
+            str(sessions_dir / name / "session_video.mp4") if is_local
+            else f"{client.url}/media/{quote(f'sessions/{name}/session_video.mp4')}"
+        )
+        probe = subprocess.run(
+            [FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", source],
+            capture_output=True, text=True,
+        )
+        try:
+            video_duration = float(probe.stdout.strip())
+        except ValueError:
+            continue  # no (readable) session video
 
         by_index: dict[int, list] = {}
         for take in parse_session_log(data):
@@ -852,6 +865,15 @@ def vault_migrate_take_videos(delete: bool) -> None:
                     name, max(0, seg.start_frame), seg.end_frame, mix_start, sample_rate,
                     config.video_latency_compensation_ms,
                 )
+                if ref["start_s"] + ref["duration_s"] > video_duration + 1.0:
+                    click.echo(f"  skip {filename}: ends past its session video ({video_duration:.0f}s)")
+                    skipped += 1
+                    # Undo a ref an earlier run may have recorded, so the take
+                    # counts as having no session video (and gets archived).
+                    if entry.pop("video", None) is not None:
+                        changed = True
+                    sidecar_path(audio).unlink(missing_ok=True)
+                    continue
                 if not entry.get("video"):
                     entry["video"] = ref
                     entry["has_video"] = True
@@ -876,9 +898,29 @@ def vault_migrate_take_videos(delete: bool) -> None:
     if delete and remote_deletes and not client.delete_paths(remote_deletes):
         click.echo(f"Error: couldn't delete the take .mp4s on {client.url}.", err=True)
         raise SystemExit(1)
+
+    # Archive every take with no session video behind it.
+    archived = 0
+    if client is not None and completed_dir.is_dir():
+        from .vault_client import VaultError
+        remote_sizes = {f["name"]: f["size"] for f in client.list_files("completed_takes") or []}
+        for audio in sorted(completed_dir.glob("*.flac")):
+            if read_take_video_ref(audio) is not None:
+                continue
+            for f in (audio, audio.with_suffix(".mp4"), audio.with_suffix(".mid")):
+                if not f.exists() or remote_sizes.get(f.name) == f.stat().st_size:
+                    continue
+                try:
+                    client.upload_file(f, f"completed_takes/{f.name}")
+                    archived += 1
+                except VaultError as e:
+                    click.echo(f"  warning: couldn't archive {f.name}: {e}", err=True)
+    elif client is None:
+        click.echo("Warning: no paired vault, so takes without a session video weren't archived.", err=True)
     verb = "Freed" if delete else "Deleting their .mp4s (--delete) would free"
     click.echo(f"{migrated} take(s) now cut from their session video on demand; {skipped} skipped.")
     click.echo(f"{verb} {freed_local / 1e9:.2f} GB locally and {freed_remote / 1e9:.2f} GB on the vault.")
+    click.echo(f"Archived {archived} file(s) of takes with no session video to the vault's completed_takes/.")
 
 
 @vault_group.command(name="status")

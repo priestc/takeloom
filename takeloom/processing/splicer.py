@@ -198,6 +198,38 @@ def parse_session_log(data: dict, total_frames: int | None = None) -> list[Compl
     return completed
 
 
+def watermark_schedule(data: dict, video_offset_ms: float) -> list[tuple[float, str]]:
+    """The session video's watermark over time: [(start_s, text), ...] on
+    the video's own timeline, changing whenever a different song is loaded
+    so it always names the song actually playing (and, with it, whichever
+    instrument and the wall-clock time that song came up) — every take cut
+    from this video (see take_video.py) then carries its own song's name.
+    Before the first song it's just musician/instrument/date."""
+    from ..video.capture import format_watermark_text
+    sample_rate = data.get("sample_rate") or 48000
+    mix_start = data.get("mix_start_frame") or 0
+    audio_delay_s = max(0.0, -video_offset_ms / 1000.0)  # same shift as take_video_ref
+    musician = data.get("musician", "")
+    events = data.get("events", [])
+    session_start = next((e.get("wall_time", "") for e in events if e.get("event_type") == "session_start"), "")
+    schedule = [(0.0, format_watermark_text(musician, data.get("instrument", ""), session_start, ""))]
+    current = None
+    for e in events:
+        name, frame = e.get("track_name"), e.get("frame")
+        if not name or frame is None or name == current:
+            continue
+        current = name
+        start_s = max(0.0, (frame - mix_start) / sample_rate + audio_delay_s)
+        text = format_watermark_text(
+            musician, e.get("instrument") or data.get("instrument", ""), e.get("wall_time", ""), name,
+        )
+        if start_s <= schedule[-1][0]:
+            schedule[-1] = (schedule[-1][0], text)  # replaces the opening (or an instantly superseded) entry
+        else:
+            schedule.append((start_s, text))
+    return schedule
+
+
 def filter_draw_for_track(data: dict, track_index: int, track_name: str) -> dict | None:
     """The song-set draw (session_log.json's filter_slot_draws shape) that
     `track_name` was at `track_index` — a slot redrawn mid-session logs
@@ -282,16 +314,12 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
     # server's take-video endpoint / Backend.get_take_video_path).
     session_video_ok = False
     if have_video:
-        from ..video.capture import format_watermark_text, mux_video_audio
-        start_wall = next((e.get("wall_time", "") for e in data.get("events", [])
-                           if e.get("event_type") == "session_start"), "")
-        # No song name: the watermark is on every take cut from this video,
-        # and most of them aren't the session's first song.
-        watermark = format_watermark_text(musician, instrument, start_wall, "")
+        from ..video.capture import mux_video_audio
         session_video_ok = mux_video_audio(
             session_video_raw, session_mix_flac, session_flac,
             session_dir / "session_video.mp4",
-            watermark_text=watermark, video_offset_ms=video_offset_ms,
+            video_offset_ms=video_offset_ms,
+            watermark_schedule=watermark_schedule(data, video_offset_ms),
         )
 
     saved = 0

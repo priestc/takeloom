@@ -289,6 +289,7 @@ def mux_video_audio(
     output_path: Path,
     watermark_text: str | None = None,
     video_offset_ms: float = 0.0,
+    watermark_schedule: list[tuple[float, str]] | None = None,
 ) -> bool:
     """Combine a silent video file with two audio tracks: a compressed mix
     (backing track + instrument, for easy playback/sharing) and a lossless
@@ -299,6 +300,12 @@ def mux_video_audio(
     ffmpeg's drawtext filter, since drawtext requires ffmpeg to be built with
     libfreetype, which many default/minimal ffmpeg builds omit.
 
+    watermark_schedule instead changes the text over time: [(start_s, text),
+    ...] in order, each shown from its start_s (on the output's timeline)
+    until the next one's — a session video naming whichever song is
+    playing at that moment. One PNG per entry, each overlaid only during its
+    own interval.
+
     video_offset_ms comes from the Latency tab's camera test: positive means
     the video needs to be delayed relative to the audio, negative means the
     audio needs to be delayed relative to the video. Implemented as a
@@ -308,14 +315,20 @@ def mux_video_audio(
     if not ffmpeg_available():
         return False
 
-    watermark_png: Path | None = None
-    if watermark_text:
+    if watermark_schedule is None and watermark_text:
+        watermark_schedule = [(0.0, watermark_text)]
+    watermark_pngs: list[Path] = []
+    if watermark_schedule:
         try:
             width, height = probe_video_size(video_path)
-            watermark_png = output_path.with_name(output_path.stem + "_watermark.png")
-            render_watermark_image(watermark_text, width, height, watermark_png)
+            for i, (_start, text) in enumerate(watermark_schedule):
+                png = output_path.with_name(f"{output_path.stem}_watermark{i}.png")
+                render_watermark_image(text, width, height, png)
+                watermark_pngs.append(png)
         except Exception:
-            watermark_png = None
+            for png in watermark_pngs:
+                png.unlink(missing_ok=True)
+            watermark_pngs = []
 
     video_delay_s = max(0.0, video_offset_ms / 1000.0)
     audio_delay_s = max(0.0, -video_offset_ms / 1000.0)
@@ -330,10 +343,18 @@ def mux_video_audio(
     if audio_delay_s:
         cmd += ["-itsoffset", f"{audio_delay_s:.6f}"]
     cmd += ["-i", str(instrument_audio_path)]
-    if watermark_png is not None:
+    if watermark_pngs:
+        chain, label = [], "0:v"
+        for i, png in enumerate(watermark_pngs):
+            cmd += ["-i", str(png)]
+            start = watermark_schedule[i][0]
+            end = watermark_schedule[i + 1][0] if i + 1 < len(watermark_pngs) else None
+            enable = f"gte(t,{start:.3f})" + (f"*lt(t,{end:.3f})" if end is not None else "")
+            out = "outv" if i == len(watermark_pngs) - 1 else f"wm{i}"
+            chain.append(f"[{label}][{3 + i}:v]overlay=0:main_h-overlay_h:enable='{enable}'[{out}]")
+            label = out
         cmd += [
-            "-i", str(watermark_png),
-            "-filter_complex", "[0:v][3:v]overlay=0:main_h-overlay_h[outv]",
+            "-filter_complex", ";".join(chain),
             "-map", "[outv]", "-map", "1:a", "-map", "2:a",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         ]
@@ -352,8 +373,8 @@ def mux_video_audio(
     ]
 
     result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if watermark_png is not None:
-        watermark_png.unlink(missing_ok=True)
+    for png in watermark_pngs:
+        png.unlink(missing_ok=True)
     return result.returncode == 0
 
 
