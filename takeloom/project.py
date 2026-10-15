@@ -81,6 +81,13 @@ class TrackEntry:
     # duration), one drawn uniformly at random each session — see
     # backend.py's _pick_filter_match. Empty for everything else.
     song_set: list[dict] = field(default_factory=list)
+    # How many different songs a song set slot serves back to back each
+    # time it comes up in a session — Next (or a song ending naturally)
+    # moves to another song from the same set until this many have been
+    # played or the set runs out, and only then on to the next setlist
+    # entry. See backend.py's _next_filter_draw_locked. Ignored for
+    # everything but a song set slot.
+    depth: int = 1
     preferred_takes: dict[str, TakeInfo] = field(default_factory=dict)
     # key = instrument label (not full_name — a Stratocaster and a
     # Telecaster take of the same song share one "electric-guitar" key
@@ -147,6 +154,7 @@ class TrackEntry:
             inspiration_track_id=data.get("inspiration_track_id", 0),
             is_inspiration_filter=data.get("is_inspiration_filter", False),
             song_set=data.get("song_set", []),
+            depth=max(1, int(data.get("depth", 1) or 1)),
             preferred_takes=takes,
             source=data.get("source", "upload"),
             trim_start_seconds=data.get("trim_start_seconds", 0.0),

@@ -759,6 +759,8 @@ class RecordFrame(ttk.Frame):
                 return "Checking matches...", ""
             count = preview.get("match_count", 0)
             stats = f"{count} song{'s' if count != 1 else ''} in set"
+            if track.depth > 1:
+                stats += f" · plays {track.depth} in a row"
             next_up = preview.get("next_up") or {}
             detected_label = self.config_obj.label_for_instrument(inst_name) if inst_name and self.config_obj else ""
             if detected_label and detected_label in labels:
@@ -1201,6 +1203,7 @@ class RecordFrame(ttk.Frame):
         menu = tk.Menu(self, tearoff=0)
         if track.is_song_set:
             menu.add_command(label="Edit songs...", command=lambda: self._on_edit_song_set(index))
+            menu.add_command(label=f"Set depth ({track.depth})...", command=lambda: self._on_set_song_set_depth(index))
         elif not track.is_inspiration_filter:
             menu.add_command(label="Rename...", command=lambda: self._on_rename_track(index))
         menu.add_command(label="Delete", command=lambda: self._on_delete_track(index))
@@ -1229,6 +1232,25 @@ class RecordFrame(ttk.Frame):
             self, self.app_state.backend, title="Edit Song Set", on_saved=on_saved,
             initial_name=track.name, initial_songs=track.song_set,
         )
+
+    def _on_set_song_set_depth(self, index: int) -> None:
+        """How many songs from this set play back to back each time it
+        comes up in a session — see TrackEntry.depth."""
+        if not self._setlist or index >= len(self._setlist.tracks):
+            return
+        track = self._setlist.tracks[index]
+        depth = simpledialog.askinteger(
+            "Song Set Depth",
+            f"How many songs from '{track.name}' should play in a row\n"
+            "each time it comes up in a session?",
+            initialvalue=track.depth, minvalue=1, maxvalue=max(1, len(track.song_set)), parent=self,
+        )
+        if depth is None or depth == track.depth:
+            return
+        if not self._setlist or index >= len(self._setlist.tracks) or self._setlist.tracks[index] is not track:
+            return  # setlist reloaded/reordered while the dialog was open
+        track.depth = depth
+        self._save_setlist_and_refresh()
 
     def _on_rename_track(self, index: int) -> None:
         if not self._setlist or index >= len(self._setlist.tracks):

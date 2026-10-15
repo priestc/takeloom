@@ -1491,6 +1491,15 @@ class _ActiveSession:
     # still be filed under its own song, not whichever draw the slot
     # ended up on — see _save_session_log's filter_slot_draw_history.
     replaced_filter_picks: dict = field(default_factory=dict)
+    # song-set index -> further draws still waiting their turn for a slot
+    # with depth > 1 (TrackEntry.depth), in play order — pre-drawn (and
+    # pre-downloaded) at session open by _prefetch_setlist_locked, then
+    # popped one at a time by _next_filter_draw_locked.
+    queued_filter_picks: dict = field(default_factory=dict)
+    # song-set index -> how many of its songs this session has served so
+    # far (a redraw replaces one rather than counting as another) —
+    # compared against TrackEntry.depth by _next_filter_draw_locked.
+    filter_slot_served: dict = field(default_factory=dict)
     # Raw MIDI performance captured alongside the audio (see audio/
     # midi_log.py) when `inst.is_midi` — None for an analog instrument,
     # where the concept doesn't apply. Written out to session_midi.mid
@@ -3962,7 +3971,8 @@ class LocalBackend(Backend):
         )
 
     def _resolve_filter_slot(
-        self, config: StudioConfig, track: TrackEntry, instrument_name: str, exclude_id: int | None = None,
+        self, config: StudioConfig, track: TrackEntry, instrument_name: str,
+        exclude_ids: set | None = None,
     ) -> TrackEntry:
         """Resolve `track` for `instrument_name` to record. An ordinary
         track passes through unchanged; a song set slot draws one song from
@@ -3972,12 +3982,13 @@ class LocalBackend(Backend):
         which is what actually gets called during a session; this is the
         pure "pick one" step, split out for testability.
 
-        `exclude_id` (redraw_current_track's use) leaves one specific
-        inspiration_track_id out of consideration — so "give me a
-        different one" doesn't just hand back what's already loaded —
-        falling back to allowing it anyway if excluding it would leave no
-        candidates at all (a set of only one song shouldn't error out just
-        because that one song is the one being redrawn away from)."""
+        `exclude_ids` (redraw_current_track's and a depth > 1 slot's use)
+        leaves specific inspiration_track_ids out of consideration — so
+        "give me a different one" doesn't just hand back what's already
+        loaded or already played — falling back to allowing them anyway if
+        excluding them would leave no candidates at all (a set of only one
+        song shouldn't error out just because that one song is the one
+        being redrawn away from)."""
         if not track.is_inspiration_filter:
             return track
         from .inspiration import build_inspiration_track_entry
@@ -3987,7 +3998,7 @@ class LocalBackend(Backend):
 
         from .vault import load_inspiration_index, vault_root
         index = load_inspiration_index(vault_root(config))
-        chosen = self._pick_filter_match(matches, exclude_id=exclude_id)
+        chosen = self._pick_filter_match(matches, exclude_ids=exclude_ids)
         entry = build_inspiration_track_entry(chosen)
 
         # build_inspiration_track_entry only knows the raw inspiration-
@@ -4007,12 +4018,13 @@ class LocalBackend(Backend):
         return entry
 
     @staticmethod
-    def _pick_filter_match(matches: list[dict], exclude_id: int | None = None) -> dict:
+    def _pick_filter_match(matches: list[dict], exclude_ids: set | None = None) -> dict:
         """The actual "which song" choice within a song set's `matches` —
         uniformly random, regardless of which songs other instruments
         already have takes on. Shared by _resolve_filter_slot and
         get_filter_slot_previews."""
-        candidates = [m for m in matches if m.get("id") != exclude_id] or matches
+        exclude_ids = exclude_ids or set()
+        candidates = [m for m in matches if m.get("id") not in exclude_ids] or matches
         return random.choice(candidates)
 
     def _resolve_filter_slot_for_session(
@@ -4054,18 +4066,70 @@ class LocalBackend(Backend):
             resolved = self._resolve_filter_slot(config, track, session.inst.full_name)
             session.resolved_filter_picks[index] = resolved
         session.completed_track_indices.add(index)
+        session.filter_slot_served.setdefault(index, 1)
         return resolved
+
+    @staticmethod
+    def _drawn_filter_ids(session: "_ActiveSession", index: int) -> set:
+        """Every inspiration_track_id song set slot `index` has drawn this
+        session — played, redrawn away from, currently loaded, or still
+        queued — so a further draw from it picks a song not yet heard."""
+        entries = [
+            *session.replaced_filter_picks.get(index, []),
+            *([session.resolved_filter_picks[index]] if index in session.resolved_filter_picks else []),
+            *session.queued_filter_picks.get(index, []),
+        ]
+        return {e.inspiration_track_id for e in entries}
+
+    def _next_filter_draw_locked(self, session: "_ActiveSession", config: StudioConfig) -> TrackEntry | None:
+        """For a song set slot with depth > 1 (TrackEntry.depth) that's
+        currently loaded: the next song from the same set to play instead
+        of moving on down the setlist, or None once the slot is exhausted
+        (depth songs served, or every song in the set already drawn this
+        session) or the current track isn't a song set slot. Takes the
+        next pre-drawn pick from _prefetch_setlist_locked's queue,
+        falling back to a fresh draw only if prefetch couldn't supply one.
+        The previous draw moves to replaced_filter_picks, so a take on it
+        still files under its own song — the same bookkeeping a redraw
+        uses (see _save_session_log's filter_slot_draw_history). Called
+        with self._record_lock held."""
+        index = session.current_track_index
+        if index is None or not (0 <= index < len(session.project.setlist.tracks)):
+            return None
+        slot = session.project.setlist.tracks[index]
+        if not slot.is_inspiration_filter or index not in session.resolved_filter_picks:
+            return None
+        served = session.filter_slot_served.get(index, 1)
+        if served >= slot.depth:
+            return None
+        queue = session.queued_filter_picks.get(index) or []
+        if queue:
+            nxt = queue.pop(0)
+        else:
+            drawn = self._drawn_filter_ids(session, index)
+            if all(m.get("id") in drawn for m in slot.song_set):
+                return None  # every song in the set has had its turn
+            try:
+                nxt = self._resolve_filter_slot(config, slot, session.inst.full_name, exclude_ids=drawn)
+            except BackendError:
+                return None
+        session.replaced_filter_picks.setdefault(index, []).append(session.resolved_filter_picks[index])
+        session.resolved_filter_picks[index] = nxt
+        session.filter_slot_served[index] = served + 1
+        return nxt
 
     def _prefetch_setlist_locked(
         self, project: Project, inst: Instrument, config: StudioConfig,
-    ) -> dict[int, TrackEntry]:
+    ) -> tuple[dict[int, TrackEntry], dict[int, list[TrackEntry]]]:
         """Do all the network/heavy-disk work for a session's whole setlist
         up front, at session open — *before* the audio/camera capture is
         even started — so advancing between takes never has to do any of it
         while capture is live (that was audible as choppy monitoring, and
         also front-loaded dead air into a streamed/recorded session):
 
-        - resolve every song set slot now (one draw each), and
+        - resolve every song set slot now (one draw each — or, for a slot
+          with depth > 1, up to `depth` different songs, the rest queued
+          for _next_filter_draw_locked), and
         - download every not-yet-local backing track now, so no mid-session
           multi-MB download + FLAC/opus write.
 
@@ -4077,10 +4141,11 @@ class LocalBackend(Backend):
         if and when that track is actually reached, exactly as before, just
         not mid-take.
 
-        Returns {setlist index -> resolved TrackEntry} for the song set slots
-        it managed to resolve, to seed _ActiveSession.resolved_filter_picks
-        so _resolve_filter_slot_for_session finds them already drawn. Called
-        with self._record_lock held."""
+        Returns ({setlist index -> resolved TrackEntry} for the song set
+        slots it managed to resolve, to seed _ActiveSession.resolved_filter_
+        picks so _resolve_filter_slot_for_session finds them already drawn;
+        {setlist index -> further queued draws} to seed queued_filter_picks).
+        Called with self._record_lock held."""
         from .inspiration import InspirationError, download_inspiration_track
         label = inst.label
         pending = [
@@ -4088,35 +4153,47 @@ class LocalBackend(Backend):
             if t.get_take_for_instrument(label) is None
         ]
         resolved_picks: dict[int, TrackEntry] = {}
+        queued_picks: dict[int, list[TrackEntry]] = {}
         if not pending:
-            return resolved_picks
+            return resolved_picks, queued_picks
         self._emit("recording_status", {
             "status": f"Preparing session — resolving and downloading {len(pending)} track(s) up front…",
         })
         for n, (index, slot) in enumerate(pending, start=1):
-            track = slot
+            to_fetch = [slot]
             if slot.is_inspiration_filter:
+                draws: list[TrackEntry] = []
+                want = min(max(1, slot.depth), len({m.get("id") for m in slot.song_set}) or 1)
                 try:
-                    track = self._resolve_filter_slot(config, slot, inst.full_name)
+                    while len(draws) < want:
+                        draws.append(self._resolve_filter_slot(
+                            config, slot, inst.full_name,
+                            exclude_ids={d.inspiration_track_id for d in draws},
+                        ))
                 except BackendError as e:
                     self._emit("recording_status", {
                         "status": f"Prep {n}/{len(pending)}: couldn't draw from song set '{slot.name}' — {e}",
                     })
-                    continue
-                resolved_picks[index] = track
-            backing_path = project.backing_tracks_dir / track.backing_track
-            if track.inspiration_track_id and not backing_path.exists():
-                self._emit("recording_status", {
-                    "status": f"Preparing session — downloading {n}/{len(pending)}: '{track.name}'…",
-                })
-                try:
-                    download_inspiration_track(track, backing_path, config)
-                except InspirationError as e:
+                    if not draws:
+                        continue
+                resolved_picks[index] = draws[0]
+                if len(draws) > 1:
+                    queued_picks[index] = draws[1:]
+                to_fetch = draws
+            for track in to_fetch:
+                backing_path = project.backing_tracks_dir / track.backing_track
+                if track.inspiration_track_id and not backing_path.exists():
                     self._emit("recording_status", {
-                        "status": f"Prep {n}/{len(pending)}: download failed for '{track.name}' — {e}",
+                        "status": f"Preparing session — downloading {n}/{len(pending)}: '{track.name}'…",
                     })
+                    try:
+                        download_inspiration_track(track, backing_path, config)
+                    except InspirationError as e:
+                        self._emit("recording_status", {
+                            "status": f"Prep {n}/{len(pending)}: download failed for '{track.name}' — {e}",
+                        })
         self._emit("recording_status", {"status": "Session ready — everything's downloaded."})
-        return resolved_picks
+        return resolved_picks, queued_picks
 
     def _start_playback_locked(self, session: "_ActiveSession") -> None:
         """Start the loaded track's backing from 0:00 — the moment a take
@@ -4148,6 +4225,8 @@ class LocalBackend(Backend):
         instrument sharing it counts) — skipping both tracks with takes
         already on disk and ones completed earlier in this same session
         (the setlist doesn't learn about those until post-processing).
+        A song set slot that's currently loaded and has depth left (see
+        _next_filter_draw_locked) serves its next song first instead.
         Returns the loaded track (resolved, if the setlist position found
         is a song set slot — see _resolve_filter_slot_for_session), or None
         (emitting a "waiting" status, unless announce_done is False — the
@@ -4155,8 +4234,14 @@ class LocalBackend(Backend):
         Called with self._record_lock held; playback must already be
         stopped."""
         tracks = session.project.setlist.tracks
-        start = (session.current_track_index + 1) if session.current_track_index is not None else 0
         config = self.get_config()
+        # A song set slot with depth > 1 keeps serving songs from its own
+        # set before the setlist moves on — see _next_filter_draw_locked.
+        next_draw = self._next_filter_draw_locked(session, config)
+        if next_draw is not None:
+            self._load_track_locked(session, next_draw, session.current_track_index, config)
+            return next_draw
+        start = (session.current_track_index + 1) if session.current_track_index is not None else 0
         label = session.inst.label
         index = None
         for i in range(start, len(tracks)):
@@ -4294,10 +4379,11 @@ class LocalBackend(Backend):
                 session.playing = False
 
             config = self.get_config()
-            # Excludes whatever's currently loaded, so "redraw" doesn't
-            # just hand the same song back (see _resolve_filter_slot).
-            exclude_id = session.current_track.inspiration_track_id
-            resolved = self._resolve_filter_slot(config, slot, session.inst.full_name, exclude_id=exclude_id)
+            # Excludes whatever's currently loaded, already played, or still
+            # queued for a depth > 1 slot, so "redraw" doesn't just hand
+            # back a song this session already has (see _resolve_filter_slot).
+            exclude_ids = self._drawn_filter_ids(session, index) | {session.current_track.inspiration_track_id}
+            resolved = self._resolve_filter_slot(config, slot, session.inst.full_name, exclude_ids=exclude_ids)
             previous = session.resolved_filter_picks.get(index)
             if previous is not None:
                 session.replaced_filter_picks.setdefault(index, []).append(previous)
@@ -5506,7 +5592,7 @@ class LocalBackend(Backend):
         # touched — so nothing mid-session hits the inspiration server or
         # writes a big file while audio/video is live. See _prefetch_
         # setlist_locked; best-effort, never blocks the session start.
-        prefetched_picks = self._prefetch_setlist_locked(project, inst, config)
+        prefetched_picks, queued_picks = self._prefetch_setlist_locked(project, inst, config)
 
         try:
             import sounddevice as sd  # noqa: F401 — just confirms it's importable before real work starts
@@ -5658,6 +5744,7 @@ class LocalBackend(Backend):
             mix_start_frame=mix_start_frame, stream_feeder=stream_feeder,
             youtube_broadcast_id=youtube_broadcast_id,
             resolved_filter_picks=prefetched_picks,
+            queued_filter_picks=queued_picks,
             midi_log=midi_log,
         )
         self._log_session_event("session_start", f"instrument={inst.full_name}")
