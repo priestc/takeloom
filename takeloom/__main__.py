@@ -31,7 +31,10 @@ from .audio.formats import SUPPORTED_EXTS, get_duration
 from .utils import format_duration
 
 
-@click.group()
+@click.group(epilog="""\b
+Server log (the background service's, see `takeloom service`):
+  takeloom service logs    follow ~/Library/Logs/takeloom-server.log
+""")
 def main() -> None:
     """Takeloom - Music Recording Session Manager."""
 
