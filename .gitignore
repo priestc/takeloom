@@ -11,3 +11,9 @@ build/
 *.mp3
 *.m4a
 .env
+
+# Takeloom Camera app build output (camera_app/)
+camera_app/ios/TakeloomCamera.xcodeproj/
+camera_app/android/.gradle/
+camera_app/android/local.properties
+camera_app/android/app/build/

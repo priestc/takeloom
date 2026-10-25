@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- camera body + lens + record dot -->
+    <path android:fillColor="#FFFFFF" android:pathData="M32,40h34a4,4 0,0 1,4 4v20a4,4 0,0 1,-4 4h-34a4,4 0,0 1,-4 -4v-20a4,4 0,0 1,4 -4z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M70,50l10,-6v20l-10,-6z" />
+    <path android:fillColor="#E53935" android:pathData="M40,54m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0" />
+</vector>
