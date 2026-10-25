@@ -59,7 +59,9 @@ class StartRecordingRequest:
 
 
 EventCallback = Callable[[str, dict], None]
-FrameCallback = Callable[[bytes], None]
+# (camera_device, jpeg): one callback receives every camera's frames,
+# tagged with which camera (one of session_cameras()'s devices) each is from.
+FrameCallback = Callable[[str, bytes], None]
 
 
 class PreviewSubscription:
@@ -981,6 +983,16 @@ class Backend(ABC):
     @abstractmethod
     def open_camera_preview(self, on_frame: FrameCallback) -> PreviewSubscription: ...
 
+    @abstractmethod
+    def session_cameras(self) -> list[tuple[str, str]]:
+        """(camera_device, label) of every camera the Record tab previews and
+        a session records, main camera first: the configured camera_device,
+        then config.extra_cameras, then every connected Takeloom Camera
+        phone (which never need adding by hand). When no camera_device is
+        configured, the first of the rest stands in as the main one. Changes
+        are announced with a "session_cameras_changed" event."""
+        ...
+
     # --- camera latency test (local-only; RemoteBackend refuses) ---
 
     @abstractmethod
@@ -1203,31 +1215,35 @@ class Backend(ABC):
 
 
 class _CameraPreviewManager:
-    """Owns the single physical camera's capture loop and fans JPEG frames out
-    to any number of subscribers. Paused/resumed around exclusive ffmpeg
-    access during recording (mirrors RecordFrame's old _stop_preview/
-    _start_preview dance, just headless)."""
+    """Owns the capture loops of every local camera being previewed (the
+    main one and any extras — see LocalBackend.session_cameras) and fans
+    their JPEG frames out, tagged by device, to any number of subscribers.
+    Paused/resumed around exclusive ffmpeg access during recording (mirrors
+    RecordFrame's old _stop_preview/_start_preview dance, just headless).
+    Takeloom Camera phones never have a loop here: they send their own
+    preview frames, pushed in through push_external_frame."""
 
     def __init__(
         self,
-        get_camera_device: Callable[[], str],
+        get_camera_devices: Callable[[], list[str]],
         fps: float = 10.0,
-        on_error: Callable[[str], None] | None = None,
+        on_error: Callable[[str, str], None] | None = None,
     ) -> None:
-        self._get_camera_device = get_camera_device
+        self._get_camera_devices = get_camera_devices
         self._fps = fps
         self._on_error = on_error
         self._lock = threading.Lock()
         self._subscribers: list[FrameCallback] = []
-        self._thread: threading.Thread | None = None
-        self._stop_event = threading.Event()
+        # device -> its capture loop's stop event (each loop has its own,
+        # so a restart can never revive a loop that hasn't exited yet).
+        self._loops: dict[str, threading.Event] = {}
         self._paused = False
 
     def subscribe(self, on_frame: FrameCallback) -> PreviewSubscription:
         with self._lock:
             self._subscribers.append(on_frame)
-            if self._thread is None and not self._paused:
-                self._start_thread_locked()
+            if not self._loops and not self._paused:
+                self._start_threads_locked()
         return _ManagerSubscription(self, on_frame)
 
     def _unsubscribe(self, on_frame: FrameCallback) -> None:
@@ -1235,77 +1251,78 @@ class _CameraPreviewManager:
             if on_frame in self._subscribers:
                 self._subscribers.remove(on_frame)
             if not self._subscribers:
-                self._stop_thread_locked()
+                self._stop_threads_locked()
 
     def pause(self) -> None:
         with self._lock:
             self._paused = True
-            self._stop_thread_locked()
+            self._stop_threads_locked()
 
     def resume(self) -> None:
         with self._lock:
             self._paused = False
-            if self._subscribers and self._thread is None:
-                self._start_thread_locked()
+            if self._subscribers and not self._loops:
+                self._start_threads_locked()
 
     def restart(self) -> None:
-        """Force the capture thread to close and reopen the camera device —
+        """Force every capture loop to close and reopen its camera device —
         used by refresh_devices() for a camera that wasn't plugged in yet
-        when a subscriber first opened the preview (in which case the
+        when a subscriber first opened the preview (in which case its
         capture thread would have opened, immediately failed, and exited,
-        leaving nothing to retry the open on its own)."""
+        leaving nothing to retry the open on its own), and when the set of
+        cameras changes."""
         with self._lock:
-            self._stop_thread_locked()
+            self._stop_threads_locked()
             if self._subscribers and not self._paused:
-                self._start_thread_locked()
+                self._start_threads_locked()
 
-    def push_external_frame(self, jpeg: bytes) -> None:
-        """Fan a frame from some other source (currently: VideoRecorder's
-        tee'd preview stream while it holds the camera exclusively for a real
-        take/video check) out to the same subscribers as the normal capture
-        loop — so the Record tab's live feed keeps running throughout a
-        recording instead of freezing while this manager's own thread is
-        paused for ffmpeg's exclusive access."""
+    def push_external_frame(self, device: str, jpeg: bytes) -> None:
+        """Fan a frame from some other source out to the same subscribers as
+        the capture loops — VideoRecorder's tee'd preview stream while it
+        holds a camera exclusively for a real take/video check (so the
+        Record tab's live feed keeps running throughout a recording instead
+        of freezing while the loops are paused for ffmpeg's exclusive
+        access), or a Takeloom Camera phone's own preview frames."""
         with self._lock:
             subscribers = list(self._subscribers)
         for cb in subscribers:
             try:
-                cb(jpeg)
+                cb(device, jpeg)
             except Exception:
                 pass
 
-    def _start_thread_locked(self) -> None:
-        device = self._get_camera_device()
-        if not device or is_phone_device(device):
-            # A Takeloom Camera phone sends its own preview frames, which
-            # LocalBackend pushes in via push_external_frame.
-            return
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run, args=(device,), daemon=True)
-        self._thread.start()
+    def _start_threads_locked(self) -> None:
+        for device in self._get_camera_devices():
+            if not device or is_phone_device(device) or device in self._loops:
+                continue
+            stop_event = threading.Event()
+            self._loops[device] = stop_event
+            threading.Thread(target=self._run, args=(device, stop_event), daemon=True).start()
 
-    def _stop_thread_locked(self) -> None:
-        self._stop_event.set()
-        self._thread = None  # the running thread notices stop_event and exits/releases the camera itself
+    def _stop_threads_locked(self) -> None:
+        for stop_event in self._loops.values():
+            stop_event.set()  # each running thread notices and exits/releases its camera itself
+        self._loops.clear()
 
-    def _report_error(self, message: str) -> None:
+    def _report_error(self, device: str, message: str) -> None:
         if self._on_error is not None:
             try:
-                self._on_error(message)
+                self._on_error(device, message)
             except Exception:
                 pass
 
-    def _run(self, device: str) -> None:
+    def _run(self, device: str, stop_event: threading.Event) -> None:
         try:
             import cv2
         except ImportError:
-            self._report_error("Camera preview requires opencv-python (cv2), which is not installed.")
+            self._report_error(device, "Camera preview requires opencv-python (cv2), which is not installed.")
             return
         index = int(device) if device.isdigit() else device
         cap = cv2.VideoCapture(index)
         if not cap.isOpened():
             cap.release()
             self._report_error(
+                device,
                 f"Could not open camera device '{device}'. It may be disconnected, in use by "
                 "another app, or lacking camera permission. Reconnect/grant access, then use "
                 "↻ Refresh Devices."
@@ -1320,7 +1337,7 @@ class _CameraPreviewManager:
         max_consecutive_failures = round(self._fps * 3)  # ~3 seconds of nothing but failures
         ever_succeeded = False
         try:
-            while not self._stop_event.is_set():
+            while not stop_event.is_set():
                 ok, frame = cap.read()
                 if ok:
                     ever_succeeded = True
@@ -1332,23 +1349,17 @@ class _CameraPreviewManager:
                     # conversion here, or the encoded JPEG's colors come out swapped.
                     ok2, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
                     if ok2:
-                        jpeg = buf.tobytes()
-                        with self._lock:
-                            subscribers = list(self._subscribers)
-                        for cb in subscribers:
-                            try:
-                                cb(jpeg)
-                            except Exception:
-                                pass
+                        self.push_external_frame(device, buf.tobytes())
                 else:
                     consecutive_failures += 1
                     if not ever_succeeded and consecutive_failures >= max_consecutive_failures:
                         self._report_error(
+                            device,
                             f"Camera device '{device}' opened but never produced a frame — "
                             "check camera permissions for this app, then use ↻ Refresh Devices."
                         )
                         return
-                self._stop_event.wait(interval)
+                stop_event.wait(interval)
         finally:
             cap.release()
 
@@ -1515,6 +1526,43 @@ class _ActiveSession:
     # the recorder, so _save_session_log can record what phone_camera/
     # sync.py needs to line its video up afterwards.
     phone_mix_start_ns: int | None = None
+    # Every camera besides the main one (see LocalBackend.session_cameras),
+    # each recording its own whole-session file — _ExtraCameraRecording.
+    extra_cameras: list = field(default_factory=list)
+    # time.monotonic_ns() when mix recording started, for the extra
+    # cameras' phone sync (same role as phone_mix_start_ns).
+    mix_start_ns: int | None = None
+    # Whether the local preview loops were paused for ffmpeg to hold the
+    # local camera(s) — resumed at session end only if so.
+    preview_paused: bool = False
+
+
+@dataclass
+class _ExtraCameraRecording:
+    """One extra camera's recording within a session (_ActiveSession.
+    extra_cameras). Its file names are flat in the session dir — the
+    vault only uploads a session's top-level files (vault_client.py)."""
+    device: str
+    label: str
+    recorder: object
+    raw_file: str    # what the recorder writes (a phone: its live feed)
+    final_file: str  # the finished video, muxed with the session's audio by processing/splicer.py
+    upload_file: str = ""  # a phone's own full-quality recording lands here (phone_camera/hub.py)
+
+    def log_entry(self, mix_start_ns: int | None) -> dict:
+        entry = {"device": self.device, "label": self.label, "file": self.raw_file, "final_file": self.final_file}
+        if self.upload_file:
+            entry["upload_file"] = self.upload_file
+            entry["phone_camera"] = self.recorder.session_log_info(mix_start_ns)
+        return entry
+
+
+def _camera_file_stem(index: int, label: str) -> str:
+    """camera2_iphone, camera3_hd-webcam-emeet-c960, ... — index 1 is the
+    main camera (session_video.mp4)."""
+    slug = "".join(ch if ch.isalnum() else "-" for ch in label.lower()).strip("-")
+    slug = "-".join(part for part in slug.split("-") if part)[:40]
+    return f"camera{index}_{slug or 'camera'}"
 
 
 @dataclass
@@ -1749,7 +1797,9 @@ class LocalBackend(Backend):
         # from trying to reopen a device that isn't there any more (PortAudio
         # still lists it until it's re-initialized).
         self._audio_hardware_absent = False
-        self._preview = _CameraPreviewManager(self._current_camera_device, on_error=self._on_preview_error)
+        self._preview = _CameraPreviewManager(
+            lambda: [device for device, _label in self.session_cameras()], on_error=self._on_preview_error,
+        )
         self._phone_hub = None  # PhoneCameraHub, when attach_phone_camera_hub() is called
         # "Sticky" mixer levels: once the operator nudges backing/takes volume,
         # that level carries forward to every track loaded afterward (like a
@@ -1817,8 +1867,17 @@ class LocalBackend(Backend):
             except OSError:
                 return "unknown"
 
-    def _current_camera_device(self) -> str:
-        return self.get_config().camera_device
+    def session_cameras(self) -> list[tuple[str, str]]:
+        config = self.get_config()
+        cameras: list[tuple[str, str]] = []
+        if config.camera_device:
+            cameras.append((config.camera_device, config.camera_label or config.camera_device))
+        for extra in config.extra_cameras:
+            cameras.append((extra.device, extra.label or extra.device))
+        if self._phone_hub is not None:
+            cameras += self._phone_hub.list_camera_devices()
+        seen: set[str] = set()
+        return [c for c in cameras if c[0] and not (c[0] in seen or seen.add(c[0]))]
 
     def attach_phone_camera_hub(self, hub) -> None:
         """Use Takeloom Camera phones connected to `hub` (phone_camera/
@@ -1826,16 +1885,16 @@ class LocalBackend(Backend):
         self._phone_hub = hub
         hub.set_callbacks(
             on_preview=self._on_phone_preview,
-            on_change=lambda: self._emit("phone_cameras_changed", {}),
+            on_change=lambda: self._emit("session_cameras_changed", {}),
             session_dir_resolver=self._local_session_dir_path,
         )
 
     def _on_phone_preview(self, device_id: str, jpeg: bytes) -> None:
-        if self._current_camera_device() == DEVICE_PREFIX + device_id:
-            self._preview.push_external_frame(jpeg)
+        # Every connected phone is one of session_cameras().
+        self._preview.push_external_frame(DEVICE_PREFIX + device_id, jpeg)
 
-    def _on_preview_error(self, message: str) -> None:
-        self._emit("preview_error", {"message": message})
+    def _on_preview_error(self, device: str, message: str) -> None:
+        self._emit("preview_error", {"camera": device, "message": message})
 
     # --- config ---
 
@@ -1846,7 +1905,11 @@ class LocalBackend(Backend):
         errors = config.validate()
         if errors:
             raise BackendError("\n".join(errors))
+        before = self.session_cameras()
         config.save(self._config_path)
+        if self.session_cameras() != before:
+            self._preview.restart()
+            self._emit("session_cameras_changed", {})
 
     def begin_vault_pairing(self, address: str) -> dict:
         from .vault_client import VaultClient, VaultError, normalize_vault_url
@@ -4310,6 +4373,11 @@ class LocalBackend(Backend):
             session.stream_feeder.stop()
         if session.video_recorder:
             session.video_recorder.stop()
+        self._stop_extra_cameras(session)
+        if self._phone_hub is not None:
+            for device_id in self._session_phone_ids(session):
+                self._phone_hub.forget_upload(session.session_dir.name, device_id)
+        if session.preview_paused:
             self._preview.resume()
             self._emit("preview_resumed", {})
         if session.youtube_broadcast_id is not None:
@@ -4334,7 +4402,9 @@ class LocalBackend(Backend):
         if not ffmpeg_available():
             return None
         self._preview.pause()
-        recorder = VideoRecorder(device, output_path, on_preview_frame=self._preview.push_external_frame)
+        recorder = VideoRecorder(
+            device, output_path, on_preview_frame=lambda jpeg: self._preview.push_external_frame(device, jpeg),
+        )
         if recorder.start():
             return recorder
         self._preview.resume()
@@ -4591,7 +4661,7 @@ class LocalBackend(Backend):
             # Same pause/resume dance as a real take (unpause_recording): if
             # the chosen test camera is the one open_camera_preview streams,
             # its cv2 capture has to let go before ffmpeg can open it exclusively.
-            camera_paired_with_preview = camera_device == config.camera_device
+            camera_paired_with_preview = any(camera_device == d for d, _label in self.session_cameras())
             if camera_paired_with_preview:
                 self._preview.pause()
                 self._emit("preview_paused", {})
@@ -5684,25 +5754,37 @@ class LocalBackend(Backend):
         session_video_raw = session_mix_flac = None
         video_start_wall_time = None
         mix_start_frame = 0
+        mix_start_ns = None
         stream_feeder = None
         youtube_broadcast_id = None
         phone_mix_start_ns = None
-        use_phone = is_phone_device(config.camera_device)
+        preview_paused = False
+        from .video.capture import VideoRecorder, ffmpeg_available
+        cameras = self.session_cameras()
+        camera_device, camera_label = cameras[0] if cameras else ("", "")
+        use_phone = is_phone_device(camera_device)
+
+        def pause_preview() -> None:
+            # Local cameras go to ffmpeg exclusively; the preview keeps
+            # going through each recorder's tee'd frames instead. A phone's
+            # preview frames keep coming from the phone itself.
+            nonlocal preview_paused
+            if not preview_paused:
+                preview_paused = True
+                self._preview.pause()
+                self._emit("preview_paused", {})
+
         if use_phone and (
-            self._phone_hub is None or self._phone_hub.camera(phone_device_id(config.camera_device)) is None
+            self._phone_hub is None or self._phone_hub.camera(phone_device_id(camera_device)) is None
         ):
             self._emit("recording_status", {
-                "status": f"{config.camera_label or 'Takeloom Camera'} isn't connected — "
-                          "recording this session without video.",
+                "status": f"{camera_label or 'Takeloom Camera'} isn't connected — "
+                          "recording this session without it.",
             })
-        elif config.camera_device:
-            from .video.capture import VideoRecorder, ffmpeg_available
+        elif camera_device:
             if use_phone or ffmpeg_available():
                 if not use_phone:
-                    # A phone's preview frames keep coming from the phone
-                    # itself; only a local device needs handing to ffmpeg.
-                    self._preview.pause()
-                    self._emit("preview_paused", {})
+                    pause_preview()
                 session_video_raw = session_dir / "session_video_raw.mp4"
                 session_mix_flac = session_dir / "session_mix.flac"
 
@@ -5745,7 +5827,7 @@ class LocalBackend(Backend):
                 # camera frames for the whole session instead of freezing.
                 if use_phone:
                     from .phone_camera.recorder import PhoneVideoRecorder
-                    device_id = phone_device_id(config.camera_device)
+                    device_id = phone_device_id(camera_device)
                     # The phone's own recording is uploaded into this session
                     # dir after it ends — registered now, before the phone
                     # could possibly finish and start sending it.
@@ -5756,7 +5838,8 @@ class LocalBackend(Backend):
                     )
                 else:
                     video_recorder = VideoRecorder(
-                        config.camera_device, session_video_raw, on_preview_frame=self._preview.push_external_frame,
+                        camera_device, session_video_raw,
+                        on_preview_frame=lambda jpeg, d=camera_device: self._preview.push_external_frame(d, jpeg),
                         stream_target=stream_target,
                     )
                 if video_recorder.start():
@@ -5765,14 +5848,16 @@ class LocalBackend(Backend):
                     # this (see _save_session_log / processing/splicer.py).
                     mix_start_frame = engine.session_frames
                     engine.start_mix_recording(session_mix_flac)
+                    mix_start_ns = time.monotonic_ns()
                     if use_phone:
-                        phone_mix_start_ns = time.monotonic_ns()
+                        phone_mix_start_ns = mix_start_ns
                     video_start_wall_time = wall_timestamp()
                     if stream_feeder is not None:
                         engine.set_stream_sink(stream_feeder.push)
                         self._emit("streaming_status", {"status": "Streaming live to YouTube.", "active": True})
                 else:
                     video_recorder = None
+                    session_video_raw = None
                     if stream_feeder is not None:
                         stream_feeder.stop()
                         stream_feeder = None
@@ -5784,14 +5869,55 @@ class LocalBackend(Backend):
                         self._complete_youtube_broadcast(config, youtube_broadcast_id)
                         youtube_broadcast_id = None
                     if use_phone:
-                        self._phone_hub.forget_upload(session_dir.name)
-                    else:
-                        self._preview.resume()
-                        self._emit("preview_resumed", {})
+                        self._phone_hub.forget_upload(session_dir.name, device_id)
         elif config.streaming_enabled and config.youtube_stream_key:
             self._emit("streaming_status", {
                 "status": "Streaming needs a camera — set one up on the Recording Devices tab.", "active": False,
             })
+
+        # Every other camera: started after the main one and the mix, so the
+        # main camera's timing (what the hand-tuned offset was measured
+        # against) is exactly what it always was.
+        extra_cameras: list[_ExtraCameraRecording] = []
+        for index, (device, label) in enumerate(cameras[1:], start=2):
+            stem = _camera_file_stem(index, label)
+            raw_file, final_file = f"{stem}_raw.mp4", f"{stem}.mp4"
+            if is_phone_device(device):
+                device_id = phone_device_id(device)
+                if self._phone_hub is None or self._phone_hub.camera(device_id) is None:
+                    continue  # configured as an extra camera, but not connected right now
+                from .phone_camera.recorder import PhoneVideoRecorder
+                upload_file = f"{stem}_phone.mp4"
+                self._phone_hub.expect_upload(session_dir.name, session_dir, device_id, upload_file)
+                recorder = PhoneVideoRecorder(self._phone_hub, device_id, session_dir.name, session_dir / raw_file)
+                if recorder.start():
+                    extra_cameras.append(_ExtraCameraRecording(
+                        device, label, recorder, raw_file, final_file, upload_file,
+                    ))
+                else:
+                    self._phone_hub.forget_upload(session_dir.name, device_id)
+            elif ffmpeg_available():
+                pause_preview()
+                recorder = VideoRecorder(
+                    device, session_dir / raw_file,
+                    on_preview_frame=lambda jpeg, d=device: self._preview.push_external_frame(d, jpeg),
+                )
+                if recorder.start():
+                    extra_cameras.append(_ExtraCameraRecording(device, label, recorder, raw_file, final_file))
+        if extra_cameras and mix_start_ns is None:
+            # No main camera running: the extra cameras still need the
+            # mix as their timeline.
+            session_mix_flac = session_dir / "session_mix.flac"
+            mix_start_frame = engine.session_frames
+            engine.start_mix_recording(session_mix_flac)
+            mix_start_ns = time.monotonic_ns()
+        if preview_paused and video_recorder is None and not any(
+            not is_phone_device(c.device) for c in extra_cameras
+        ):
+            # Paused for a local camera that then didn't start.
+            preview_paused = False
+            self._preview.resume()
+            self._emit("preview_resumed", {})
 
         engine.set_on_song_end(self._on_song_naturally_ended)
         self._active_session = _ActiveSession(
@@ -5805,6 +5931,7 @@ class LocalBackend(Backend):
             mix_start_frame=mix_start_frame, stream_feeder=stream_feeder,
             youtube_broadcast_id=youtube_broadcast_id,
             phone_mix_start_ns=phone_mix_start_ns,
+            extra_cameras=extra_cameras, mix_start_ns=mix_start_ns, preview_paused=preview_paused,
             resolved_filter_picks=prefetched_picks,
             queued_filter_picks=queued_picks,
             midi_log=midi_log,
@@ -5868,9 +5995,14 @@ class LocalBackend(Backend):
                         "status": "Camera recording didn't stop cleanly (camera powered off?) — "
                                   "its video is kept up to the last couple of seconds.",
                     })
-                if session.phone_mix_start_ns is None:
-                    self._preview.resume()
-                    self._emit("preview_resumed", {})
+            for label in self._stop_extra_cameras(session):
+                self._emit("recording_status", {
+                    "status": f"{label} didn't stop cleanly (powered off?) — "
+                              "its video is kept up to the last couple of seconds.",
+                })
+            if session.preview_paused:
+                self._preview.resume()
+                self._emit("preview_resumed", {})
             if session.youtube_broadcast_id is not None:
                 self._complete_youtube_broadcast(self.get_config(), session.youtube_broadcast_id)
 
@@ -5910,6 +6042,34 @@ class LocalBackend(Backend):
         if thread is not None:
             thread.join(timeout)
 
+    @staticmethod
+    def _stop_extra_cameras(session: "_ActiveSession") -> list[str]:
+        """Stop every extra camera's recorder at once — each stop can take
+        seconds (ffmpeg finalizing, a phone acknowledging), and they're
+        independent. Returns the labels of any that didn't stop cleanly."""
+        unclean: list[str] = []
+
+        def stop(cam: "_ExtraCameraRecording") -> None:
+            if not cam.recorder.stop():
+                unclean.append(cam.label)
+
+        threads = [threading.Thread(target=stop, args=(cam,), daemon=True) for cam in session.extra_cameras]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return unclean
+
+    @staticmethod
+    def _session_phone_ids(session: "_ActiveSession") -> list[str]:
+        """Device ids of every phone recording `session` (its main camera
+        first), i.e. every upload it's expecting."""
+        ids = []
+        if session.phone_mix_start_ns is not None:
+            ids.append(session.video_recorder.device_id)
+        ids += [phone_device_id(c.device) for c in session.extra_cameras if c.upload_file]
+        return ids
+
     def _process_session(self, session: "_ActiveSession") -> None:
         """Replay the just-ended session's log and clip every completed take
         (and, with a camera, its video) out of the continuous recording,
@@ -5918,20 +6078,27 @@ class LocalBackend(Backend):
         while this grinds along on the old one's files."""
         from .processing.splicer import process_session
         config = self.get_config()
-        if session.phone_mix_start_ns is not None and self._phone_hub is not None:
-            # The phone's full-quality recording, uploading now that the
+        if self._phone_hub is not None:
+            # Each phone's full-quality recording, uploading now that the
             # session's over. Waited for here, on this background thread —
             # the app is already idle and a new session can start meanwhile.
+            # All of them before processing, not just the main camera's:
+            # in "remote" vault mode the session dir is gone afterwards.
             session_id = session.session_dir.name
-            arrived = self._phone_hub.wait_for_upload(
-                session_id, lambda msg: self._emit("recording_status", {"phase": "idle", "status": msg}),
-            )
-            self._phone_hub.forget_upload(session_id)
-            if arrived is None:
-                self._emit("recording_status", {
-                    "phase": "idle",
-                    "status": "Takeloom Camera's recording didn't arrive — using the live feed's video instead.",
-                })
+            labels = {phone_device_id(c.device): c.label for c in session.extra_cameras}
+            for device_id in self._session_phone_ids(session):
+                label = labels.get(device_id, "Takeloom Camera")
+                arrived = self._phone_hub.wait_for_upload(
+                    session_id, device_id,
+                    lambda msg: self._emit("recording_status", {"phase": "idle", "status": msg}),
+                    label=label,
+                )
+                self._phone_hub.forget_upload(session_id, device_id)
+                if arrived is None:
+                    self._emit("recording_status", {
+                        "phase": "idle",
+                        "status": f"{label}'s recording didn't arrive — using the live feed's video instead.",
+                    })
         try:
             summary = process_session(session_dir=session.session_dir, config=config)
         except Exception as e:
@@ -5978,6 +6145,8 @@ class LocalBackend(Backend):
             "has_video": session.session_video_raw is not None,
             **({"phone_camera": session.video_recorder.session_log_info(session.phone_mix_start_ns)}
                if session.phone_mix_start_ns is not None else {}),
+            **({"extra_cameras": [c.log_entry(session.mix_start_ns) for c in session.extra_cameras]}
+               if session.extra_cameras else {}),
             # song-set index -> the song actually drawn for it this
             # session (see _resolve_filter_slot) — the setlist itself
             # never records this, so post-processing needs it from here

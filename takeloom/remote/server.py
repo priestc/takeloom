@@ -46,7 +46,7 @@ def _timestamp() -> str:
 # anything. Logging these would drown out the ops that actually matter —
 # see _handle_request, which only logs ops outside this set.
 _READ_ONLY_OPS = {
-    "hostname", "get_config", "list_audio_devices", "list_cameras", "list_midi_devices",
+    "hostname", "get_config", "list_audio_devices", "list_cameras", "session_cameras", "list_midi_devices",
     "list_projects", "get_setlist", "get_filter_slot_previews",
     "search_inspiration_artists", "search_inspiration_by_filter", "find_inspiration_track",
     "is_recording", "get_monitoring_mode", "get_voice_switch", "poll_vault_pairing", "check_vault_server",
@@ -369,8 +369,8 @@ class _ClientHandler(socketserver.StreamRequestHandler):
             self._owner._log(f"[{_timestamp()}]   <- internal error: {e}")
             self._write({"kind": "response", "id": req_id, "ok": False, "error": f"Internal error: {e}"})
 
-    def _on_preview_frame(self, jpeg: bytes) -> None:
-        self.send_event("preview_frame", {"jpeg_b64": base64.b64encode(jpeg).decode("ascii")})
+    def _on_preview_frame(self, camera: str, jpeg: bytes) -> None:
+        self.send_event("preview_frame", {"camera": camera, "jpeg_b64": base64.b64encode(jpeg).decode("ascii")})
 
     def send_event(self, event: str, data: dict) -> None:
         try:

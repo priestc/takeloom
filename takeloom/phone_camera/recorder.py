@@ -101,7 +101,8 @@ class PhoneVideoRecorder:
         self.session_id = session_id
         self.output_path = output_path
         self.stream_target = stream_target
-        self._fifo = output_path.with_name("phone_video.h264.fifo")
+        # Per output file: several phones can be recording into one session.
+        self._fifo = output_path.with_name(output_path.stem + ".h264.fifo")
         self._queue: queue.Queue = queue.Queue()
         self._proc: subprocess.Popen | None = None
         self._writer: threading.Thread | None = None
@@ -224,7 +225,7 @@ class PhoneVideoRecorder:
             "client_name": info.client_name if info else "",
             "session_id": self.session_id,
             "mix_start_server_ns": mix_start_server_ns,
-            "phone_video_start_pts_ns": self.hub.recording_start_pts(self.session_id),
+            "phone_video_start_pts_ns": self.hub.recording_start_pts(self.session_id, self.device_id),
             "first_live_pts_ns": self.first_live_pts_ns,
             "first_live_clock_offset_ns": self.first_live_clock_offset_ns,
             "clock_offset_ns": info.clock_offset_ns if info else None,

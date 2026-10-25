@@ -119,8 +119,14 @@ class RecordFrame(ttk.Frame):
         self._tuner_smoother = TunerSmoother()
         self._monitoring_mode = "production"  # "production" | "recording" — refreshed in _on_loaded
         self._preview_sub = None
-        self._preview_imgtk = None
-        self._preview_width = 0  # current width available for the preview label, tracked via <Configure>
+        # camera_device -> {"frame", "image", "caption", "imgtk", "width"}: one
+        # tile per backend.session_cameras() entry, main camera first and
+        # full width — see _rebuild_preview_tiles.
+        self._preview_tiles: dict[str, dict] = {}
+        self._preview_cameras: list[tuple[str, str]] = []
+        # camera_device -> its latest preview_error, kept so a tile built
+        # after the error arrived still shows it.
+        self._preview_errors: dict[str, str] = {}
         # (kind, device_name) -> {"frame", "instrument_var", "instrument_label"}
         # for the "Connected Instruments" panel at the top of the left
         # column — see _build_connected_devices_panel/_refresh_connected_
@@ -403,9 +409,16 @@ class RecordFrame(ttk.Frame):
         self.refresh_devices_button.grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 4))
         row += 1
 
-        self.preview_label = tk.Label(left, background="#1a1a1a", foreground="white", text="No camera preview")
-        self.preview_label.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 12))
-        self.preview_label.bind("<Configure>", self._on_preview_label_resize)
+        self.preview_area = ttk.Frame(left)
+        self.preview_area.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        self.preview_area.columnconfigure(0, weight=1, uniform="preview_tiles")
+        self.preview_area.columnconfigure(1, weight=1, uniform="preview_tiles")
+        self._preview_tiles = {}
+        self._preview_cameras = []
+        self._preview_placeholder = tk.Label(
+            self.preview_area, background="#1a1a1a", foreground="white", text="No camera preview",
+        )
+        self._preview_placeholder.grid(row=0, column=0, columnspan=2, sticky="ew")
         row += 1
 
         ttk.Label(left, text="Instrument", foreground="#666666").grid(
@@ -1355,35 +1368,85 @@ class RecordFrame(ttk.Frame):
     def _start_preview(self) -> None:
         if self._preview_sub is not None:
             return
-        if self.config_obj is not None and not self.config_obj.camera_device:
-            self.preview_label.configure(text="No camera configured", image="")
-            return
-        self.preview_label.configure(text="Waiting for camera preview...", image="")
+        self._preview_errors = {}
+        self._set_preview_text("Waiting for camera preview...")
         self._preview_sub = self.app_state.backend.open_camera_preview(self._on_preview_frame)
+        self._refresh_preview_cameras()
 
-    def _on_preview_label_resize(self, event: object) -> None:
-        self._preview_width = event.width  # type: ignore[attr-defined]
+    def _refresh_preview_cameras(self) -> None:
+        """Fetch session_cameras() and rebuild the tiles if the set changed —
+        on open, and whenever a phone connects/disconnects or the camera
+        config changes (session_cameras_changed)."""
+        backend = self.app_state.backend
+        self._run_backend(lambda: backend.session_cameras(), self._on_preview_cameras)
 
-    def _on_preview_frame(self, jpeg: bytes) -> None:
-        self.after(0, lambda: self._render_preview_frame(jpeg))
+    def _on_preview_cameras(self, cameras: list[tuple[str, str]] | None, error: str | None) -> None:
+        if not self.winfo_exists() or error or cameras is None or not hasattr(self, "preview_area"):
+            return
+        cameras = [tuple(c) for c in cameras]
+        if cameras != self._preview_cameras:
+            self._preview_cameras = cameras
+            self._rebuild_preview_tiles()
 
-    def _render_preview_frame(self, jpeg: bytes) -> None:
+    def _rebuild_preview_tiles(self) -> None:
+        for tile in self._preview_tiles.values():
+            tile["frame"].destroy()
+        self._preview_tiles = {}
+        if not self._preview_cameras:
+            self._preview_placeholder.configure(text="No camera configured")
+            self._preview_placeholder.grid()
+            return
+        self._preview_placeholder.grid_remove()
+        many = len(self._preview_cameras) > 1
+        for i, (device, label) in enumerate(self._preview_cameras):
+            frame = ttk.Frame(self.preview_area)
+            if i == 0:
+                frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4 if many else 0))
+            else:
+                frame.grid(row=1 + (i - 1) // 2, column=(i - 1) % 2, sticky="ew",
+                           padx=(0, 2) if (i - 1) % 2 == 0 else (2, 0), pady=(0, 4))
+            image = tk.Label(frame, background="#1a1a1a", foreground="white",
+                             text="Waiting for camera preview...", wraplength=280)
+            image.pack(fill="x")
+            tile = {"frame": frame, "image": image, "imgtk": None, "width": 0}
+            if many:
+                ttk.Label(frame, text=label + (" (main)" if i == 0 else ""), foreground="#666666").pack(anchor="w")
+            image.bind("<Configure>", lambda e, t=tile: t.__setitem__("width", e.width))
+            self._preview_tiles[device] = tile
+            if device in self._preview_errors:
+                image.configure(text=self._preview_errors[device])
+
+    def _set_preview_text(self, text: str, camera: str | None = None) -> None:
+        """Show `text` in place of the picture on one camera's tile, or on
+        every tile if `camera` is None."""
+        for device, tile in self._preview_tiles.items():
+            if camera is None or device == camera:
+                tile["imgtk"] = None
+                tile["image"].configure(text=text, image="")
+
+    def _on_preview_frame(self, camera: str, jpeg: bytes) -> None:
+        self.after(0, lambda: self._render_preview_frame(camera, jpeg))
+
+    def _render_preview_frame(self, camera: str, jpeg: bytes) -> None:
         if self._preview_sub is None:
             return  # unsubscribed since this frame was queued onto the Tk thread
+        tile = self._preview_tiles.get(camera)
+        if tile is None or not tile["image"].winfo_exists():
+            return  # a camera the tiles don't know about (yet) — see _refresh_preview_cameras
         from PIL import Image, ImageTk
         try:
             image = Image.open(io.BytesIO(jpeg))
         except Exception:
             return
         # Camera frames come in at a fixed, deliberately small capture size (see
-        # backend.py) to keep local/remote streaming cheap. Upscale to fill the
-        # width Tk has actually given the label, preserving aspect ratio.
-        target_width = self._preview_width
+        # backend.py) to keep local/remote streaming cheap. Scale to fill the
+        # width Tk has actually given the tile, preserving aspect ratio.
+        target_width = tile["width"]
         if target_width and target_width != image.width:
             new_height = max(1, round(image.height * target_width / image.width))
             image = image.resize((target_width, new_height), Image.LANCZOS)
-        self._preview_imgtk = ImageTk.PhotoImage(image)
-        self.preview_label.configure(image=self._preview_imgtk, text="")
+        tile["imgtk"] = ImageTk.PhotoImage(image)
+        tile["image"].configure(image=tile["imgtk"], text="")
 
     def _stop_preview(self) -> None:
         if self._preview_sub is not None:
@@ -1686,11 +1749,16 @@ class RecordFrame(ttk.Frame):
                 self._monitoring_mode = data["mode"]
                 self.streamdeck_emulator.update_monitoring_mode(self._monitoring_mode)
         elif event == "preview_paused":
-            self.preview_label.configure(text="Recording — preview paused", image="")
+            self._set_preview_text("Recording — preview paused")
         elif event == "preview_resumed":
-            self.preview_label.configure(text="Waiting for camera preview...", image="")
+            self._set_preview_text("Waiting for camera preview...")
         elif event == "preview_error":
-            self.preview_label.configure(text=data.get("message", "Camera preview error."), image="")
+            message = data.get("message", "Camera preview error.")
+            if data.get("camera"):
+                self._preview_errors[data["camera"]] = message
+            self._set_preview_text(message, data.get("camera"))
+        elif event == "session_cameras_changed":
+            self._refresh_preview_cameras()
         elif event == "streaming_status":
             if "status" in data:
                 self.status_var.set(data["status"])

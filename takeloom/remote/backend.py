@@ -88,6 +88,9 @@ class RemoteBackend(Backend):
     def list_cameras(self) -> list[tuple[str, str]]:
         return [tuple(c) for c in self._client.call("list_cameras", {})["cameras"]]
 
+    def session_cameras(self) -> list[tuple[str, str]]:
+        return [tuple(c) for c in self._client.call("session_cameras", {})["cameras"]]
+
     def list_midi_devices(self) -> list[str]:
         return self._client.call("list_midi_devices", {})["devices"]
 
@@ -505,11 +508,12 @@ class RemoteBackend(Backend):
                 jpeg = base64.b64decode(data["jpeg_b64"])
             except Exception:
                 return
+            camera = data.get("camera", "")
             with self._preview_lock:
                 callbacks = list(self._preview_callbacks)
             for cb in callbacks:
                 try:
-                    cb(jpeg)
+                    cb(camera, jpeg)
                 except Exception:
                     pass
             return

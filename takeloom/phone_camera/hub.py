@@ -43,9 +43,21 @@ from .protocol import (
 
 VideoSink = Callable[[int, bool, bytes], None]
 
-UPLOAD_PART_NAME = "phone_camera_upload.part"
+# Where the main camera's phone recording lands (sync.py turns it into
+# session_video_raw.mp4). An extra camera's lands at its own path instead —
+# see upload_paths().
 UPLOAD_FILE_NAME = "phone_camera.mp4"
 UPLOAD_META_NAME = "phone_camera_upload.json"
+
+
+def upload_paths(session_dir: Path, file_name: str = UPLOAD_FILE_NAME) -> tuple[Path, Path, Path]:
+    """(final file, in-progress .part, metadata JSON) for an upload saved
+    as session_dir/file_name. Flat in session_dir, never a subdirectory:
+    the vault only uploads a session's top-level files (vault_client.py)."""
+    dest = session_dir / file_name
+    if file_name == UPLOAD_FILE_NAME:
+        return dest, session_dir / "phone_camera_upload.part", session_dir / UPLOAD_META_NAME
+    return dest, dest.with_name(dest.name + ".part"), dest.with_name(dest.stem + ".upload.json")
 
 
 def _is_local_network(ip: str) -> bool:
@@ -77,6 +89,7 @@ class _ExpectedUpload:
     session_id: str
     session_dir: Path
     device_id: str
+    file_name: str = UPLOAD_FILE_NAME  # see upload_paths()
     state: str = "waiting"  # "waiting" | "uploading" | "done" | "failed"
     received: int = 0
     size: int = 0
@@ -105,8 +118,10 @@ class PhoneCameraHub:
         self._cameras: dict[str, _CameraConnection] = {}
         self._video_sinks: dict[str, VideoSink] = {}
         self._pending_ips: set[str] = set()
-        self._uploads: dict[str, _ExpectedUpload] = {}
-        self._recording_starts: dict[str, int] = {}
+        # Both keyed by (session_id, device_id): every connected phone
+        # records each session (see backend.py's session_cameras).
+        self._uploads: dict[tuple[str, str], _ExpectedUpload] = {}
+        self._recording_starts: dict[tuple[str, str], int] = {}
         self._session_dir_resolver: Callable[[str], Path | None] = lambda session_id: None
         self._on_preview: Callable[[str, bytes], None] = lambda device_id, jpeg: None
         self._on_change: Callable[[], None] = lambda: None
@@ -183,26 +198,32 @@ class PhoneCameraHub:
         Doesn't wait for the reply — that lands in recording_start_pts()."""
         return self.send(device_id, {"kind": "start_recording", "session_id": session_id})
 
-    def recording_start_pts(self, session_id: str) -> int | None:
+    def recording_start_pts(self, session_id: str, device_id: str) -> int | None:
         """The phone's own recording's first-frame capture time (phone-clock
         ns), once it's confirmed starting it."""
         with self._lock:
-            return self._recording_starts.get(session_id)
+            return self._recording_starts.get((session_id, device_id))
 
     def stop_recording(self, device_id: str, session_id: str) -> None:
         self.send(device_id, {"kind": "stop_recording", "session_id": session_id})
 
     # --- uploads ---
 
-    def expect_upload(self, session_id: str, session_dir: Path, device_id: str) -> None:
+    def expect_upload(
+        self, session_id: str, session_dir: Path, device_id: str, file_name: str = UPLOAD_FILE_NAME,
+    ) -> None:
         with self._lock:
-            self._uploads.setdefault(session_id, _ExpectedUpload(session_id, session_dir, device_id))
+            self._uploads.setdefault(
+                (session_id, device_id), _ExpectedUpload(session_id, session_dir, device_id, file_name),
+            )
             self._cond.notify_all()
 
     def wait_for_upload(
         self,
         session_id: str,
+        device_id: str,
         on_progress: Callable[[str], None],
+        label: str = "Takeloom Camera",
         idle_timeout: float = 180.0,
         max_wait: float = 4 * 3600.0,
     ) -> Path | None:
@@ -215,14 +236,14 @@ class PhoneCameraHub:
         start = time.monotonic()
         last_report = 0.0
         with self._cond:
-            up = self._uploads.get(session_id)
+            up = self._uploads.get((session_id, device_id))
             if up is None:
                 return None
             while True:
                 if up.state == "done":
-                    return up.session_dir / UPLOAD_FILE_NAME
+                    return upload_paths(up.session_dir, up.file_name)[0]
                 if up.state == "failed":
-                    on_progress(f"Takeloom Camera upload failed: {up.error}")
+                    on_progress(f"{label} upload failed: {up.error}")
                     return None
                 now = time.monotonic()
                 connected = up.device_id in self._cameras
@@ -234,11 +255,11 @@ class PhoneCameraHub:
                     last_report = now
                     if up.state == "uploading" and up.size:
                         pct = 100.0 * up.received / up.size
-                        msg = f"Receiving Takeloom Camera video: {pct:.0f}% of {up.size / 1e9:.2f} GB"
+                        msg = f"Receiving {label} video: {pct:.0f}% of {up.size / 1e9:.2f} GB"
                     elif connected:
-                        msg = "Waiting for Takeloom Camera to upload its recording…"
+                        msg = f"Waiting for {label} to upload its recording…"
                     else:
-                        msg = "Waiting for Takeloom Camera to reconnect and upload its recording…"
+                        msg = f"Waiting for {label} to reconnect and upload its recording…"
                     self._cond.release()
                     try:
                         on_progress(msg)
@@ -246,9 +267,10 @@ class PhoneCameraHub:
                         self._cond.acquire()
                 self._cond.wait(1.0)
 
-    def forget_upload(self, session_id: str) -> None:
+    def forget_upload(self, session_id: str, device_id: str) -> None:
         with self._lock:
-            self._uploads.pop(session_id, None)
+            self._uploads.pop((session_id, device_id), None)
+            self._recording_starts.pop((session_id, device_id), None)
 
     # --- called from connection handlers ---
 
@@ -280,7 +302,7 @@ class PhoneCameraHub:
         memory) — one rebuilt from its directory if it's still unprocessed
         and was recorded with this same phone."""
         with self._lock:
-            up = self._uploads.get(session_id)
+            up = self._uploads.get((session_id, device_id))
             if up is not None:
                 return up
         session_dir = self._session_dir_resolver(session_id)
@@ -290,11 +312,24 @@ class PhoneCameraHub:
             data = json.loads((session_dir / "session_log.json").read_text())
         except (OSError, ValueError):
             return None
+        if (session_dir / "session_video.mp4").exists():
+            return None  # already processed
         phone = data.get("phone_camera") or {}
-        if phone.get("device_id") != device_id or (session_dir / "session_video.mp4").exists():
-            return None
+        if phone.get("device_id") == device_id:
+            file_name = UPLOAD_FILE_NAME
+        else:
+            extra = next(
+                (c for c in data.get("extra_cameras", [])
+                 if (c.get("phone_camera") or {}).get("device_id") == device_id),
+                None,
+            )
+            if extra is None or not extra.get("upload_file"):
+                return None
+            file_name = extra["upload_file"]
         with self._lock:
-            return self._uploads.setdefault(session_id, _ExpectedUpload(session_id, session_dir, device_id))
+            return self._uploads.setdefault(
+                (session_id, device_id), _ExpectedUpload(session_id, session_dir, device_id, file_name),
+            )
 
 
 class _ThreadingTCPServer(socketserver.ThreadingTCPServer):
@@ -452,10 +487,10 @@ class _Handler(socketserver.BaseRequestHandler):
             conn.info.clock_rtt_ns = int(msg.get("rtt_ns") or 0)
         elif kind == "status":
             conn.info.status = {k: v for k, v in msg.items() if k != "kind"}
-            hub._on_change()
         elif kind == "recording_started":
             with hub._lock:
-                hub._recording_starts[str(msg.get("session_id"))] = int(msg.get("video_start_pts_ns") or 0)
+                key = (str(msg.get("session_id")), conn.info.device_id)
+                hub._recording_starts[key] = int(msg.get("video_start_pts_ns") or 0)
         elif kind == "recording_stopped":
             hub._log(f"Takeloom Camera '{conn.info.client_name}' stopped recording "
                      f"({(msg.get('file_size') or 0) / 1e6:.0f} MB, {msg.get('duration_s', 0):.0f} s)")
@@ -463,7 +498,7 @@ class _Handler(socketserver.BaseRequestHandler):
             session_id = str(msg.get("session_id"))
             hub._log(f"Takeloom Camera '{conn.info.client_name}' recording failed: {msg.get('error')}")
             with hub._lock:
-                up = hub._uploads.get(session_id)
+                up = hub._uploads.get((session_id, conn.info.device_id))
                 if up is not None:
                     up.state, up.error = "failed", str(msg.get("error") or "recording failed on the phone")
                 hub._cond.notify_all()
@@ -491,8 +526,7 @@ class _Handler(socketserver.BaseRequestHandler):
             self._expect_end_and_ack(sock, up)
             return
 
-        part = up.session_dir / UPLOAD_PART_NAME
-        meta_path = up.session_dir / UPLOAD_META_NAME
+        dest, part, meta_path = upload_paths(up.session_dir, up.file_name)
         offset = part.stat().st_size if part.exists() else 0
         if offset > size:
             part.unlink()
@@ -502,7 +536,7 @@ class _Handler(socketserver.BaseRequestHandler):
             hub._cond.notify_all()
         meta_path.write_text(json.dumps(begin.get("metadata") or {}, indent=2))
         self._send({"kind": "upload_resume", "offset": offset})
-        hub._log(f"Receiving Takeloom Camera recording for {session_id} "
+        hub._log(f"Receiving Takeloom Camera recording for {session_id} from {device_id} "
                  f"({size / 1e9:.2f} GB{f', resuming at {offset / 1e9:.2f} GB' if offset else ''})")
 
         try:
@@ -530,7 +564,7 @@ class _Handler(socketserver.BaseRequestHandler):
             self._send({"kind": "upload_done", "ok": False,
                         "error": f"Received {received} of {size} bytes."})
             return
-        part.replace(up.session_dir / UPLOAD_FILE_NAME)
+        part.replace(dest)
         with hub._lock:
             up.state = "done"
             hub._cond.notify_all()

@@ -294,6 +294,17 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
         measured_offset_ms = align_phone_video(session_dir, data, log_path)
         if measured_offset_ms is not None:
             video_offset_ms = measured_offset_ms
+    extra_cameras = [
+        c for c in data.get("extra_cameras", [])
+        if (session_dir / c["file"]).exists() or (c.get("upload_file") and (session_dir / c["upload_file"]).exists())
+    ]
+    if extra_cameras and session_mix_flac.exists():
+        # Every other camera recorded this session (see backend.py's
+        # session_cameras) — each lined up the same way as the main one,
+        # which also turns a phone's upload into its "file".
+        from ..phone_camera.sync import align_extra_cameras
+        align_extra_cameras(session_dir, data, log_path, config.video_latency_compensation_ms)
+        extra_cameras = [c for c in extra_cameras if (session_dir / c["file"]).exists()]
     have_video = session_video_raw.exists() and session_mix_flac.exists()
     # Only present for a MIDI-recorded session (backend.py's _end_session
     # writes it, from audio/midi_log.py's MidiEventLog) — absent for an
@@ -329,6 +340,25 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
             video_offset_ms=video_offset_ms,
             watermark_schedule=watermark_schedule(data, video_offset_ms),
         )
+
+    # Each extra camera becomes its own finished whole-session video, same
+    # audio and watermarking as session_video.mp4 — no per-take cuts, those
+    # still come from the main camera only.
+    extra_videos_ok = True
+    if extra_cameras and session_mix_flac.exists():
+        from ..video.capture import mux_video_audio
+        for entry in extra_cameras:
+            raw = session_dir / entry["file"]
+            offset_ms = entry.get("video_offset_ms")
+            if offset_ms is None:
+                offset_ms = config.video_latency_compensation_ms
+            if mux_video_audio(
+                raw, session_mix_flac, session_flac, session_dir / entry["final_file"],
+                video_offset_ms=offset_ms, watermark_schedule=watermark_schedule(data, offset_ms),
+            ):
+                raw.unlink(missing_ok=True)
+            else:
+                extra_videos_ok = False
 
     saved = 0
     videos = 0
@@ -492,8 +522,9 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
         data["takes"] = {str(k): v for k, v in session_takes.items()}
         atomic_write_text(log_path, json.dumps(data, indent=2))
 
-    # Only now that every take has been spliced out of session.flac above.
-    if session_video_ok:
+    # Only now that every take has been spliced out of session.flac above —
+    # and every extra camera has its own copy of the audio muxed in.
+    if session_video_ok and extra_videos_ok:
         session_video_raw.unlink(missing_ok=True)
         session_mix_flac.unlink(missing_ok=True)
         # The instrument-only track muxed into session_video.mp4 above is a
@@ -509,4 +540,8 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
         summary += f" ({videos} with video)"
     if have_video and not session_video_ok:
         summary += "; session video mux failed, raw files kept"
+    if extra_cameras:
+        summary += f"; {len(extra_cameras)} extra camera video{'s' if len(extra_cameras) != 1 else ''} saved"
+        if not extra_videos_ok:
+            summary += " (some failed to mux, raw files kept)"
     return summary + "."

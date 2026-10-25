@@ -18,12 +18,30 @@ the session's audio automatically, with no manual latency test.
 2. Open Takeloom Camera, tap ⚙, and enter the Mac Mini's IP address. The
    first connection shows a pairing request on the Mac (the same approval
    flow as a Remote client). Approve it.
-3. Back in takeloom, open **Recording Devices**. The phone appears as
-   *Takeloom Camera: <name>*. Select it as the camera.
-4. Record as normal. Starting a session tells the phone to record, and
-   ending it tells the phone to stop and upload. Processing waits for the
-   upload, showing progress in the status line, then builds the session
-   video from the phone's file.
+3. The phone shows up on the Record tab by itself, as one of the camera
+   previews. There's nothing to add: every connected phone is recorded.
+4. Record as normal. Starting a session tells every connected phone to
+   record, and ending it tells them to stop and upload. Processing waits
+   for the uploads, showing progress in the status line, then builds the
+   session's videos from the phones' files.
+
+### More than one camera
+
+Every session records every camera at once:
+
+- the **main camera** (Recording Devices → *Main camera*), which gives
+  each take its video, feeds the YouTube stream, and becomes
+  `session_video.mp4`. If none is set, the first phone stands in;
+- any cameras added with **Add camera** on Recording Devices (local
+  webcams etc.);
+- every connected Takeloom Camera phone.
+
+Each camera besides the main one is saved whole as its own
+`cameraN_<name>.mp4` in the session, with the same audio tracks and
+watermark as `session_video.mp4`. A phone's copy gets its own measured
+sync offset (below); a local camera's uses the hand-tuned camera offset.
+These are whole-session videos only: per-take videos still come from the
+main camera.
 
 Mount the phone in landscape and keep it on a charger. The app keeps the
 screen awake. Camera and quality (720p / 1080p / 4K) are in ⚙ and can't

@@ -46,7 +46,7 @@ import numpy as np
 
 from ..ffmpeg_bin import FFMPEG, FFPROBE
 from ..utils import atomic_write_text
-from .hub import UPLOAD_FILE_NAME, UPLOAD_META_NAME
+from .hub import UPLOAD_FILE_NAME, upload_paths
 
 RATE = 8000  # Hz; plenty for timing to a fraction of a ms after interpolation
 WINDOW_S = 8.0
@@ -229,9 +229,39 @@ def align_phone_video(session_dir: Path, data: dict, log_path: Path) -> float | 
     """Make session_video_raw.mp4 the best available phone video and return
     its offset in ms (positive = video starts that long after the mix), also
     saving it into the session log. None if nothing usable."""
-    phone = data.get("phone_camera") or {}
-    raw = session_dir / "session_video_raw.mp4"
-    uploaded = session_dir / UPLOAD_FILE_NAME
+    offset_ms = _align_camera(session_dir, data, data.get("phone_camera") or {}, UPLOAD_FILE_NAME,
+                              session_dir / "session_video_raw.mp4", data)
+    if offset_ms is not None:
+        atomic_write_text(log_path, json.dumps(data, indent=2))
+    return offset_ms
+
+
+def align_extra_cameras(session_dir: Path, data: dict, log_path: Path, local_offset_ms: float) -> None:
+    """Fill in "video_offset_ms" on each of the session log's
+    "extra_cameras" entries (see backend.py's session_cameras): measured,
+    for a phone, exactly as align_phone_video does the main camera (its
+    raw file replaced by its uploaded recording, when that arrived);
+    `local_offset_ms` (the hand-tuned camera offset) for a local camera."""
+    for entry in data.get("extra_cameras", []):
+        if entry.get("video_offset_ms") is not None:
+            continue  # already aligned by an earlier, interrupted run
+        phone = entry.get("phone_camera")
+        if phone and entry.get("upload_file"):
+            entry["video_offset_ms"] = _align_camera(
+                session_dir, entry, phone, entry["upload_file"], session_dir / entry["file"], data,
+            )
+        else:
+            entry["video_offset_ms"] = local_offset_ms
+    atomic_write_text(log_path, json.dumps(data, indent=2))
+
+
+def _align_camera(
+    session_dir: Path, record: dict, phone: dict, upload_file: str, raw: Path, data: dict,
+) -> float | None:
+    """Make `raw` the best available video from one phone and return its
+    offset in ms, recording how it was measured into `record`
+    ("video_offset_ms"/"video_sync"). None if nothing usable."""
+    uploaded, _part, meta_path = upload_paths(session_dir, upload_file)
     mix_flac = session_dir / "session_mix.flac"
     session_flac = session_dir / "session.flac"
     sample_rate = data.get("sample_rate") or 48000
@@ -240,20 +270,20 @@ def align_phone_video(session_dir: Path, data: dict, log_path: Path) -> float | 
     sync: dict | None = None
     if uploaded.exists() and mix_flac.exists():
         try:
-            meta = json.loads((session_dir / UPLOAD_META_NAME).read_text())
+            meta = json.loads(meta_path.read_text())
         except (OSError, ValueError):
             meta = {}
         try:
             sync = _align_uploaded(uploaded, meta, phone, mix_flac, session_flac, sample_rate, mix_start_frame, raw)
         except Exception as e:  # never lose the session over this: fall back to the live feed
             sync = None
-            data["video_sync_error"] = str(e)
+            record["video_sync_error"] = str(e)
         if sync is not None:
             uploaded.unlink(missing_ok=True)
-            (session_dir / UPLOAD_META_NAME).unlink(missing_ok=True)
+            meta_path.unlink(missing_ok=True)
 
-    if sync is None and "video_sync" in data and data["video_sync"].get("source") == "phone upload":
-        return data.get("video_offset_ms")  # already aligned by an earlier, interrupted run
+    if sync is None and "video_sync" in record and record["video_sync"].get("source") == "phone upload":
+        return record.get("video_offset_ms")  # already aligned by an earlier, interrupted run
 
     if sync is None and raw.exists():
         live_start = _clock_video_start(phone, phone.get("first_live_pts_ns"),
@@ -263,9 +293,8 @@ def align_phone_video(session_dir: Path, data: dict, log_path: Path) -> float | 
 
     if sync is None:
         return None
-    data["video_offset_ms"] = sync["offset_ms"]
-    data["video_sync"] = sync
-    atomic_write_text(log_path, json.dumps(data, indent=2))
+    record["video_offset_ms"] = sync["offset_ms"]
+    record["video_sync"] = sync
     return sync["offset_ms"]
 
 

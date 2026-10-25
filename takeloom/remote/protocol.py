@@ -13,7 +13,7 @@ socket, one JSON object per line.
     {"kind": "response", "id": 17, "ok": false, "error": "message"}      server -> client
 
     {"kind": "event", "event": "recording_status", "data": {...}}       server -> client, unsolicited
-    {"kind": "event", "event": "preview_frame", "data": {"jpeg_b64": "..."}}
+    {"kind": "event", "event": "preview_frame", "data": {"camera": "<camera_device>", "jpeg_b64": "..."}}
 
 No TLS. A client with no token (or an unrecognized one) triggers an
 interactive pairing request on the server — the local user approves or
@@ -62,6 +62,8 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
         return {"devices": backend.list_audio_devices()}
     if op == "list_cameras":
         return {"cameras": [list(c) for c in backend.list_cameras()]}
+    if op == "session_cameras":
+        return {"cameras": [list(c) for c in backend.session_cameras()]}
     if op == "list_midi_devices":
         return {"devices": backend.list_midi_devices()}
     if op == "refresh_devices":
