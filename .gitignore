@@ -17,3 +17,4 @@ camera_app/ios/TakeloomCamera.xcodeproj/
 camera_app/android/.gradle/
 camera_app/android/local.properties
 camera_app/android/app/build/
+.DS_Store
