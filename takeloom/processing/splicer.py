@@ -286,6 +286,14 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
     session_flac = session_dir / "session.flac"
     session_video_raw = session_dir / "session_video_raw.mp4"
     session_mix_flac = session_dir / "session_mix.flac"
+    if data.get("phone_camera"):
+        # A Takeloom Camera session: swap in the phone's own uploaded
+        # recording if it arrived, and measure this session's actual video
+        # offset rather than trusting the local camera's hand-tuned one.
+        from ..phone_camera.sync import align_phone_video
+        measured_offset_ms = align_phone_video(session_dir, data, log_path)
+        if measured_offset_ms is not None:
+            video_offset_ms = measured_offset_ms
     have_video = session_video_raw.exists() and session_mix_flac.exists()
     # Only present for a MIDI-recorded session (backend.py's _end_session
     # writes it, from audio/midi_log.py's MidiEventLog) — absent for an

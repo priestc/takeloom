@@ -32,6 +32,7 @@ from .audio.filters import CompressorSettings
 from .audio.pitch import effective_tuning, nearest_target
 from .audio.scarlett2_direct_monitor import FOCUSRITE_DEVICE_NAME, set_channel_gains
 from .config import DEFAULT_CONFIG_PATH, INSTRUMENT_LABELS, MAX_INSTRUMENT_VOLUME_PERCENT, Instrument, StudioConfig
+from .phone_camera.protocol import DEVICE_PREFIX, is_phone_device, phone_device_id
 from .project import Project, Setlist, TakeInfo, TrackEntry
 from .utils import atomic_write_text, ensure_dir, timestamp_now, wall_timestamp
 
@@ -1275,7 +1276,9 @@ class _CameraPreviewManager:
 
     def _start_thread_locked(self) -> None:
         device = self._get_camera_device()
-        if not device:
+        if not device or is_phone_device(device):
+            # A Takeloom Camera phone sends its own preview frames, which
+            # LocalBackend pushes in via push_external_frame.
             return
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, args=(device,), daemon=True)
@@ -1506,6 +1509,12 @@ class _ActiveSession:
     # at session end (_end_session) and later sliced per-take by
     # processing/splicer.py, so a completed take can be revoiced later.
     midi_log: object | None = None
+    # Set when the session camera is a Takeloom Camera phone (see
+    # phone_camera/): time.monotonic_ns() when mix recording started — what
+    # the phone's clock-synced frame timestamps are measured against — and
+    # the recorder, so _save_session_log can record what phone_camera/
+    # sync.py needs to line its video up afterwards.
+    phone_mix_start_ns: int | None = None
 
 
 @dataclass
@@ -1741,6 +1750,7 @@ class LocalBackend(Backend):
         # still lists it until it's re-initialized).
         self._audio_hardware_absent = False
         self._preview = _CameraPreviewManager(self._current_camera_device, on_error=self._on_preview_error)
+        self._phone_hub = None  # PhoneCameraHub, when attach_phone_camera_hub() is called
         # "Sticky" mixer levels: once the operator nudges backing/takes volume,
         # that level carries forward to every track loaded afterward (like a
         # mixing-console fader), instead of each track reverting to its own
@@ -1810,6 +1820,20 @@ class LocalBackend(Backend):
     def _current_camera_device(self) -> str:
         return self.get_config().camera_device
 
+    def attach_phone_camera_hub(self, hub) -> None:
+        """Use Takeloom Camera phones connected to `hub` (phone_camera/
+        hub.py) as cameras — only `takeloom server` runs one."""
+        self._phone_hub = hub
+        hub.set_callbacks(
+            on_preview=self._on_phone_preview,
+            on_change=lambda: self._emit("phone_cameras_changed", {}),
+            session_dir_resolver=self._local_session_dir_path,
+        )
+
+    def _on_phone_preview(self, device_id: str, jpeg: bytes) -> None:
+        if self._current_camera_device() == DEVICE_PREFIX + device_id:
+            self._preview.push_external_frame(jpeg)
+
     def _on_preview_error(self, message: str) -> None:
         self._emit("preview_error", {"message": message})
 
@@ -1874,9 +1898,12 @@ class LocalBackend(Backend):
     def list_cameras(self) -> list[tuple[str, str]]:
         from .video.devices import list_cameras
         try:
-            return list_cameras()
+            cameras = list_cameras()
         except Exception:
-            return []
+            cameras = []
+        if self._phone_hub is not None:
+            cameras += self._phone_hub.list_camera_devices()
+        return cameras
 
     def list_midi_devices(self) -> list[str]:
         from .audio.midi_input import list_midi_devices
@@ -4301,7 +4328,7 @@ class LocalBackend(Backend):
         Returns None (leaving the preview running untouched) if there's no
         camera configured, ffmpeg isn't available, or the recorder failed
         to start."""
-        if not device:
+        if not device or is_phone_device(device):
             return None
         from .video.capture import VideoRecorder, ffmpeg_available
         if not ffmpeg_available():
@@ -4475,6 +4502,11 @@ class LocalBackend(Backend):
                 raise BackendError("Another recording is already in progress.")
             if not camera_device:
                 raise BackendError("Select a camera first.")
+            if is_phone_device(camera_device):
+                raise BackendError(
+                    "Takeloom Camera measures its own sync offset automatically every session — "
+                    "no latency test needed."
+                )
             self._close_active_monitor()  # always opens its own engine, never reuses the ambient one
 
             config = self.get_config()
@@ -5654,11 +5686,23 @@ class LocalBackend(Backend):
         mix_start_frame = 0
         stream_feeder = None
         youtube_broadcast_id = None
-        if config.camera_device:
+        phone_mix_start_ns = None
+        use_phone = is_phone_device(config.camera_device)
+        if use_phone and (
+            self._phone_hub is None or self._phone_hub.camera(phone_device_id(config.camera_device)) is None
+        ):
+            self._emit("recording_status", {
+                "status": f"{config.camera_label or 'Takeloom Camera'} isn't connected — "
+                          "recording this session without video.",
+            })
+        elif config.camera_device:
             from .video.capture import VideoRecorder, ffmpeg_available
-            if ffmpeg_available():
-                self._preview.pause()
-                self._emit("preview_paused", {})
+            if use_phone or ffmpeg_available():
+                if not use_phone:
+                    # A phone's preview frames keep coming from the phone
+                    # itself; only a local device needs handing to ffmpeg.
+                    self._preview.pause()
+                    self._emit("preview_paused", {})
                 session_video_raw = session_dir / "session_video_raw.mp4"
                 session_mix_flac = session_dir / "session_mix.flac"
 
@@ -5699,16 +5743,30 @@ class LocalBackend(Backend):
                 # same as _open_video_recorder's video check/latency-test
                 # path — so the Record tab's live feed keeps showing real
                 # camera frames for the whole session instead of freezing.
-                video_recorder = VideoRecorder(
-                    config.camera_device, session_video_raw, on_preview_frame=self._preview.push_external_frame,
-                    stream_target=stream_target,
-                )
+                if use_phone:
+                    from .phone_camera.recorder import PhoneVideoRecorder
+                    device_id = phone_device_id(config.camera_device)
+                    # The phone's own recording is uploaded into this session
+                    # dir after it ends — registered now, before the phone
+                    # could possibly finish and start sending it.
+                    self._phone_hub.expect_upload(session_dir.name, session_dir, device_id)
+                    video_recorder = PhoneVideoRecorder(
+                        self._phone_hub, device_id, session_dir.name, session_video_raw,
+                        stream_target=stream_target,
+                    )
+                else:
+                    video_recorder = VideoRecorder(
+                        config.camera_device, session_video_raw, on_preview_frame=self._preview.push_external_frame,
+                        stream_target=stream_target,
+                    )
                 if video_recorder.start():
                     # Where the mix/video timeline begins on the session-audio
                     # timeline — splicing maps take frames onto the video with
                     # this (see _save_session_log / processing/splicer.py).
                     mix_start_frame = engine.session_frames
                     engine.start_mix_recording(session_mix_flac)
+                    if use_phone:
+                        phone_mix_start_ns = time.monotonic_ns()
                     video_start_wall_time = wall_timestamp()
                     if stream_feeder is not None:
                         engine.set_stream_sink(stream_feeder.push)
@@ -5725,8 +5783,11 @@ class LocalBackend(Backend):
                         # Studio forever instead of ending itself.
                         self._complete_youtube_broadcast(config, youtube_broadcast_id)
                         youtube_broadcast_id = None
-                    self._preview.resume()
-                    self._emit("preview_resumed", {})
+                    if use_phone:
+                        self._phone_hub.forget_upload(session_dir.name)
+                    else:
+                        self._preview.resume()
+                        self._emit("preview_resumed", {})
         elif config.streaming_enabled and config.youtube_stream_key:
             self._emit("streaming_status", {
                 "status": "Streaming needs a camera — set one up on the Recording Devices tab.", "active": False,
@@ -5743,6 +5804,7 @@ class LocalBackend(Backend):
             session_mix_flac=session_mix_flac, video_start_wall_time=video_start_wall_time,
             mix_start_frame=mix_start_frame, stream_feeder=stream_feeder,
             youtube_broadcast_id=youtube_broadcast_id,
+            phone_mix_start_ns=phone_mix_start_ns,
             resolved_filter_picks=prefetched_picks,
             queued_filter_picks=queued_picks,
             midi_log=midi_log,
@@ -5806,8 +5868,9 @@ class LocalBackend(Backend):
                         "status": "Camera recording didn't stop cleanly (camera powered off?) — "
                                   "its video is kept up to the last couple of seconds.",
                     })
-                self._preview.resume()
-                self._emit("preview_resumed", {})
+                if session.phone_mix_start_ns is None:
+                    self._preview.resume()
+                    self._emit("preview_resumed", {})
             if session.youtube_broadcast_id is not None:
                 self._complete_youtube_broadcast(self.get_config(), session.youtube_broadcast_id)
 
@@ -5855,6 +5918,20 @@ class LocalBackend(Backend):
         while this grinds along on the old one's files."""
         from .processing.splicer import process_session
         config = self.get_config()
+        if session.phone_mix_start_ns is not None and self._phone_hub is not None:
+            # The phone's full-quality recording, uploading now that the
+            # session's over. Waited for here, on this background thread —
+            # the app is already idle and a new session can start meanwhile.
+            session_id = session.session_dir.name
+            arrived = self._phone_hub.wait_for_upload(
+                session_id, lambda msg: self._emit("recording_status", {"phase": "idle", "status": msg}),
+            )
+            self._phone_hub.forget_upload(session_id)
+            if arrived is None:
+                self._emit("recording_status", {
+                    "phase": "idle",
+                    "status": "Takeloom Camera's recording didn't arrive — using the live feed's video instead.",
+                })
         try:
             summary = process_session(session_dir=session.session_dir, config=config)
         except Exception as e:
@@ -5899,6 +5976,8 @@ class LocalBackend(Backend):
             "sample_rate": session.engine.sample_rate,
             "mix_start_frame": session.mix_start_frame,
             "has_video": session.session_video_raw is not None,
+            **({"phone_camera": session.video_recorder.session_log_info(session.phone_mix_start_ns)}
+               if session.phone_mix_start_ns is not None else {}),
             # song-set index -> the song actually drawn for it this
             # session (see _resolve_filter_slot) — the setlist itself
             # never records this, so post-processing needs it from here

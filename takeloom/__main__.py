@@ -406,6 +406,20 @@ def server_command(disable_color: bool) -> None:
         raise SystemExit(1)
 
     log(f"takeloom server listening on port {listen_port} (host: {backend.hostname()}, ip: {backend.ip_address()})")
+
+    # Takeloom Camera phones (camera_app/) — same pairing approval and
+    # token list as Remote clients, on their own port.
+    from .phone_camera.hub import PhoneCameraHub
+    phone_hub = PhoneCameraHub(
+        backend.get_config, backend.save_config, backend.hostname, request_authorization, log=log,
+    )
+    try:
+        phone_hub.start()
+    except OSError as e:
+        log(f"Error: could not start the Takeloom Camera listener on port {phone_hub.port}: {e}", err=True)
+    else:
+        backend.attach_phone_camera_hub(phone_hub)
+        log(f"Takeloom Camera listening on port {phone_hub.port}")
     # Instrument auto-detect is no longer kicked off automatically on every
     # idle transition — that briefly existed here and caused a burst of
     # redundant, overlapping start_auto_detect_instrument() calls every
