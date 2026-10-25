@@ -1,0 +1,90 @@
+# Daily build: once a day, if anything was committed since the last build
+# (daily or release), build takeloom and publish it as a GitHub pre-release
+# tagged daily-YYYY-MM-DD. Never sent to PyPI/Homebrew/apt — that's
+# release.yml. See docs/releasing.md.
+name: Daily build
+
+on:
+  schedule:
+    # 07:00 UTC: midnight in Denver in winter (MST), 1am in summer (MDT) —
+    # always after the day being built has ended.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency: daily-build
+
+jobs:
+  daily:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # tags + history: the version comes from them
+
+      - name: Anything new since the last build?
+        id: check
+        run: |
+          if [ -n "$(git tag --points-at HEAD --list 'daily-*' 'v[0-9]*')" ]; then
+            echo "Nothing committed since the last build — no daily build today."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Named for the (Denver) day the newest commit was made.
+          day=$(TZ=America/Denver git log -1 --format=%cd --date=format-local:%Y-%m-%d)
+          previous=$(git describe --tags --abbrev=0 --match 'daily-*' --match 'v[0-9]*' 2>/dev/null || true)
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "tag=daily-$day" >> "$GITHUB_OUTPUT"
+          echo "day=$day" >> "$GITHUB_OUTPUT"
+          echo "previous=$previous" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.skip == 'false'
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          python -m pip install --quiet build
+          python -m build
+          ls dist
+
+      - name: Smoke test
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq libportaudio2 libsndfile1
+          python -m pip install --quiet dist/*.whl
+          takeloom --help
+
+      - name: Publish pre-release
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          tag="${{ steps.check.outputs.tag }}"
+          previous="${{ steps.check.outputs.previous }}"
+          version=$(ls dist/*.whl | sed -E 's/.*takeloom-([^-]+)-.*/\1/')
+          {
+            echo "Daily build of \`main\` for ${{ steps.check.outputs.day }} — version $version."
+            echo
+            echo "Not a release: for testing. Install the wheel with \`pipx install <url of the .whl>\`."
+            echo
+            echo "### Changes since ${previous:-the beginning}"
+            git log --format='- %s (%h)' ${previous:+$previous..}HEAD
+          } > notes.md
+          # A second build on the same day (manual run) replaces the first.
+          gh release delete "$tag" --cleanup-tag --yes 2>/dev/null || true
+          gh release create "$tag" dist/* --prerelease --target "$GITHUB_SHA" \
+            --title "Daily build ${{ steps.check.outputs.day }} ($version)" --notes-file notes.md
+
+      - name: Keep only the last 14 daily builds
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          gh release list --limit 200 --json tagName,createdAt \
+            -q '[.[] | select(.tagName | startswith("daily-"))] | sort_by(.createdAt) | reverse | .[14:] | .[].tagName' |
+          while read -r old; do
+            gh release delete "$old" --cleanup-tag --yes
+          done

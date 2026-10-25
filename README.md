@@ -191,3 +191,7 @@ song from this filter each session" entry — added from the GUI's Streaming/Set
 prefer redrawing a song other instruments already have a take on, and what lets
 `ensure_setlist_files_local` (session start, in remote vault mode) pull down another
 project's take on a shared song before it's needed.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Builds and releases: [docs/releasing.md](docs/releasing.md).

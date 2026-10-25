@@ -1,11 +1,16 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "takeloom"
-version = "0.4.14"
+# From git tags (hatch-vcs): a release is the tag vX.Y.Z (made by
+# .github/workflows/release.yml); anything after it builds as
+# X.Y.(Z+1).devN — see docs/releasing.md.
+dynamic = ["version"]
 description = "Music Recording Session Manager"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
 dependencies = [
     "click>=8.0",
@@ -31,3 +36,8 @@ dependencies = [
 
 [project.scripts]
 takeloom = "takeloom.__main__:main"
+
+[tool.hatch.version]
+source = "vcs"
+# Only release tags count — not the daily-YYYY-MM-DD build tags.
+raw-options = { git_describe_command = ["git", "describe", "--dirty", "--tags", "--long", "--match", "v[0-9]*"], local_scheme = "no-local-version", fallback_version = "0.0.0" }
