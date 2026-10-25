@@ -364,7 +364,8 @@ class DetectTestWindow(ttk.Frame):
 
 
 def run() -> None:
-    root = tk.Tk()
+    from .desktop_entry import WM_CLASS_NAME
+    root = tk.Tk(className=WM_CLASS_NAME)
     normalize_platform_style(root)
     root.title("Takeloom — Detect Test")
 

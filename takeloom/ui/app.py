@@ -265,7 +265,11 @@ def _process_latest_session_if_pending(root: tk.Misc, app_state: AppState, on_do
 
 
 def run(remote_ip: str | None = None) -> None:
-    root = TkinterDnD.Tk()  # a plain tk.Tk() can't accept drag-and-drop (used by New Project)
+    from .desktop_entry import WM_CLASS_NAME, ensure_desktop_entry
+    ensure_desktop_entry()
+    # a plain tk.Tk() can't accept drag-and-drop (used by New Project);
+    # className: what Linux docks match against takeloom.desktop
+    root = TkinterDnD.Tk(className=WM_CLASS_NAME)
     normalize_platform_style(root)
     root.title("Takeloom")
 
