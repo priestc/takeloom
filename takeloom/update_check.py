@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import threading
 from importlib import metadata
+from pathlib import Path
 
 _REPO_URL = "https://github.com/priestc/takeloom.git"
 _GIT_TIMEOUT = 5.0
@@ -53,6 +56,57 @@ def _latest_commit() -> str | None:
     return result.stdout.split()[0]
 
 
+def _pipx() -> str:
+    """pipx's path. Launched from a desktop launcher (see launcher.py),
+    PATH may not include where pipx lives."""
+    found = shutil.which("pipx")
+    if found:
+        return found
+    for candidate in (Path.home() / ".local" / "bin" / "pipx", Path("/opt/homebrew/bin/pipx"),
+                      Path("/usr/local/bin/pipx"), Path("/usr/bin/pipx")):
+        if candidate.exists():
+            return str(candidate)
+    return "pipx"
+
+
+def _run_with_progress_window(cmd: list[str]) -> subprocess.CompletedProcess:
+    """Run cmd, showing a small "Updating Takeloom…" window meanwhile when
+    there's no terminal to log to — opened from a desktop launcher, a
+    minute-long reinstall would otherwise look like the app never opened."""
+    if sys.stdout is not None and sys.stdout.isatty():
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=_INSTALL_TIMEOUT)
+    try:
+        import tkinter as tk
+        window = tk.Tk(className="takeloom")
+    except Exception:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=_INSTALL_TIMEOUT)
+    window.title("Takeloom")
+    tk.Label(window, text="Updating Takeloom to the latest version…", padx=30, pady=24).pack()
+    window.resizable(False, False)
+    outcome: dict = {}
+
+    def worker() -> None:
+        try:
+            outcome["result"] = subprocess.run(cmd, capture_output=True, text=True, timeout=_INSTALL_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            outcome["error"] = e
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+
+    def poll() -> None:
+        if thread.is_alive():
+            window.after(200, poll)
+        else:
+            window.destroy()
+
+    window.after(200, poll)
+    window.mainloop()
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["result"]
+
+
 def check_and_restart(log=print) -> None:
     """If GitHub's main branch is ahead of the installed commit, reinstall
     and re-exec this process in place. Returns normally (does nothing) if
@@ -70,10 +124,7 @@ def check_and_restart(log=print) -> None:
 
     log(f"Update available ({installed[:8]} -> {latest[:8]}) — installing...")
     try:
-        result = subprocess.run(
-            ["pipx", "install", "--force", f"git+{_REPO_URL}"],
-            capture_output=True, text=True, timeout=_INSTALL_TIMEOUT,
-        )
+        result = _run_with_progress_window([_pipx(), "install", "--force", f"git+{_REPO_URL}"])
     except (OSError, subprocess.TimeoutExpired) as e:
         log(f"Update check: install failed ({e}), continuing with current version.")
         return

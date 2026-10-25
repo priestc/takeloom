@@ -32,12 +32,18 @@ def ensure_desktop_entry() -> None:
     if not sys.platform.startswith("linux"):
         return
     try:
-        _install()
+        install_desktop_entry()
     except Exception:
         pass
 
 
-def _install() -> None:
+def desktop_file_path() -> Path:
+    return Path.home() / ".local" / "share" / "applications" / "takeloom.desktop"
+
+
+def install_desktop_entry() -> None:
+    """Write the .desktop entry and icon (see the module docstring); also
+    `takeloom install-launcher`'s Linux half (launcher.py)."""
     data_home = Path.home() / ".local" / "share"
     icon_dest = data_home / "icons" / "hicolor" / "512x512" / "apps" / "takeloom.png"
     if not icon_dest.exists() or icon_dest.read_bytes() != ICON_PATH.read_bytes():
@@ -59,7 +65,7 @@ def _install() -> None:
         f"StartupWMClass={WM_CLASS_NAME.capitalize()}",
         "",
     ])
-    desktop_file = data_home / "applications" / "takeloom.desktop"
+    desktop_file = desktop_file_path()
     if desktop_file.exists() and desktop_file.read_text() == entry:
         return
     desktop_file.parent.mkdir(parents=True, exist_ok=True)

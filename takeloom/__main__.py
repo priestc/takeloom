@@ -279,6 +279,18 @@ def ui_command(remote_ip: str | None) -> None:
     run(remote_ip=remote_ip)
 
 
+@main.command(name="install-launcher")
+def install_launcher_command() -> None:
+    """Add Takeloom to the Applications folder (macOS) or the applications
+    menu and desktop (Linux), so the UI opens without a terminal."""
+    from .launcher import LauncherError, install_launcher
+    try:
+        install_launcher(log=click.echo)
+    except LauncherError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+
+
 @main.command(name="detect-test")
 def detect_test_command() -> None:
     """Open a standalone window listing every configured instrument and

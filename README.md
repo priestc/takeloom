@@ -16,7 +16,19 @@ See [Prerequisites](docs/prerequisites.md) for install instructions for each ope
 
 ```bash
 pipx install git+https://github.com/priestc/takeloom.git
+takeloom install-launcher
 ```
+
+`takeloom install-launcher` adds Takeloom to the Applications folder
+(macOS) or to the applications menu and desktop (Linux), so the UI opens
+like any other app. Updates still go through pipx, automatically, each
+time the UI opens.
+
+**macOS, drag-to-install:** `python3 scripts/build_macos_dmg.py` builds
+`dist/Takeloom.dmg`. Drag Takeloom into Applications. On first open the app
+installs takeloom with pipx (Homebrew's `pipx` and `python-tk` must already
+be installed). An app that came from a download is blocked the first time,
+since it isn't signed by Apple: right-click it and choose Open.
 
 ## Usage
 
