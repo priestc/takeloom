@@ -24,10 +24,10 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Takeloom Camera records video of your session for the takeloom studio.</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>The microphone track is used to line the video up exactly with the studio's audio.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Takeloom Camera streams video to the takeloom server on your local network.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>The microphone track is used to line the video up exactly with the studio's audio.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
