@@ -155,8 +155,11 @@ class VideoUIFrame(tk.Frame):
         for index, (device, label) in enumerate(self._cameras, start=1):
             border = tk.Frame(self.strip, background=IDLE_COLOR, padx=3, pady=3, cursor="hand2")
             border.pack(side="left", padx=(0, 10))
-            image = tk.Label(border, background="black", width=THUMB_W, height=THUMB_H,
-                             text="Waiting…", foreground="#888888", compound="center")
+            # A blank image from the start: a Label's width/height count
+            # characters until it holds an image, then pixels.
+            blank = tk.PhotoImage(width=THUMB_W, height=THUMB_H)
+            image = tk.Label(border, background="black", image=blank, text="Waiting…",
+                             foreground="#888888", compound="center")
             image.pack()
             caption = tk.Label(border, background=IDLE_COLOR, foreground="white", anchor="w",
                                text=f"{index}  {label}" if index <= 9 else label)
@@ -164,7 +167,7 @@ class VideoUIFrame(tk.Frame):
             for widget in (border, image, caption):
                 widget.bind("<Button-1>", lambda _e, d=device: self._choose(d))
             self._tiles[device] = {"border": border, "image": image, "caption": caption,
-                                   "label": label, "imgtk": None}
+                                   "label": label, "imgtk": blank}
         self._paint_selection()
 
     def _paint_selection(self) -> None:
@@ -235,7 +238,11 @@ class VideoUIFrame(tk.Frame):
         except Exception:
             return
         if tile is not None:
-            tile["imgtk"] = ImageTk.PhotoImage(_fit(image, THUMB_W, THUMB_H))
+            # Letterboxed onto a fixed-size thumbnail, so tiles never change size.
+            thumb = Image.new("RGB", (THUMB_W, THUMB_H))
+            fitted = _fit(image, THUMB_W, THUMB_H)
+            thumb.paste(fitted, ((THUMB_W - fitted.width) // 2, (THUMB_H - fitted.height) // 2))
+            tile["imgtk"] = ImageTk.PhotoImage(thumb)
             tile["image"].configure(image=tile["imgtk"], text="")
         if device == self._program:
             # A few pixels inside the label, so the picture never asks for
