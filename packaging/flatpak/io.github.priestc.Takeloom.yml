@@ -1,0 +1,108 @@
+# takeloom's Flatpak. Built by .github/workflows/flatpak.yml, which first
+# builds takeloom's wheel into dist/ next to this file.
+#
+# Like the .deb (packaging/deb/), it carries a pinned standalone CPython
+# (python-build-standalone, Tk included) with takeloom installed into it,
+# at /app/python. pip fetches takeloom's Python dependencies as wheels
+# during the build (--share=network). That's fine for our own repository
+# (https://priestc.github.io/takeloom/flatpak), but Flathub builds offline:
+# submitting there means listing every dependency as a source
+# (flatpak-pip-generator) and building CPython from source.
+app-id: io.github.priestc.Takeloom
+runtime: org.freedesktop.Platform
+runtime-version: "25.08"
+sdk: org.freedesktop.Sdk
+command: takeloom
+finish-args:
+  - --socket=x11          # Tk is X11-only (XWayland on Wayland desktops)
+  - --share=ipc
+  - --share=network       # Remote control, Takeloom Camera phones, the vault, inspiration server
+  - --socket=pulseaudio
+  - --device=all          # the audio interface (ALSA), webcams, Stream Deck (USB HID)
+  - --filesystem=home     # ~/studio_config.json, projects and the session vault
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /lib/cmake
+  - /share/man
+  - /share/doc
+  - "*.a"
+  - "*.la"
+modules:
+  - name: portaudio
+    config-opts: [--disable-static, --without-jack, --without-oss]
+    sources:
+      - type: archive
+        url: https://files.portaudio.com/archives/pa_stable_v190700_20210406.tgz
+        sha256: 47efbf42c77c19a05d22e627d42873e991ec0c1357219c0d74ce6a2948cb2def
+
+  - name: fluidsynth
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DLIB_SUFFIX=
+      - -Denable-jack=OFF
+      - -Denable-sdl3=OFF
+      - -Denable-libinstpatch=OFF
+      - -Denable-readline=OFF
+      - -Denable-ladspa=OFF
+      - -Denable-dbus=OFF
+      - -Denable-systemd=OFF
+      - -Denable-openmp=OFF
+    sources:
+      - type: archive
+        url: https://github.com/FluidSynth/fluidsynth/archive/refs/tags/v2.6.1.tar.gz
+        sha256: 3d258a3bf97cc20c59eeebfe62c2432fae88adda74d3ad098681c76e0ebf446b
+
+  - name: hidapi
+    buildsystem: cmake-ninja
+    config-opts: [-DCMAKE_BUILD_TYPE=Release, -DHIDAPI_WITH_LIBUSB=ON, -DHIDAPI_WITH_HIDRAW=ON]
+    sources:
+      - type: archive
+        url: https://github.com/libusb/hidapi/archive/refs/tags/hidapi-0.15.0.tar.gz
+        sha256: 5d84dec684c27b97b921d2f3b73218cb773cf4ea915caee317ac8fc73cef8136
+
+  - name: takeloom
+    buildsystem: simple
+    build-options:
+      build-args: [--share=network]
+    sources:
+      # Same pinned build as packaging/deb/build_deb.sh.
+      - type: archive
+        only-arches: [x86_64]
+        url: https://github.com/astral-sh/python-build-standalone/releases/download/20261003/cpython-3.12.15+20261003-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+        sha256: 731af898886c5f821890dc901eca3c651cca8e51fa7308c159d12a1194aeac91
+        dest: python
+      - type: archive
+        only-arches: [aarch64]
+        url: https://github.com/astral-sh/python-build-standalone/releases/download/20261003/cpython-3.12.15+20261003-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz
+        sha256: 6541297dd1798dec8b98c3ad7492808a5b9d1c126801ceb2011e7754cd20d1ce
+        dest: python
+      - type: dir
+        path: dist
+        dest: dist
+      - type: file
+        path: takeloom.sh
+      - type: file
+        path: io.github.priestc.Takeloom.desktop
+      - type: file
+        path: io.github.priestc.Takeloom.metainfo.xml
+      - type: file
+        path: ../../takeloom/data/icon.png
+    build-commands:
+      - cp -a python /app/python
+      - /app/python/bin/python3 -m pip install --no-cache-dir --disable-pip-version-check dist/*.whl
+      # Camera capture only, never OpenCV's own windows: the headless build
+      # leaves out Qt.
+      - >-
+        cv=$(/app/python/bin/python3 -c "from importlib.metadata import version; print(version('opencv-python'))") &&
+        /app/python/bin/python3 -m pip uninstall --yes opencv-python &&
+        /app/python/bin/python3 -m pip install --no-cache-dir --disable-pip-version-check "opencv-python-headless==$cv"
+      # static-ffmpeg wrongly requires twine; nothing imports it.
+      - /app/python/bin/python3 -m pip uninstall --yes twine readme-renderer nh3
+      # Fetch the static ffmpeg now: /app is read-only at runtime.
+      - /app/python/bin/python3 -c "import takeloom.ffmpeg_bin"
+      - install -Dm755 takeloom.sh /app/bin/takeloom
+      - install -Dm644 io.github.priestc.Takeloom.desktop /app/share/applications/io.github.priestc.Takeloom.desktop
+      - install -Dm644 io.github.priestc.Takeloom.metainfo.xml /app/share/metainfo/io.github.priestc.Takeloom.metainfo.xml
+      - install -Dm644 icon.png /app/share/icons/hicolor/512x512/apps/io.github.priestc.Takeloom.png

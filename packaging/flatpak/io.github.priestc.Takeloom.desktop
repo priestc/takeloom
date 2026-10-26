@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Takeloom
+Comment=Music recording session manager
+Exec=takeloom ui
+Icon=io.github.priestc.Takeloom
+Terminal=false
+Categories=AudioVideo;Audio;Recorder;
+StartupWMClass=Takeloom

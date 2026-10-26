@@ -1,0 +1,102 @@
+# takeloom's Flatpak (packaging/flatpak/) for x86_64 and aarch64: builds a
+# single-file bundle from `ref`, installs it and launches the UI under Xvfb,
+# and (given `release_tag`) attaches the bundles to that GitHub release.
+# Called by release.yml and daily.yml; runnable by hand: gh workflow run flatpak.yml
+name: Flatpak
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build
+        default: main
+      release_tag:
+        description: Attach the bundles to this GitHub release (optional)
+        default: ""
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
+      release_tag:
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    env:
+      APP: io.github.priestc.Takeloom
+      MANIFEST: packaging/flatpak/io.github.priestc.Takeloom.yml
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0  # the version comes from tags
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Wheel
+        id: wheel
+        run: |
+          python -m pip install --quiet build
+          python -m build --wheel --outdir packaging/flatpak/dist
+          version=$(ls packaging/flatpak/dist/*.whl | sed -E 's/.*takeloom-([^-]+)-.*/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          sed -i "s/@VERSION@/$version/; s/@DATE@/$(date -u +%Y-%m-%d)/" packaging/flatpak/$APP.metainfo.xml
+      - name: Install flatpak-builder
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq flatpak flatpak-builder xvfb xauth > /dev/null
+          # Ubuntu 24.04 blocks the unprivileged user namespaces bubblewrap needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+      - name: Build
+        run: |
+          flatpak-builder --user --install-deps-from=flathub --disable-rofiles-fuse --force-clean \
+            --repo=repo --default-branch=stable --arch=${{ matrix.arch }} build "$MANIFEST"
+          bundle="takeloom_${{ steps.wheel.outputs.version }}_${{ matrix.arch }}.flatpak"
+          flatpak build-bundle --arch=${{ matrix.arch }} \
+            --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo repo "$bundle" $APP stable
+          mkdir -p bundles && mv "$bundle" bundles/
+          ls -lh bundles
+      - name: Test
+        run: |
+          set -x
+          flatpak install --user -y --noninteractive bundles/*.flatpak
+          flatpak run $APP --help
+          flatpak run --command=/app/python/bin/python3 $APP -c \
+            "import cv2, numpy, sounddevice, soundfile, fluidsynth, StreamDeck.DeviceManager, PIL.ImageTk, tkinterdnd2; from takeloom import update_check as u; assert u.install_kind() == 'packaged'"
+          # The real UI, no hardware attached: still running after 20 s
+          # (timeout's 124) = it came up.
+          status=0
+          HOME=$(mktemp -d) xvfb-run -a timeout 20 flatpak run $APP > ui.log 2>&1 || status=$?
+          cat ui.log
+          if [ "$status" != 124 ]; then echo "takeloom ui exited early ($status)"; exit 1; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-${{ matrix.arch }}
+          path: bundles/*.flatpak
+
+  attach:
+    if: inputs.release_tag != ''
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: flatpak-*
+          merge-multiple: true
+          path: bundles
+      - run: gh release upload "${{ inputs.release_tag }}" bundles/*.flatpak --clobber -R "$GITHUB_REPOSITORY"

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.priestc.Takeloom</id>
+  <name>Takeloom</name>
+  <summary>Music recording session manager</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="io.github.priestc">
+    <name>Chris Priest</name>
+  </developer>
+  <description>
+    <p>
+      Takeloom records practice and performance sessions against a setlist of
+      backing tracks: one continuous recording per session, cut into takes
+      afterwards, with live monitoring of every input.
+    </p>
+    <ul>
+      <li>Per-take video from webcams, or from phones running Takeloom Camera</li>
+      <li>Elgato Stream Deck control</li>
+      <li>Remote control of a studio machine from another computer</li>
+      <li>Live streaming to YouTube</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.priestc.Takeloom.desktop</launchable>
+  <url type="homepage">https://github.com/priestc/takeloom</url>
+  <url type="bugtracker">https://github.com/priestc/takeloom/issues</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <!-- Filled in by .github/workflows/flatpak.yml from the built version. -->
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+</component>

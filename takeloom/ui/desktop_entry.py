@@ -14,6 +14,7 @@ moves the executable fixes itself the next time the app opens.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -29,7 +30,9 @@ ICON_PATH = Path(__file__).resolve().parent.parent / "data" / "icon.png"
 def ensure_desktop_entry() -> None:
     """Best-effort; a no-op off Linux. Never raises — a missing dock icon
     must never stop the app from opening."""
-    if not sys.platform.startswith("linux"):
+    if not sys.platform.startswith("linux") or os.environ.get("FLATPAK_ID"):
+        # A Flatpak brings its own desktop entry, and its paths only exist
+        # inside the sandbox.
         return
     try:
         install_desktop_entry()

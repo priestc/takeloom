@@ -64,6 +64,8 @@ class LauncherError(Exception):
 
 def install_launcher(log=print) -> None:
     """Install the launcher that fits this platform."""
+    if os.environ.get("FLATPAK_ID"):
+        raise LauncherError("This is the Flatpak: it's already in your applications menu.")
     if sys.platform == "darwin":
         apps = Path("/Applications")
         dest = apps if os.access(apps, os.W_OK) else Path.home() / "Applications"
