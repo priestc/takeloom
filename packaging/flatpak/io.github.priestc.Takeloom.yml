@@ -69,6 +69,12 @@ modules:
     buildsystem: simple
     build-options:
       build-args: [--share=network]
+      # Everything in this module is prebuilt (the standalone Python, pip's
+      # wheels): flatpak-builder's stripping and debuginfo extraction would
+      # rewrite those binaries, and the standalone python3 doesn't survive
+      # it ("symbol lookup error ... undefined symbol").
+      strip: false
+      no-debuginfo: true
     sources:
       # Same pinned build as packaging/deb/build_deb.sh.
       - type: archive
