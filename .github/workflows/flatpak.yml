@@ -60,6 +60,13 @@ jobs:
           # Ubuntu 24.04 blocks the unprivileged user namespaces bubblewrap needs.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+      - uses: actions/cache@v4
+        with:
+          # flatpak-builder reuses any module whose sources and options are
+          # unchanged (the libraries), so only takeloom itself rebuilds.
+          path: .flatpak-builder
+          key: flatpak-builder-${{ matrix.arch }}-${{ hashFiles('packaging/flatpak/**') }}
+          restore-keys: flatpak-builder-${{ matrix.arch }}-
       - name: Build
         run: |
           flatpak-builder --user --install-deps-from=flathub --disable-rofiles-fuse --force-clean \
@@ -73,6 +80,8 @@ jobs:
         run: |
           set -x
           flatpak install --user -y --noninteractive bundles/*.flatpak
+          # Which bundled libraries the dynamic loader can see (diagnostic).
+          flatpak run --command=sh $APP -c 'ls /app/lib; ldconfig -p | grep -iE "fluid|portaudio|hidapi"' || true
           flatpak run $APP --help
           flatpak run --command=/app/python/bin/python3 $APP -c \
             "import cv2, numpy, sounddevice, soundfile, fluidsynth, StreamDeck.DeviceManager, PIL.ImageTk, tkinterdnd2; from takeloom import update_check as u; assert u.install_kind() == 'packaged'"
