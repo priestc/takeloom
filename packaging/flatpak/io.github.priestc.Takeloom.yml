@@ -50,9 +50,12 @@ modules:
       - -Denable-systemd=OFF
       - -Denable-openmp=OFF
     sources:
-      - type: archive
-        url: https://github.com/FluidSynth/fluidsynth/archive/refs/tags/v2.6.1.tar.gz
-        sha256: 3d258a3bf97cc20c59eeebfe62c2432fae88adda74d3ad098681c76e0ebf446b
+      # git, not the release tarball: 2.6 vendors gcem as a submodule,
+      # which GitHub's tarballs leave out (and the build can't download).
+      - type: git
+        url: https://github.com/FluidSynth/fluidsynth.git
+        tag: v2.6.1
+        commit: 71e85b2ca6bf48641ba7e2261d8f2640ae473773
 
   - name: hidapi
     buildsystem: cmake-ninja
