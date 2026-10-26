@@ -50,9 +50,11 @@ Run one early from the Actions tab (Daily build → Run workflow), or:
 
 Every few development days, make a release:
 
-    gh workflow run release.yml -f bump=minor     # or patch / major
+    takeloom make-release minor     # or patch / major; --watch to follow it
 
-or Actions tab → Release → Run workflow. It tags the current `main` as the
+That's a shortcut for `gh workflow run release.yml -f bump=minor` (needs
+the GitHub CLI, logged in), and also warns if local commits aren't pushed
+yet. Or: Actions tab → Release → Run workflow. It tags the current `main` as the
 next version, builds and smoke-tests it, pushes the tag, and publishes a
 GitHub release with the commits since the previous release. Then it sends
 the release to each distribution channel:
@@ -77,26 +79,49 @@ the release to each distribution channel:
   architecture (`packaging/deb/build_deb.sh`) and test-installs each on
   clean Debian 12, Ubuntu 22.04 and Ubuntu 24.04 containers, including
   launching the UI under Xvfb. The `.deb`s are attached to the release.
-  Then `apt-repo.yml` indexes them and signs the index
-  (`packaging/apt/build_repo.sh`, key in the `APT_SIGNING_KEY` secret),
-  deploys it to GitHub Pages at <https://priestc.github.io/takeloom/apt>,
-  and installs from it in a clean container. The repository always holds
-  the latest release; older `.deb`s stay on their GitHub releases.
 
   Each `.deb` carries its own Python (a pinned python-build-standalone
   build, in `/opt/takeloom`), so one package fits every Debian/Ubuntu
   release. System libraries, ffmpeg included, come from apt. Bumping the
   bundled Python means editing `PBS_RELEASE`, `PBS_PYTHON` and the
-  checksums at the top of `build_deb.sh`.
+  checksums at the top of `build_deb.sh`, and the matching sources in the
+  Flatpak manifest.
 
-  The signing key also lives in the Mac Mini's GPG keyring
-  (`gpg --list-secret-keys "takeloom apt repository"`). That's the backup:
-  replacing the key means every apt user has to re-download it.
+- **Flatpak** (any Linux, x86_64 + aarch64), app ID
+  `io.github.priestc.Takeloom`: `flatpak.yml` builds a bundle per
+  architecture from `packaging/flatpak/` on the freedesktop 25.08
+  runtime, installs it and launches the UI under Xvfb, and attaches the
+  bundles to the release. Same bundled Python as the `.deb`; PortAudio,
+  FluidSynth and hidapi are built from source in the manifest. Sandbox
+  permissions (`finish-args`): X11, network, PulseAudio, all devices
+  (audio interface, webcams, Stream Deck) and the home directory.
 
-  Daily builds attach `.deb`s to their pre-release too, but never publish
-  to the apt repository. To try a packaging change without releasing:
-  `gh workflow run deb.yml`.
+  It's our own repository, not Flathub: pip fetches the Python
+  dependencies during the build, which Flathub's offline builds don't
+  allow. Submitting to Flathub means listing every dependency as a
+  source (flatpak-pip-generator) and building CPython from source.
 
-Flathub and the app stores get added here the same way.
+- **The package repositories** (GitHub Pages,
+  <https://priestc.github.io/takeloom/>): `site.yml` takes the release's
+  `.deb`s and Flatpak bundles and builds a signed apt repository (`/apt`)
+  and a signed Flatpak repository (`/flatpak`, with a `.flatpakref` for
+  one-click installs) with `packaging/site/build_site.sh`. It deploys the
+  site, then installs from each in a clean machine. Pages replaces the
+  whole site on each deploy, so both are rebuilt every time, and they
+  always hold the latest release. Older packages stay on their GitHub
+  releases.
+
+  Both repositories are signed with the `APT_SIGNING_KEY` secret. The key
+  also lives in the Mac Mini's GPG keyring
+  (`gpg --list-secret-keys "takeloom apt repository"`), with a revocation
+  certificate in `~/.gnupg/openpgp-revocs.d/`. That's the backup:
+  replacing the key means every apt and Flatpak user has to re-add the
+  repository.
+
+Daily builds attach `.deb`s and Flatpak bundles to their pre-release too,
+but never touch the package repositories. To try a packaging change
+without releasing: `gh workflow run deb.yml` / `gh workflow run flatpak.yml`.
+
+Flathub and the app stores would be added here the same way.
 
 It refuses to run if `main` is already exactly a release.

@@ -162,9 +162,18 @@ jobs:
     permissions:
       contents: write
 
-  apt:
-    needs: [release, deb]
-    uses: ./.github/workflows/apt-repo.yml
+  flatpak:
+    needs: release
+    uses: ./.github/workflows/flatpak.yml
+    with:
+      ref: v${{ needs.release.outputs.version }}
+      release_tag: v${{ needs.release.outputs.version }}
+    permissions:
+      contents: write
+
+  site:
+    needs: [release, deb, flatpak]
+    uses: ./.github/workflows/site.yml
     with:
       release_tag: v${{ needs.release.outputs.version }}
     secrets: inherit

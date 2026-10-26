@@ -279,6 +279,67 @@ def ui_command(remote_ip: str | None) -> None:
     run(remote_ip=remote_ip)
 
 
+@main.command(name="make-release")
+@click.argument("bump", type=click.Choice(["patch", "minor", "major"]))
+@click.option("--watch", is_flag=True, help="Follow the release until it finishes.")
+def make_release_command(bump: str, watch: bool) -> None:
+    """Release takeloom: bump the PATCH/MINOR/MAJOR part of the version and
+    publish GitHub's current main everywhere (GitHub, PyPI, Homebrew, apt,
+    Flatpak). Runs .github/workflows/release.yml through the GitHub CLI
+    (`gh`, logged in) — see docs/releasing.md."""
+    import shutil
+    import subprocess
+    from .update_check import _REPO_URL
+
+    if shutil.which("gh") is None:
+        click.echo("Error: needs the GitHub CLI (`gh`), logged in: https://cli.github.com", err=True)
+        raise SystemExit(1)
+    repo = _REPO_URL.removeprefix("https://github.com/").removesuffix(".git")
+
+    # A release builds what's on GitHub, so say if this checkout is ahead of it.
+    checkout = Path(__file__).resolve().parent.parent
+    if (checkout / ".git").exists():
+        subprocess.run(["git", "-C", str(checkout), "fetch", "--quiet", "origin", "main"], check=False)
+        ahead = subprocess.run(
+            ["git", "-C", str(checkout), "rev-list", "--count", "origin/main..HEAD"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        if ahead not in ("", "0"):
+            click.echo(f"Warning: {ahead} local commit(s) aren't pushed, so they won't be in this release.")
+            if not click.confirm("Release GitHub's main anyway?"):
+                raise SystemExit(1)
+
+    started = time.time()
+    result = subprocess.run(["gh", "workflow", "run", "release.yml", "-R", repo, "-f", f"bump={bump}"])
+    if result.returncode != 0:
+        raise SystemExit(result.returncode)
+
+    # `gh workflow run` doesn't say which run it started: find it.
+    run = None
+    for _ in range(15):
+        time.sleep(2)
+        listed = subprocess.run(
+            ["gh", "run", "list", "-R", repo, "--workflow", "release.yml", "--limit", "1",
+             "--json", "databaseId,url,createdAt"],
+            capture_output=True, text=True,
+        )
+        runs = json.loads(listed.stdout or "[]")
+        if runs:
+            from datetime import datetime
+            created = datetime.fromisoformat(runs[0]["createdAt"].replace("Z", "+00:00")).timestamp()
+            if created >= started - 5:
+                run = runs[0]
+                break
+    if run is None:
+        click.echo(f"Release started ({bump}). Follow it at https://github.com/{repo}/actions/workflows/release.yml")
+        return
+    click.echo(f"Release started ({bump}): {run['url']}")
+    if watch:
+        raise SystemExit(subprocess.run(
+            ["gh", "run", "watch", str(run["databaseId"]), "-R", repo, "--exit-status"],
+        ).returncode)
+
+
 @main.command(name="dev-mode")
 @click.argument("state", required=False, type=click.Choice(["on", "off"]))
 def dev_mode_command(state: str | None) -> None:

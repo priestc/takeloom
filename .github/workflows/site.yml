@@ -1,15 +1,16 @@
-# Publish the apt repository (https://priestc.github.io/takeloom/apt) on
-# GitHub Pages from a release's .debs — see packaging/apt/build_repo.sh.
-# Called by release.yml; runnable by hand for an existing release:
-#   gh workflow run apt-repo.yml -f release_tag=vX.Y.Z
-# Signs with the APT_SIGNING_KEY secret.
-name: apt repository
+# Publish the package repositories on GitHub Pages
+# (https://priestc.github.io/takeloom/) from a release's .debs and Flatpak
+# bundles — see packaging/site/build_site.sh. Called by release.yml;
+# runnable by hand for an existing release:
+#   gh workflow run site.yml -f release_tag=vX.Y.Z
+# Signs with the APT_SIGNING_KEY secret (apt and Flatpak alike).
+name: Package repositories
 
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Release whose .debs to publish (e.g. v0.5.1)
+        description: Release whose packages to publish (e.g. v0.5.3)
         required: true
   workflow_call:
     inputs:
@@ -34,16 +35,18 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
-      - name: The release's .debs
+      - name: The release's packages
         run: |
-          gh release download "${{ inputs.release_tag }}" -p '*.deb' -D site/apt/pool/main/t/takeloom -R "$GITHUB_REPOSITORY"
-          ls -lh site/apt/pool/main/t/takeloom
-      - name: Index and sign
+          gh release download "${{ inputs.release_tag }}" -p '*.deb' -D debs -R "$GITHUB_REPOSITORY"
+          gh release download "${{ inputs.release_tag }}" -p '*.flatpak' -D flatpaks -R "$GITHUB_REPOSITORY"
+          ls -lh debs flatpaks
+      - name: Build and sign
         env:
           APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
         run: |
-          sudo apt-get install -y -qq apt-utils > /dev/null
-          packaging/apt/build_repo.sh site
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq apt-utils flatpak ostree > /dev/null
+          packaging/site/build_site.sh site debs flatpaks
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
@@ -58,8 +61,8 @@ jobs:
       - id: deployment
         uses: actions/deploy-pages@v4
 
-  test:
-    # The published repository, used exactly as the instructions say.
+  test-apt:
+    # The published apt repository, used exactly as the instructions say.
     needs: deploy
     runs-on: ubuntu-latest
     container: debian:12
@@ -78,3 +81,21 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq takeloom > /dev/null
           dpkg -s takeloom | grep '^Version'
           takeloom --help
+
+  test-flatpak:
+    # The published Flatpak repository, via the .flatpakref as the
+    # instructions say (which also pulls the runtime from Flathub).
+    needs: deploy
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq flatpak > /dev/null
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          ref=https://priestc.github.io/takeloom/flatpak/io.github.priestc.Takeloom.flatpakref
+          for attempt in $(seq 20); do
+            curl -fsSL -o /dev/null https://priestc.github.io/takeloom/flatpak/repo/summary && break
+            sleep 15
+          done
+          flatpak install --user -y --noninteractive "$ref"
+          flatpak info --user io.github.priestc.Takeloom | grep -E 'Version|Origin'
+          flatpak run io.github.priestc.Takeloom --help

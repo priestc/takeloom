@@ -101,3 +101,13 @@ jobs:
       release_tag: ${{ needs.daily.outputs.tag }}
     permissions:
       contents: write
+
+  flatpak:
+    needs: daily
+    if: needs.daily.outputs.skip == 'false'
+    uses: ./.github/workflows/flatpak.yml
+    with:
+      ref: ${{ github.sha }}
+      release_tag: ${{ needs.daily.outputs.tag }}
+    permissions:
+      contents: write
