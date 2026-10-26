@@ -62,7 +62,17 @@ the release to each distribution channel:
   GitHub environment `pypi`. Renaming either breaks publishing until the
   publisher settings on pypi.org are updated to match.
 
-The Homebrew tap, the apt repository, Flathub and the app stores get added
-here the same way.
+- **Homebrew** (`brew install priestc/takeloom/takeloom`): the tap repo
+  [priestc/homebrew-takeloom](https://github.com/priestc/homebrew-takeloom)
+  has one formula, pointing at the release's sdist on PyPI. The workflow
+  rewrites its `url`/`sha256` and pushes, using the `HOMEBREW_TAP_TOKEN`
+  secret: a fine-grained token with contents read/write on that repo only.
+  Without the secret, the release still happens and only this step is
+  skipped, with a warning. The formula gives takeloom its own virtualenv,
+  letting pip install the Python dependencies as wheels, and fetches the
+  static ffmpeg at install time (see `ffmpeg_bin.py`). `brew install
+  --HEAD` builds `main` instead.
+
+The apt repository, Flathub and the app stores get added here the same way.
 
 It refuses to run if `main` is already exactly a release.

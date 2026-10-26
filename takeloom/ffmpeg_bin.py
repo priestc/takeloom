@@ -18,10 +18,34 @@ there rather than failing outright.
 
 from __future__ import annotations
 
+import os
 import shutil
+import sys
+from pathlib import Path
 
 from static_ffmpeg import run as _run
 
-FFMPEG, FFPROBE = _run.get_or_fetch_platform_executables_else_raise()
+
+def _static_binaries() -> tuple[str, str]:
+    """static-ffmpeg's binaries, fetched on first use. Its own fetch call
+    takes a lock file inside its package dir every time, even once fetched,
+    which fails in an install the user can't write to (a Homebrew test
+    sandbox, an apt package under /usr). So: binaries already there (a
+    package fetches them at build time) are used as-is, no lock; a
+    writable install fetches as usual; a read-only one fetches into the
+    user's cache instead."""
+    exe_dir = Path(_run.get_platform_dir())
+    suffix = ".exe" if sys.platform == "win32" else ""
+    if (exe_dir / "installed.crumb").exists():
+        return str(exe_dir / f"ffmpeg{suffix}"), str(exe_dir / f"ffprobe{suffix}")
+    if os.access(Path(_run.__file__).parent, os.W_OK):
+        return _run.get_or_fetch_platform_executables_else_raise()
+    cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "takeloom" / "static_ffmpeg"
+    return _run._get_or_fetch_platform_executables_else_raise_no_lock(
+        download_dir=str(cache / exe_dir.name),
+    )
+
+
+FFMPEG, FFPROBE = _static_binaries()
 
 CAMERA_FFMPEG = shutil.which("ffmpeg") or FFMPEG

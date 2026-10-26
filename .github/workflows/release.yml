@@ -105,3 +105,35 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  homebrew:
+    # Points priestc/homebrew-takeloom's formula at this release's sdist on
+    # PyPI — so after the pypi job, once that URL exists. Needs the
+    # HOMEBREW_TAP_TOKEN secret: a fine-grained token with contents
+    # read/write on that one repo.
+    needs: [release, pypi]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Update the tap's formula
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN isn't set, so priestc/homebrew-takeloom wasn't updated to $VERSION."
+            exit 0
+          fi
+          url="https://files.pythonhosted.org/packages/source/t/takeloom/takeloom-$VERSION.tar.gz"
+          sha=$(sha256sum "dist/takeloom-$VERSION.tar.gz" | cut -d' ' -f1)
+          git clone --quiet "https://x-access-token:$TAP_TOKEN@github.com/priestc/homebrew-takeloom.git" tap
+          cd tap
+          sed -i -E "s|^  url \".*\"|  url \"$url\"|; s|^  sha256 \".*\"|  sha256 \"$sha\"|" Formula/takeloom.rb
+          git diff --stat
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --quiet -am "takeloom $VERSION"
+          git push --quiet
