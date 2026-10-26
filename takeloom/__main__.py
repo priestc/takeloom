@@ -211,28 +211,30 @@ def setup_recording_devices() -> None:
 
     # --- Camera Setup ---
     click.echo("\n--- Camera Setup ---")
+    # Every connected camera is recorded (see backend.py's session_cameras);
+    # here just the main one, which per-take videos come from. Names and
+    # hiding: the GUI's Recording Devices tab.
+    from .config import camera_key
     from .video.devices import list_cameras, ffmpeg_available
-    camera_device = existing.camera_device
-    camera_label = existing.camera_label
+    main_camera = existing.main_camera
+    main_label = ""
     if not ffmpeg_available():
         click.echo("ffmpeg not found; camera recording will be unavailable.")
     else:
         cameras = list_cameras()
         if cameras:
-            click.echo("Available cameras:")
+            click.echo("Available cameras (all are recorded; pick the main one):")
             for device_id, name in cameras:
-                marker = " *" if device_id == existing.camera_device else ""
+                marker = " *" if camera_key(device_id, name) == existing.main_camera else ""
                 click.echo(f"  [{device_id}] {name}{marker}")
+            current = next((d for d, n in cameras if camera_key(d, n) == existing.main_camera), "")
             sel = click.prompt(
-                "Select camera device id (leave empty to disable camera recording)",
-                default=existing.camera_device, show_default=bool(existing.camera_device),
+                "Main camera device id (leave empty for the first one)",
+                default=current, show_default=bool(current),
             ).strip()
-            if not sel:
-                camera_device = ""
-                camera_label = ""
-            else:
-                camera_device = sel
-                camera_label = next((name for dev_id, name in cameras if dev_id == sel), "")
+            chosen = next(((d, n) for d, n in cameras if d == sel), None)
+            main_camera = camera_key(*chosen) if chosen else ""
+            main_label = chosen[1] if chosen else ""
         else:
             click.echo("No cameras detected.")
 
@@ -242,8 +244,7 @@ def setup_recording_devices() -> None:
     existing.output_channels = output_channels
     existing.latency_compensation_ms = latency_compensation_ms
     existing.input_labels = input_labels
-    existing.camera_device = camera_device
-    existing.camera_label = camera_label
+    existing.main_camera = main_camera
 
     errors = existing.validate()
     if errors:
@@ -257,10 +258,10 @@ def setup_recording_devices() -> None:
         click.echo("Inputs:")
         for il in input_labels:
             click.echo(f"  - {il.label} ({il.device} ch{il.channel})")
-    if camera_device:
-        click.echo(f"Camera: {camera_label} ({camera_device})")
+    if main_label:
+        click.echo(f"Main camera: {main_label}")
     else:
-        click.echo("Camera: none (video recording disabled)")
+        click.echo("Main camera: whichever connected camera is found first")
 
 
 @main.command(name="ui")

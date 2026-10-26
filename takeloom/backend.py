@@ -16,6 +16,7 @@ be invoked from a non-UI thread for the same reason.
 
 from __future__ import annotations
 
+import datetime
 import json
 import random
 import shutil
@@ -986,11 +987,20 @@ class Backend(ABC):
     @abstractmethod
     def session_cameras(self) -> list[tuple[str, str]]:
         """(camera_device, label) of every camera the Record tab previews and
-        a session records, main camera first: the configured camera_device,
-        then config.extra_cameras, then every connected Takeloom Camera
-        phone (which never need adding by hand). When no camera_device is
-        configured, the first of the rest stands in as the main one. Changes
-        are announced with a "session_cameras_changed" event."""
+        a session records: every connected camera that isn't hidden (local
+        cameras and Takeloom Camera phones alike — nothing needs adding by
+        hand), labeled with the name given on Recording Devices, the main
+        camera (config.main_camera; else the first) first. Changes are
+        announced with a "session_cameras_changed" event."""
+        ...
+
+    @abstractmethod
+    def camera_inventory(self) -> list[dict]:
+        """Every camera ever seen (config.known_cameras), for Recording
+        Devices: {"key", "detected_name", "name", "label", "hidden",
+        "connected", "device", "main", "first_seen", "last_seen"}. Scans
+        for cameras first, so a newly plugged-in one is listed (and
+        remembered) straight away."""
         ...
 
     @abstractmethod
@@ -1832,6 +1842,9 @@ class LocalBackend(Backend):
             lambda: [device for device, _label in self.session_cameras()], on_error=self._on_preview_error,
         )
         self._phone_hub = None  # PhoneCameraHub, when attach_phone_camera_hub() is called
+        # (monotonic time, scan) — see _scan_cameras.
+        self._camera_scan: tuple[float, list | None] = (0.0, None)
+        self._camera_scan_lock = threading.Lock()
         # The program camera picked in the video-ui (see get_program_camera);
         # None until one is picked: the main camera.
         self._program_camera: str | None = None
@@ -1940,17 +1953,97 @@ class LocalBackend(Backend):
             frame=session.engine.session_frames, camera=camera_device,
         )
 
-    def session_cameras(self) -> list[tuple[str, str]]:
+    # How long a camera scan is reused: scanning local cameras runs ffmpeg,
+    # and session_cameras() is asked often (previews, UIs, config saves).
+    # Device changes (refresh_devices, the rig watcher, a phone connecting)
+    # rescan straight away.
+    _CAMERA_SCAN_TTL_S = 5.0
+
+    def _scan_cameras(self, force: bool = False) -> list[tuple[str, str, str]]:
+        """(key, device, detected_name) of every camera connected right now,
+        remembering any not seen before in config.known_cameras."""
+        with self._camera_scan_lock:
+            cached_at, cached = self._camera_scan
+            if not force and cached is not None and time.monotonic() - cached_at < self._CAMERA_SCAN_TTL_S:
+                return cached
+            from .config import camera_key
+            from .video.devices import list_cameras
+            try:
+                local = list_cameras()
+            except Exception:
+                local = []
+            phones = self._phone_hub.list_camera_devices() if self._phone_hub is not None else []
+            scan = [(camera_key(device, name), device, name) for device, name in local + phones]
+            self._camera_scan = (time.monotonic(), scan)
+        self._remember_cameras(scan)
+        return scan
+
+    def _remember_cameras(self, scan: list[tuple[str, str, str]]) -> None:
+        """Add newly seen cameras to config.known_cameras and keep their
+        reported names and last-seen dates current. Saves only when
+        something changed (dates are days, so at most daily per camera)."""
+        from .config import KnownCamera
+        today = datetime.date.today().isoformat()
         config = self.get_config()
-        cameras: list[tuple[str, str]] = []
-        if config.camera_device:
-            cameras.append((config.camera_device, config.camera_label or config.camera_device))
-        for extra in config.extra_cameras:
-            cameras.append((extra.device, extra.label or extra.device))
-        if self._phone_hub is not None:
-            cameras += self._phone_hub.list_camera_devices()
-        seen: set[str] = set()
-        return [c for c in cameras if c[0] and not (c[0] in seen or seen.add(c[0]))]
+        known = {c.key: c for c in config.known_cameras}
+        changed = False
+        for key, _device, name in scan:
+            camera = known.get(key)
+            if camera is None:
+                # A screen capture shows up as an avfoundation "camera", but
+                # recording the screen every session isn't wanted by default.
+                config.known_cameras.append(KnownCamera(
+                    key=key, detected_name=name, hidden=name.startswith("Capture screen"),
+                    first_seen=today, last_seen=today,
+                ))
+                changed = True
+            elif camera.detected_name != name or camera.last_seen != today:
+                camera.detected_name, camera.last_seen = name, today
+                changed = True
+        if changed:
+            config.save(self._config_path)
+
+    def session_cameras(self) -> list[tuple[str, str]]:
+        scan = self._scan_cameras()
+        config = self.get_config()
+        known = {c.key: c for c in config.known_cameras}
+        cameras = [(key, device, known[key].label if key in known else name)
+                   for key, device, name in scan if not (key in known and known[key].hidden)]
+        cameras.sort(key=lambda c: c[0] != config.main_camera)  # the main camera first; otherwise as found
+        return [(device, label) for _key, device, label in cameras]
+
+    def camera_inventory(self) -> list[dict]:
+        scan = self._scan_cameras(force=True)
+        config = self.get_config()
+        connected = {key: device for key, device, _name in scan}
+        main = self.main_camera_key(scan)
+        return [{
+            "key": c.key, "detected_name": c.detected_name, "name": c.name, "label": c.label,
+            "hidden": c.hidden, "connected": c.key in connected, "device": connected.get(c.key, ""),
+            "main": c.key == main, "first_seen": c.first_seen, "last_seen": c.last_seen,
+        } for c in config.known_cameras]
+
+    def main_camera_key(self, scan: list[tuple[str, str, str]] | None = None) -> str:
+        """The main camera's key: config.main_camera if it's connected and
+        visible, else the first connected visible camera ("" if none)."""
+        scan = self._scan_cameras() if scan is None else scan
+        config = self.get_config()
+        hidden = {c.key for c in config.known_cameras if c.hidden}
+        visible = [key for key, _device, _name in scan if key not in hidden]
+        if config.main_camera in visible:
+            return config.main_camera
+        return visible[0] if visible else ""
+
+    def main_camera_device(self) -> str:
+        """The main camera's current device id ("" if none is connected)."""
+        devices = self.session_cameras()
+        return devices[0][0] if devices else ""
+
+    def rescan_cameras(self) -> list[tuple[str, str]]:
+        """session_cameras() from a fresh scan (the rig watcher's camera
+        poll, when the rig powers on)."""
+        self._scan_cameras(force=True)
+        return self.session_cameras()
 
     def attach_phone_camera_hub(self, hub) -> None:
         """Use Takeloom Camera phones connected to `hub` (phone_camera/
@@ -1958,9 +2051,13 @@ class LocalBackend(Backend):
         self._phone_hub = hub
         hub.set_callbacks(
             on_preview=self._on_phone_preview,
-            on_change=lambda: self._emit("session_cameras_changed", {}),
+            on_change=self._on_phone_cameras_changed,
             session_dir_resolver=self._local_session_dir_path,
         )
+
+    def _on_phone_cameras_changed(self) -> None:
+        self._scan_cameras(force=True)  # also remembers a phone seen for the first time
+        self._emit("session_cameras_changed", {})
 
     def _on_phone_preview(self, device_id: str, jpeg: bytes) -> None:
         # Every connected phone is one of session_cameras().
@@ -2070,14 +2167,18 @@ class LocalBackend(Backend):
             sd._initialize()
         except Exception:
             pass
-        self._preview.restart()
+        self.refresh_camera_preview()
 
     def refresh_camera_preview(self) -> None:
         """Just the camera half of refresh_devices() — for the server's
         hardware watcher (rig_watcher.py) when the webcam powers on. Leaves
         PortAudio alone, which is never safe to re-initialize under an open
         stream."""
+        before = self.session_cameras()
+        self._scan_cameras(force=True)
         self._preview.restart()
+        if self.session_cameras() != before:
+            self._emit("session_cameras_changed", {})
 
     # --- projects / setlists ---
 
@@ -5557,7 +5658,7 @@ class LocalBackend(Backend):
             # _open_video_recorder() path a real take does — so what you see
             # played back afterward is a true preview of production
             # quality/behavior, not a separate approximation.
-            video_recorder = self._open_video_recorder(config.camera_device, video_raw)
+            video_recorder = self._open_video_recorder(self.main_camera_device(), video_raw)
             if video_recorder is not None:
                 engine.start_mix_recording(mix_flac)
 

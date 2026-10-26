@@ -172,8 +172,6 @@ class RigWatcher:
     # --- webcam ---
 
     def _poll_camera(self, config) -> None:
-        if not config.camera_device:
-            return
         if not self._audio_present:
             # Only look while the rig is on — listing cameras shells out to
             # ffmpeg, not something to do every 2s forever on an idle server.
@@ -182,7 +180,9 @@ class RigWatcher:
             return
         if self._camera_present:
             return
-        if any(device_id == config.camera_device for device_id, _label in self._backend.list_cameras()):
+        from .phone_camera.protocol import is_phone_device
+        local = [label for device, label in self._backend.rescan_cameras() if not is_phone_device(device)]
+        if local:
             self._camera_present = True
-            self._log(f"Camera connected ({config.camera_label or config.camera_device}).")
+            self._log(f"Camera connected ({', '.join(local)}).")
             self._backend.refresh_camera_preview()

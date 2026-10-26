@@ -193,6 +193,26 @@ def _migrate_backup_server(data: dict) -> None:
             data["vault_server"] = normalize_vault_url(host)
 
 
+def _migrate_cameras(data: dict, known_cameras: list[KnownCamera]) -> None:
+    """Configs from before known_cameras: camera_device/camera_label (the
+    one configured camera) and extra_cameras become known cameras, the
+    first of them the main camera."""
+    old = []
+    if data.get("camera_device"):
+        old.append((data["camera_device"], data.get("camera_label") or ""))
+    old += [(c.get("device", ""), c.get("label", "")) for c in data.get("extra_cameras", []) if c.get("device")]
+    for device, label in old:
+        if not label and not device.startswith("takeloom-camera:"):
+            continue  # a bare avfoundation index: nothing stable to know it by
+        key = camera_key(device, label)
+        if not any(c.key == key for c in known_cameras):
+            known_cameras.append(KnownCamera(key=key, detected_name=label))
+        if not data.get("main_camera"):
+            data["main_camera"] = key
+    for legacy in ("camera_device", "camera_label", "extra_cameras"):
+        data.pop(legacy, None)
+
+
 @dataclass
 class AuthorizedClient:
     """A remote takeloom instance authorized to connect to this machine's server."""
@@ -203,14 +223,34 @@ class AuthorizedClient:
     last_seen_at: str = ""
 
 
+LOCAL_CAMERA_PREFIX = "local:"
+
+
+def camera_key(device_id: str, detected_name: str) -> str:
+    """A camera's stable identity (KnownCamera.key). A local camera's device
+    id is an index that can change when cameras come and go (avfoundation),
+    so it's known by the name the system reports instead; a Takeloom Camera
+    phone's device id ("takeloom-camera:<id>") is already stable."""
+    if device_id.startswith("takeloom-camera:"):
+        return device_id
+    return LOCAL_CAMERA_PREFIX + detected_name
+
+
 @dataclass
-class ExtraCamera:
-    """A camera recorded alongside the main one (StudioConfig.camera_device)
-    — added on the Recording Devices tab's "Add camera". Takeloom Camera
-    phones never need one of these: every connected phone is recorded
-    automatically (see backend.py's session_cameras)."""
-    device: str  # same form as StudioConfig.camera_device
-    label: str = ""
+class KnownCamera:
+    """A camera this machine has seen at least once (StudioConfig.
+    known_cameras). Every visible one that's connected is shown and
+    recorded — see backend.py's session_cameras."""
+    key: str                 # camera_key()
+    detected_name: str = ""  # as the system / phone last reported it
+    name: str = ""           # the name given on Recording Devices; "" = detected_name
+    hidden: bool = False     # never shown or recorded (e.g. a screen capture "camera")
+    first_seen: str = ""     # ISO dates
+    last_seen: str = ""
+
+    @property
+    def label(self) -> str:
+        return self.name or self.detected_name or self.key
 
 
 @dataclass
@@ -250,12 +290,12 @@ class StudioConfig:
     studio_musician: str = ""
     studio_name: str = ""
     studio_location: str = ""
-    camera_device: str = ""  # platform-specific ffmpeg device id, e.g. avfoundation index or /dev/video0
-    camera_label: str = ""   # human-friendly camera name, for display only
-    # More cameras to record each session, besides camera_device (the main
-    # one: per-take videos, streaming, sync). Each is saved whole into the
-    # session as its own video — see backend.py's session_cameras.
-    extra_cameras: list[ExtraCamera] = field(default_factory=list)
+    # Every camera ever seen, named on Recording Devices. All the visible,
+    # connected ones are shown and recorded each session (backend.py's
+    # session_cameras); main_camera (a KnownCamera.key) is the one per-take
+    # videos come from — "" or not connected: the first connected camera.
+    known_cameras: list[KnownCamera] = field(default_factory=list)
+    main_camera: str = ""
     streamdeck_id: str = ""     # serial number of the selected physical Stream Deck; empty = don't connect to one
     streamdeck_label: str = ""  # human-friendly Stream Deck name, for display only
     # Keyed by instrument *label* (one of INSTRUMENT_LABELS), not by which
@@ -388,7 +428,8 @@ class StudioConfig:
         remote_authorized_clients = [
             AuthorizedClient(**_filtered(c, AuthorizedClient)) for c in data.pop("remote_authorized_clients", [])
         ]
-        extra_cameras = [ExtraCamera(**_filtered(c, ExtraCamera)) for c in data.pop("extra_cameras", [])]
+        known_cameras = [KnownCamera(**_filtered(c, KnownCamera)) for c in data.pop("known_cameras", [])]
+        _migrate_cameras(data, known_cameras)
         compressor_settings = {
             label: CompressorSettings(**_filtered(cs, CompressorSettings))
             for label, cs in data.pop("compressor_settings", {}).items()
@@ -400,7 +441,7 @@ class StudioConfig:
             instruments=instruments,
             known_remotes=known_remotes,
             remote_authorized_clients=remote_authorized_clients,
-            extra_cameras=extra_cameras,
+            known_cameras=known_cameras,
             compressor_settings=compressor_settings,
         )
 

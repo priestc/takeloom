@@ -27,14 +27,19 @@ the session's audio automatically, with no manual latency test.
 
 ### More than one camera
 
-Every session records every camera at once:
+Every session records every connected camera at once, local webcams and
+Takeloom Camera phones alike; nothing needs adding. Recording Devices →
+Camera lists every camera ever seen. There you can:
 
-- the **main camera** (Recording Devices → *Main camera*), which gives
-  each take its video, feeds the YouTube stream, and becomes
-  `session_video.mp4`. If none is set, the first phone stands in;
-- any cameras added with **Add camera** on Recording Devices (local
-  webcams etc.);
-- every connected Takeloom Camera phone.
+- give each one a **name**, its label everywhere in the UI;
+- pick the **main camera**, which gives each take its video and becomes
+  `session_video.mp4` (if it isn't connected, the first connected camera
+  stands in);
+- **hide** anything that isn't really a camera. Screen captures are hidden
+  when first seen, and macOS's Continuity Camera from a nearby iPhone is a
+  likely candidate too.
+
+What's streamed live is the program camera, picked in `takeloom video-ui`.
 
 Each camera besides the main one is saved whole as its own
 `cameraN_<name>.mp4` in the session, with the same audio tracks and

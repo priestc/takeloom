@@ -124,8 +124,10 @@ class LatencyFrame(ttk.Frame):
         row += 1
 
         camera_names = [display for _dev_id, display in self._cameras]
+        from ..config import camera_key
         default_camera = next(
-            (display for dev_id, display in self._cameras if dev_id == self.config_obj.camera_device),
+            (display for dev_id, display in self._cameras
+             if camera_key(dev_id, display) == self.config_obj.main_camera),
             camera_names[0] if camera_names else "",
         )
         ttk.Label(self, text="Camera").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)

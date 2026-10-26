@@ -152,8 +152,8 @@ takeloom video-ui
 ```
 
 Opens the video operator's window: a thumbnail of every camera along the top (the
-main camera, any added on Recording Devices, and every connected Takeloom Camera
-phone) and the **program** ("out") camera large in the middle. Click a thumbnail, or
+every connected camera, local or a Takeloom Camera phone, under the names given on
+Recording Devices) and the **program** ("out") camera large in the middle. Click a thumbnail, or
 press its number key, to make it the program camera. The live stream shows the
 program camera and switches the moment you pick another (no restart). During a
 session every switch is written to `session_log.json` as a `program_camera` event,

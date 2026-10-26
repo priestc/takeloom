@@ -15,8 +15,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from ..backend import BackendError
-from ..config import ExtraCamera, StudioConfig, VALID_BUFFER_SIZES, VALID_SAMPLE_RATES
-from ..phone_camera.protocol import is_phone_device
+from ..config import StudioConfig, VALID_BUFFER_SIZES, VALID_SAMPLE_RATES
 from .app_state import AppState
 
 
@@ -29,8 +28,10 @@ class RecordingDevicesFrame(ttk.Frame):
         self.config_obj: StudioConfig | None = None
         self.devices: list[dict] = []
         self.output_devices: list[dict] = []
-        self._camera_choices: list[tuple[str, str]] = []
-        self._detected_cameras: list[tuple[str, str]] = []
+        # backend.camera_inventory(): every camera ever seen, connected or not.
+        self._inventory: list[dict] = []
+        # KnownCamera.key -> {"name": StringVar, "hidden": BooleanVar}
+        self._camera_vars: dict[str, dict] = {}
         self._streamdeck_choices: list[tuple[str, str]] = []
 
         ttk.Label(self, text="Loading...").pack(anchor="w")
@@ -43,9 +44,11 @@ class RecordingDevicesFrame(ttk.Frame):
 
         def worker() -> None:
             try:
+                # Cameras before the config: the scan behind camera_inventory()
+                # remembers any new camera in it.
+                cameras = backend.camera_inventory()
                 config = backend.get_config()
                 devices = backend.list_audio_devices()
-                cameras = backend.list_cameras()
                 streamdecks = backend.list_streamdecks()
                 error = None
             except BackendError as e:
@@ -55,7 +58,7 @@ class RecordingDevicesFrame(ttk.Frame):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_initial_loaded(
-        self, config: StudioConfig | None, devices: list[dict], cameras: list[tuple[str, str]],
+        self, config: StudioConfig | None, devices: list[dict], cameras: list[dict],
         streamdecks: list[tuple[str, str]], error: str | None,
     ) -> None:
         if not self.winfo_exists():
@@ -70,11 +73,22 @@ class RecordingDevicesFrame(ttk.Frame):
         self._build()
 
     def _set_devices(
-        self, devices: list[dict], cameras: list[tuple[str, str]], streamdecks: list[tuple[str, str]],
+        self, devices: list[dict], cameras: list[dict], streamdecks: list[tuple[str, str]],
     ) -> None:
         self.devices = devices
         self.output_devices = [d for d in devices if d["max_output_channels"] > 0]
-        self._detected_cameras = list(cameras)
+        self._inventory = list(cameras)
+        if self.config_obj is not None:
+            # A camera first seen by this (re)load's scan: into the form's
+            # copy of the config too, so it's listed and saved.
+            from ..config import KnownCamera
+            known = {c.key for c in self.config_obj.known_cameras}
+            for c in cameras:
+                if c["key"] not in known:
+                    self.config_obj.known_cameras.append(KnownCamera(
+                        key=c["key"], detected_name=c["detected_name"], name=c["name"], hidden=c["hidden"],
+                        first_seen=c["first_seen"], last_seen=c["last_seen"],
+                    ))
         # A device that's configured but momentarily not detected (unplugged,
         # or racing another process for it — see streamdeck_controller.py's
         # _open_by_id) must still appear as a choice here, selected, using
@@ -82,10 +96,6 @@ class RecordingDevicesFrame(ttk.Frame):
         # (recording_devices.py's "current display" lookups below) and
         # Save would then read that "None" back and permanently clear the
         # saved device_id/label, even though the user touched nothing.
-        self._camera_choices = [("", "None")] + self._with_configured_device(
-            cameras, self.config_obj.camera_device if self.config_obj else "",
-            self.config_obj.camera_label if self.config_obj else "",
-        )
         self._streamdeck_choices = [("", "None")] + self._with_configured_device(
             streamdecks, self.config_obj.streamdeck_id if self.config_obj else "",
             self.config_obj.streamdeck_label if self.config_obj else "",
@@ -156,17 +166,7 @@ class RecordingDevicesFrame(ttk.Frame):
             row=row, column=0, columnspan=2, sticky="w"
         )
         row += 1
-
-        ttk.Label(self, text="Main camera").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
-        current_display = next(
-            (display for dev_id, display in self._camera_choices if dev_id == self.config_obj.camera_device),
-            "None",
-        )
-        self.camera_var = tk.StringVar(value=current_display)
-        self.camera_box = ttk.Combobox(self, textvariable=self.camera_var, state="readonly", width=34)
-        self.camera_box.grid(row=row, column=1, sticky="w")
-        row += 1
-        row = self._build_extra_cameras(row)
+        row = self._build_cameras(row)
 
         ttk.Separator(self, orient="horizontal").grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
         row += 1
@@ -206,60 +206,61 @@ class RecordingDevicesFrame(ttk.Frame):
 
         self._refresh_device_choices()
 
-    def _build_extra_cameras(self, row: int) -> int:
-        """The cameras recorded alongside the main one: each added one with
-        a Remove button, then the "Add camera" dropdown, then the connected
-        Takeloom Camera phones (recorded automatically, never added here)."""
-        for extra in self.config_obj.extra_cameras:
-            ttk.Label(self, text="Extra camera").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=2)
-            line = ttk.Frame(self)
-            line.grid(row=row, column=1, sticky="w")
-            ttk.Label(line, text=extra.label or extra.device).pack(side="left")
-            ttk.Button(
-                line, text="Remove", command=lambda e=extra: self._on_remove_extra_camera(e),
-            ).pack(side="left", padx=(8, 0))
-            row += 1
-
-        used = {self.config_obj.camera_device} | {e.device for e in self.config_obj.extra_cameras}
-        self._addable_cameras = [
-            (dev_id, display) for dev_id, display in self._detected_cameras
-            if dev_id not in used and not is_phone_device(dev_id)
-        ]
-        ttk.Label(self, text="Add camera").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.add_camera_var = tk.StringVar(
-            value="Choose a camera to add…" if self._addable_cameras else "No other cameras detected",
-        )
-        add_box = ttk.Combobox(
-            self, textvariable=self.add_camera_var, state="readonly", width=34,
-            values=[display for _dev_id, display in self._addable_cameras],
-        )
-        add_box.grid(row=row, column=1, sticky="w")
-        add_box.bind("<<ComboboxSelected>>", self._on_add_extra_camera)
+    def _build_cameras(self, row: int) -> int:
+        """Every camera ever seen: its name (its label everywhere in the
+        UI), what it reports itself as, whether it's connected, which one is
+        the main camera, and Hide. Every connected camera not hidden is
+        shown and recorded — nothing needs adding."""
+        table = ttk.Frame(self)
+        table.grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
         row += 1
-
-        phones = [display for dev_id, display in self._detected_cameras if is_phone_device(dev_id)]
+        self._camera_vars = {}
+        known = {c.key: c for c in self.config_obj.known_cameras}
+        self.main_camera_var = tk.StringVar(
+            value=next((c["key"] for c in self._inventory if c["main"]), self.config_obj.main_camera),
+        )
+        if not known:
+            ttk.Label(table, text="No cameras seen yet. Connect one, or open Takeloom Camera on a phone, "
+                                  "then Reload Devices.", foreground="#666666").grid(row=0, column=0, sticky="w")
+        else:
+            for col, heading in enumerate(("Name", "Detected as", "", "Main", "Hide", "")):
+                ttk.Label(table, text=heading, foreground="#666666").grid(row=0, column=col, sticky="w", padx=(0, 10))
+        connected = {c["key"]: c["connected"] for c in self._inventory}
+        for r, camera in enumerate(self.config_obj.known_cameras, start=1):
+            name_var = tk.StringVar(value=camera.name)
+            hidden_var = tk.BooleanVar(value=camera.hidden)
+            self._camera_vars[camera.key] = {"name": name_var, "hidden": hidden_var}
+            ttk.Entry(table, textvariable=name_var, width=22).grid(row=r, column=0, sticky="w", padx=(0, 10), pady=2)
+            ttk.Label(table, text=camera.detected_name or camera.key).grid(row=r, column=1, sticky="w", padx=(0, 10))
+            is_connected = connected.get(camera.key, False)
+            ttk.Label(
+                table,
+                text="● connected" if is_connected else f"last seen {camera.last_seen or 'never'}",
+                foreground="#2a7d2a" if is_connected else "#888888",
+            ).grid(row=r, column=2, sticky="w", padx=(0, 10))
+            ttk.Radiobutton(table, variable=self.main_camera_var, value=camera.key).grid(row=r, column=3)
+            ttk.Checkbutton(table, variable=hidden_var).grid(row=r, column=4)
+            if not is_connected:
+                ttk.Button(table, text="Forget", command=lambda k=camera.key: self._on_forget_camera(k)).grid(
+                    row=r, column=5, sticky="w",
+                )
         ttk.Label(
             self,
-            text="Every camera here is recorded each session, each saved to the session as its own video. "
-                 "Takeloom Camera phones are added automatically whenever they're connected"
-                 + (f" (now: {', '.join(phones)})." if phones else "."),
-            foreground="#666666", wraplength=520, justify="left",
-        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 4))
+            text="Every connected camera that isn't hidden is shown and recorded each session, under the "
+                 "name given here (blank: the name it reports). Per-take videos come from the main camera. "
+                 "Hide anything that isn't really a camera, like a screen capture.",
+            foreground="#666666", wraplength=560, justify="left",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(6, 4))
         return row + 1
 
-    def _on_add_extra_camera(self, _event: object) -> None:
-        display = self.add_camera_var.get()
-        match = next(((d, label) for d, label in self._addable_cameras if label == display), None)
-        if match is None:
-            return
+    def _on_forget_camera(self, key: str) -> None:
         self._apply_form_to_config()
-        self.config_obj.extra_cameras.append(ExtraCamera(device=match[0], label=match[1]))
-        self._rebuild_form(f"Added {match[1]} — Save to keep it.")
-
-    def _on_remove_extra_camera(self, extra: ExtraCamera) -> None:
-        self._apply_form_to_config()
-        self.config_obj.extra_cameras = [e for e in self.config_obj.extra_cameras if e is not extra]
-        self._rebuild_form(f"Removed {extra.label or extra.device} — Save to keep it.")
+        camera = next((c for c in self.config_obj.known_cameras if c.key == key), None)
+        self.config_obj.known_cameras = [c for c in self.config_obj.known_cameras if c.key != key]
+        if self.config_obj.main_camera == key:
+            self.config_obj.main_camera = ""
+        self._inventory = [c for c in self._inventory if c["key"] != key]
+        self._rebuild_form(f"Forgot {camera.label if camera else key} — Save to keep it.")
 
     def _rebuild_form(self, status: str) -> None:
         for child in self.winfo_children():
@@ -271,9 +272,6 @@ class RecordingDevicesFrame(ttk.Frame):
         """Push the current device/camera lists into all dropdowns' choices."""
         output_names = [d["name"] for d in self.output_devices]
         self.output_device_box.configure(values=output_names, state="readonly" if output_names else "normal")
-
-        camera_display = [display for _dev_id, display in self._camera_choices]
-        self.camera_box.configure(values=camera_display)
 
         streamdeck_display = [display for _dev_id, display in self._streamdeck_choices]
         self.streamdeck_box.configure(values=streamdeck_display)
@@ -294,8 +292,8 @@ class RecordingDevicesFrame(ttk.Frame):
 
         def worker() -> None:
             try:
+                cameras = backend.camera_inventory()
                 devices = backend.list_audio_devices()
-                cameras = backend.list_cameras()
                 streamdecks = backend.list_streamdecks()
                 error = None
             except BackendError as e:
@@ -305,7 +303,7 @@ class RecordingDevicesFrame(ttk.Frame):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_reloaded(
-        self, devices: list[dict], cameras: list[tuple[str, str]],
+        self, devices: list[dict], cameras: list[dict],
         streamdecks: list[tuple[str, str]], error: str | None,
     ) -> None:
         if not self.winfo_exists():
@@ -341,13 +339,13 @@ class RecordingDevicesFrame(ttk.Frame):
         except ValueError:
             pass
 
-        camera_display = self.camera_var.get()
-        camera_device, camera_label = next(
-            ((dev_id, display) for dev_id, display in self._camera_choices if display == camera_display),
-            (self.config_obj.camera_device, self.config_obj.camera_label),
-        )
-        self.config_obj.camera_device = camera_device
-        self.config_obj.camera_label = camera_label
+        for camera in self.config_obj.known_cameras:
+            fields = self._camera_vars.get(camera.key)
+            if fields is not None:
+                camera.name = fields["name"].get().strip()
+                camera.hidden = fields["hidden"].get()
+        if hasattr(self, "main_camera_var"):
+            self.config_obj.main_camera = self.main_camera_var.get()
 
         streamdeck_display = self.streamdeck_var.get()
         streamdeck_id, streamdeck_label = next(
