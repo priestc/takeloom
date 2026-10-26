@@ -107,7 +107,8 @@ sudo apt install takeloom</pre>
 <h2>Any Linux (Flatpak)</h2>
 <pre>flatpak install --user $BASE/flatpak/$APP.flatpakref</pre>
 <p>Or open <a href="flatpak/$APP.flatpakref">$APP.flatpakref</a> in your software center.
-Updates come with <code>flatpak update</code>.</p>
+Updates come with <code>flatpak update</code>. If a download stops with an HTTP 503 error,
+run the same command again: it picks up where it left off.</p>
 <p>Both are amd64/x86_64 and arm64/aarch64. Signing key fingerprint: <code>$KEY</code></p>
 </body></html>
 HTML

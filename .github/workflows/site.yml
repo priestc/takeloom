@@ -96,6 +96,12 @@ jobs:
             curl -fsSL -o /dev/null https://priestc.github.io/takeloom/flatpak/repo/summary && break
             sleep 15
           done
-          flatpak install --user -y --noninteractive "$ref"
+          # GitHub Pages sometimes answers a burst of object requests with a
+          # 503; a retry resumes where the last attempt stopped.
+          for attempt in 1 2 3; do
+            flatpak install --user -y --noninteractive "$ref" && break
+            [ $attempt = 3 ] && exit 1
+            sleep 30
+          done
           flatpak info --user io.github.priestc.Takeloom | grep -E 'Version|Origin'
           flatpak run io.github.priestc.Takeloom --help
