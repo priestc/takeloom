@@ -181,3 +181,18 @@ jobs:
       contents: read
       pages: write
       id-token: write
+
+  summary:
+    # The table of how long each package took (takeloom/release_status.py)
+    # on this run's page; runs whatever happened above.
+    if: always()
+    needs: [release, pypi, homebrew, deb, flatpak, site]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m takeloom.release_status --run "$GITHUB_RUN_ID" --markdown >> "$GITHUB_STEP_SUMMARY"

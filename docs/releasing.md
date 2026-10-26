@@ -148,3 +148,16 @@ without releasing: `gh workflow run deb.yml` / `gh workflow run flatpak.yml`.
 Flathub and the app stores would be added here the same way.
 
 It refuses to run if `main` is already exactly a release.
+
+To see what a release is doing:
+
+    takeloom release-status            # the latest release; --daily for the latest daily build
+    takeloom release-status --watch    # keep updating until it finishes
+
+It lists every package job in pipeline order with its state (done,
+building now, waiting, failed), how long it took or has taken so far, and
+how long it usually takes (the median of the last few successful runs),
+then names what's building right now. It reads GitHub Actions' job records
+through `gh` (`takeloom/release_status.py`). `make-release --watch` shows
+the same view. Each release and daily build also ends with a "summary" job
+that writes the timing table onto the run's page on GitHub.

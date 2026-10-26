@@ -350,9 +350,29 @@ def make_release_command(bump: str, watch: bool, camera: bool) -> None:
         return
     click.echo(f"Release started ({bump}): {run['url']}")
     if watch:
-        raise SystemExit(subprocess.run(
-            ["gh", "run", "watch", str(run["databaseId"]), "-R", repo, "--exit-status"],
-        ).returncode)
+        from .release_status import watch as watch_run
+        conclusion = watch_run(run["databaseId"], out=click.echo)
+        raise SystemExit(0 if conclusion == "success" else 1)
+
+
+@main.command(name="release-status")
+@click.option("--daily", is_flag=True, help="The latest daily build instead of the latest release.")
+@click.option("--run", "run_id", type=int, help="A specific workflow run id.")
+@click.option("--watch", is_flag=True, help="Keep updating until it finishes.")
+def release_status_command(daily: bool, run_id: int | None, watch: bool) -> None:
+    """Show which package the latest release (or daily build) is building
+    right now, and how long each package took or has taken so far, next to
+    how long it usually takes. Needs the GitHub CLI (`gh`), logged in."""
+    from .release_status import StatusError, render_text, status, watch as watch_run
+    workflow = "daily.yml" if daily else "release.yml"
+    try:
+        if watch:
+            conclusion = watch_run(run_id, workflow, out=click.echo)
+            raise SystemExit(0 if conclusion == "success" else 1)
+        click.echo(render_text(*status(run_id, workflow)))
+    except StatusError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
 
 
 @main.command(name="dev-mode")

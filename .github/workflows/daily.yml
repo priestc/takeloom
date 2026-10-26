@@ -111,3 +111,18 @@ jobs:
       release_tag: ${{ needs.daily.outputs.tag }}
     permissions:
       contents: write
+
+  summary:
+    # The table of how long each package took (takeloom/release_status.py)
+    # on this run's page; runs whatever happened above.
+    if: always()
+    needs: [daily, deb, flatpak]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m takeloom.release_status --run "$GITHUB_RUN_ID" --markdown >> "$GITHUB_STEP_SUMMARY"
