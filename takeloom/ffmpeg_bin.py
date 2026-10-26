@@ -46,6 +46,18 @@ def _static_binaries() -> tuple[str, str]:
     )
 
 
-FFMPEG, FFPROBE = _static_binaries()
+def _system_binaries() -> tuple[str, str] | None:
+    """The system's ffmpeg/ffprobe, for a package that depends on its
+    distro's ffmpeg instead of shipping the static one (the .deb, see
+    packaging/deb/: apt keeps that ffmpeg's libraries consistent, so the
+    breakage described above doesn't apply). Opted into with
+    TAKELOOM_SYSTEM_FFMPEG=1, which the package's launcher sets."""
+    if os.environ.get("TAKELOOM_SYSTEM_FFMPEG") != "1":
+        return None
+    ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+    return (ffmpeg, ffprobe) if ffmpeg and ffprobe else None
+
+
+FFMPEG, FFPROBE = _system_binaries() or _static_binaries()
 
 CAMERA_FFMPEG = shutil.which("ffmpeg") or FFMPEG

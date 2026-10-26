@@ -1,0 +1,104 @@
+# Debian/Ubuntu package (.deb) for amd64 and arm64 — see
+# packaging/deb/build_deb.sh. Builds from `ref`, test-installs each on
+# clean Debian/Ubuntu containers, and (given `release_tag`) attaches the
+# .debs to that GitHub release. Called by release.yml and daily.yml; also
+# runnable by hand to try a change: gh workflow run deb.yml
+name: Debian package
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build
+        default: main
+      release_tag:
+        description: Attach the .debs to this GitHub release (optional)
+        default: ""
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
+      release_tag:
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0  # the version comes from tags
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Wheel
+        run: |
+          python -m pip install --quiet build
+          python -m build --wheel
+      - name: .deb
+        run: packaging/deb/build_deb.sh dist/*.whl debs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: debs/*.deb
+
+  test:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04, image: "debian:12" }
+          - { arch: amd64, runner: ubuntu-24.04, image: "ubuntu:22.04" }
+          - { arch: amd64, runner: ubuntu-24.04, image: "ubuntu:24.04" }
+          - { arch: arm64, runner: ubuntu-24.04-arm, image: "debian:12" }
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: debs
+      - name: Install with apt
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ./debs/*.deb xvfb xauth > /dev/null
+          dpkg -s takeloom | grep -E '^(Version|Installed-Size)'
+      - name: Check
+        run: |
+          set -x
+          takeloom --help
+          # Every bundled native library's dependencies are present —
+          # i.e. the .deb's Depends: line is complete.
+          missing=$(find /opt/takeloom -name '*.so*' -type f -exec ldd {} + 2>/dev/null | grep 'not found' | sort -u || true)
+          if [ -n "$missing" ]; then echo "$missing"; exit 1; fi
+          PY=/opt/takeloom/python/bin/python3
+          TAKELOOM_SYSTEM_FFMPEG=1 $PY -c "from takeloom.ffmpeg_bin import FFMPEG; assert FFMPEG == '/usr/bin/ffmpeg', FFMPEG"
+          $PY -c "import cv2, numpy, sounddevice, soundfile, fluidsynth, StreamDeck.DeviceManager, PIL.ImageTk, tkinterdnd2"
+          $PY -c "from takeloom import update_check as u; assert u.install_kind() == 'packaged', u.install_kind()"
+          xvfb-run -a $PY -c "import tkinter; r = tkinter.Tk(); r.update(); print('Tk', r.tk.call('info', 'patchlevel')); r.destroy()"
+
+  attach:
+    if: inputs.release_tag != ''
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: deb-*
+          merge-multiple: true
+          path: debs
+      - run: gh release upload "${{ inputs.release_tag }}" debs/*.deb --clobber -R "$GITHUB_REPOSITORY"

@@ -1,0 +1,80 @@
+# Publish the apt repository (https://priestc.github.io/takeloom/apt) on
+# GitHub Pages from a release's .debs — see packaging/apt/build_repo.sh.
+# Called by release.yml; runnable by hand for an existing release:
+#   gh workflow run apt-repo.yml -f release_tag=vX.Y.Z
+# Signs with the APT_SIGNING_KEY secret.
+name: apt repository
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release whose .debs to publish (e.g. v0.5.1)
+        required: true
+  workflow_call:
+    inputs:
+      release_tag:
+        type: string
+        required: true
+    secrets:
+      APT_SIGNING_KEY:
+        required: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency: pages
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: The release's .debs
+        run: |
+          gh release download "${{ inputs.release_tag }}" -p '*.deb' -D site/apt/pool/main/t/takeloom -R "$GITHUB_REPOSITORY"
+          ls -lh site/apt/pool/main/t/takeloom
+      - name: Index and sign
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          sudo apt-get install -y -qq apt-utils > /dev/null
+          packaging/apt/build_repo.sh site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  test:
+    # The published repository, used exactly as the instructions say.
+    needs: deploy
+    runs-on: ubuntu-latest
+    container: debian:12
+    steps:
+      - run: |
+          apt-get update -qq && apt-get install -y -qq curl ca-certificates > /dev/null
+          base=https://priestc.github.io/takeloom/apt
+          # Pages can take a minute to serve a fresh deploy.
+          for attempt in $(seq 20); do
+            curl -fsSL -o /dev/null $base/dists/stable/InRelease && break
+            sleep 15
+          done
+          curl -fsSL $base/takeloom.gpg | tee /usr/share/keyrings/takeloom.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/takeloom.gpg] $base stable main" > /etc/apt/sources.list.d/takeloom.list
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq takeloom > /dev/null
+          dpkg -s takeloom | grep '^Version'
+          takeloom --help
