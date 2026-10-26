@@ -91,7 +91,8 @@ jobs:
           # The real UI, no hardware attached: still running after 20 s
           # (timeout's 124) = it came up.
           status=0
-          HOME=$(mktemp -d) xvfb-run -a timeout 20 flatpak run $APP > ui.log 2>&1 || status=$?
+          # (The runner's real HOME: a --user Flatpak is installed under it.)
+          xvfb-run -a timeout 20 flatpak run $APP > ui.log 2>&1 || status=$?
           cat ui.log
           if [ "$status" != 124 ]; then echo "takeloom ui exited early ($status)"; exit 1; fi
       - uses: actions/upload-artifact@v4
