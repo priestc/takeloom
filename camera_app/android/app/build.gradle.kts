@@ -3,6 +3,13 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// The camera app's one version number, shared with iOS — see camera_app/VERSION
+// and `takeloom make-release --camera`. versionCode must only ever increase:
+// 1.2.3 -> 10203.
+val cameraAppVersion = rootProject.file("../VERSION").readText().trim()
+val cameraAppVersionCode = cameraAppVersion.split(".").map { it.toInt() }
+    .let { (major, minor, patch) -> major * 10000 + minor * 100 + patch }
+
 android {
     namespace = "com.priestc.takeloomcamera"
     compileSdk = 34
@@ -13,8 +20,12 @@ android {
         // the boot-time clock camera sensors often use.
         minSdk = 29
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = cameraAppVersionCode
+        versionName = cameraAppVersion
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     buildTypes {

@@ -124,6 +124,9 @@ class RecordFrame(ttk.Frame):
         # full width — see _rebuild_preview_tiles.
         self._preview_tiles: dict[str, dict] = {}
         self._preview_cameras: list[tuple[str, str]] = []
+        # camera_device -> backend.camera_versions() entry, for the
+        # Takeloom Camera phones: shown in their tile's caption.
+        self._camera_versions: dict[str, dict] = {}
         # camera_device -> its latest preview_error, kept so a tile built
         # after the error arrived still shows it.
         self._preview_errors: dict[str, str] = {}
@@ -1378,14 +1381,17 @@ class RecordFrame(ttk.Frame):
         on open, and whenever a phone connects/disconnects or the camera
         config changes (session_cameras_changed)."""
         backend = self.app_state.backend
-        self._run_backend(lambda: backend.session_cameras(), self._on_preview_cameras)
+        self._run_backend(
+            lambda: (backend.session_cameras(), backend.camera_versions()), self._on_preview_cameras,
+        )
 
-    def _on_preview_cameras(self, cameras: list[tuple[str, str]] | None, error: str | None) -> None:
-        if not self.winfo_exists() or error or cameras is None or not hasattr(self, "preview_area"):
+    def _on_preview_cameras(self, result: tuple | None, error: str | None) -> None:
+        if not self.winfo_exists() or error or result is None or not hasattr(self, "preview_area"):
             return
-        cameras = [tuple(c) for c in cameras]
-        if cameras != self._preview_cameras:
+        cameras, versions = [tuple(c) for c in result[0]], result[1]
+        if cameras != self._preview_cameras or versions != self._camera_versions:
             self._preview_cameras = cameras
+            self._camera_versions = versions
             self._rebuild_preview_tiles()
 
     def _rebuild_preview_tiles(self) -> None:
@@ -1409,8 +1415,18 @@ class RecordFrame(ttk.Frame):
                              text="Waiting for camera preview...", wraplength=280)
             image.pack(fill="x")
             tile = {"frame": frame, "image": image, "imgtk": None, "width": 0}
-            if many:
-                ttk.Label(frame, text=label + (" (main)" if i == 0 else ""), foreground="#666666").pack(anchor="w")
+            caption = label + (" (main)" if many and i == 0 else "")
+            version = self._camera_versions.get(device)
+            if version and version.get("version"):
+                caption += f" · app {version['version']}"
+            if many or version:
+                ttk.Label(frame, text=caption, foreground="#666666").pack(anchor="w")
+            if version and version.get("outdated"):
+                ttk.Label(
+                    frame, foreground="#b00020", wraplength=520 if i == 0 else 280, justify="left",
+                    text=f"This phone's Takeloom Camera is out of date: {version['latest']} is available. "
+                         "Update the app on the phone.",
+                ).pack(anchor="w")
             image.bind("<Configure>", lambda e, t=tile: t.__setitem__("width", e.width))
             self._preview_tiles[device] = tile
             if device in self._preview_errors:

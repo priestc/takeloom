@@ -40,9 +40,6 @@ class Settings(context: Context) {
         get() = prefs.getBoolean("useFrontCamera", false)
         set(value) = prefs.edit().putBoolean("useFrontCamera", value).apply()
 
-    val appVersion: String = BuildConfigVersion.NAME
-}
-
-object BuildConfigVersion {
-    const val NAME = "1.0"
+    // camera_app/VERSION, via the build (app/build.gradle.kts).
+    val appVersion: String = BuildConfig.VERSION_NAME
 }

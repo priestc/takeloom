@@ -46,6 +46,29 @@ Run one early from the Actions tab (Daily build → Run workflow), or:
 
     gh workflow run daily.yml
 
+## Takeloom Camera releases
+
+The camera apps (`camera_app/ios`, `camera_app/android`) have their own
+version, `camera_app/VERSION`, which only changes when the apps do:
+
+    takeloom make-release minor --camera     # or patch / major
+
+It refuses if nothing under `camera_app/` changed since the last camera
+release. Otherwise it bumps `VERSION`, writes it into the iOS XcodeGen spec
+(`camera_app/ios/project.yml`; Android's Gradle build reads `VERSION`
+itself), commits, tags `camera-vX.Y.Z`, pushes, and makes a GitHub
+release for the tag (never marked "latest"). It runs in the working copy
+rather than on GitHub, since the apps are built locally with Xcode and
+Android Studio. Both stores' integer build number is derived from the
+version: 1.2.3 becomes 10203.
+
+Camera tags don't affect takeloom's own version, which only counts `v*`
+tags. takeloom ships `camera_app/VERSION` in its package, so the Record
+tab shows each connected phone's app version and warns when it's older
+than the newest camera release this takeloom knows of. The Mac Mini's
+editable install knows as soon as a camera release is committed; other
+installs, from takeloom's next release.
+
 ## Releases
 
 Every few development days, make a release:

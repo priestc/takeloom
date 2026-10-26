@@ -176,6 +176,9 @@ struct SettingsView: View {
                         }
                     }
                 }
+                Section {
+                    Text("Takeloom Camera \(Settings.appVersion)").foregroundStyle(.secondary)
+                }
             }
             .navigationTitle("Settings")
             .toolbar {

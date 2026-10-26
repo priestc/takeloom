@@ -375,6 +375,11 @@ class MainActivity : Activity() {
             }
         }
 
+        form.addView(TextView(this).apply {
+            text = "Takeloom Camera ${settings.appVersion}"
+            setPadding(0, 32, 0, 0)
+        })
+
         AlertDialog.Builder(this)
             .setTitle("Settings")
             .setView(android.widget.ScrollView(this).apply { addView(form) })

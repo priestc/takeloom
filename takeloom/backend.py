@@ -993,6 +993,14 @@ class Backend(ABC):
         are announced with a "session_cameras_changed" event."""
         ...
 
+    @abstractmethod
+    def camera_versions(self) -> dict[str, dict]:
+        """camera_device -> {"version", "latest", "outdated"} for each
+        connected Takeloom Camera phone: the app version it's running, the
+        newest camera release this takeloom knows of, and whether it's
+        behind (see phone_camera/app_version.py)."""
+        ...
+
     # --- camera latency test (local-only; RemoteBackend refuses) ---
 
     @abstractmethod
@@ -1866,6 +1874,9 @@ class LocalBackend(Backend):
                 return s.getsockname()[0]
             except OSError:
                 return "unknown"
+
+    def camera_versions(self) -> dict[str, dict]:
+        return self._phone_hub.camera_versions() if self._phone_hub is not None else {}
 
     def session_cameras(self) -> list[tuple[str, str]]:
         config = self.get_config()

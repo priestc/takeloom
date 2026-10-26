@@ -282,14 +282,29 @@ def ui_command(remote_ip: str | None) -> None:
 @main.command(name="make-release")
 @click.argument("bump", type=click.Choice(["patch", "minor", "major"]))
 @click.option("--watch", is_flag=True, help="Follow the release until it finishes.")
-def make_release_command(bump: str, watch: bool) -> None:
+@click.option("--camera", is_flag=True,
+              help="Release the Takeloom Camera apps (camera_app/) instead of takeloom.")
+def make_release_command(bump: str, watch: bool, camera: bool) -> None:
     """Release takeloom: bump the PATCH/MINOR/MAJOR part of the version and
     publish GitHub's current main everywhere (GitHub, PyPI, Homebrew, apt,
     Flatpak). Runs .github/workflows/release.yml through the GitHub CLI
-    (`gh`, logged in) — see docs/releasing.md."""
+    (`gh`, logged in) — see docs/releasing.md.
+
+    With --camera, release the Takeloom Camera apps instead: bump
+    camera_app/VERSION (only if camera_app/ changed since the last camera
+    release), commit, tag camera-vX.Y.Z and push, from this checkout."""
     import shutil
     import subprocess
     from .update_check import _REPO_URL
+
+    if camera:
+        from .camera_release import CameraReleaseError, make_camera_release
+        try:
+            make_camera_release(bump, log=click.echo, confirm=click.confirm)
+        except CameraReleaseError as e:
+            click.echo(f"Error: {e}", err=True)
+            raise SystemExit(1)
+        return
 
     if shutil.which("gh") is None:
         click.echo("Error: needs the GitHub CLI (`gh`), logged in: https://cli.github.com", err=True)

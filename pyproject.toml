@@ -37,6 +37,11 @@ dependencies = [
 [project.scripts]
 takeloom = "takeloom.__main__:main"
 
+[tool.hatch.build.targets.wheel.force-include]
+# The camera app's version, so takeloom can tell when a phone's is behind
+# (see takeloom/phone_camera/app_version.py).
+"camera_app/VERSION" = "takeloom/data/camera_app_VERSION"
+
 [tool.hatch.version]
 source = "vcs"
 # Only release tags count — not the daily-YYYY-MM-DD build tags.

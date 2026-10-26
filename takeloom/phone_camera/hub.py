@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..config import AuthorizedClient
+from .app_version import version_status
 from .protocol import (
     CAMERA_SERVER_PORT, DEVICE_PREFIX, FRAME_JSON, FRAME_PREVIEW, FRAME_UPLOAD, FRAME_VIDEO,
     ProtocolError, decode_json, decode_video, encode_json, read_frame,
@@ -73,6 +74,7 @@ class PhoneCameraInfo:
     client_name: str
     platform: str
     ip: str
+    app_version: str = ""
     status: dict = field(default_factory=dict)
     # server_ns = phone_ns + clock_offset_ns; None until the phone's first
     # clock_sync report.
@@ -171,6 +173,11 @@ class PhoneCameraHub:
         with self._lock:
             conn = self._cameras.get(device_id)
             return conn.info if conn else None
+
+    def camera_versions(self) -> dict[str, dict]:
+        """camera_device -> app_version.version_status() of each connected
+        phone."""
+        return {DEVICE_PREFIX + c.device_id: version_status(c.app_version) for c in self.cameras()}
 
     def list_camera_devices(self) -> list[tuple[str, str]]:
         """(camera_device, display name) per connected phone, in the same
@@ -451,10 +458,13 @@ class _Handler(socketserver.BaseRequestHandler):
         info = PhoneCameraInfo(
             device_id=device_id, client_name=str(hello.get("client_name") or ip),
             platform=str(hello.get("platform") or ""), ip=ip,
+            app_version=str(hello.get("app_version") or ""),
         )
         conn = _CameraConnection(sock, info)
         hub._register_camera(conn)
-        hub._log(f"Takeloom Camera '{info.client_name}' ({ip}) connected")
+        status = version_status(info.app_version)
+        hub._log(f"Takeloom Camera '{info.client_name}' ({ip}) connected, app {info.app_version or 'version unknown'}"
+                 + (f" — outdated, {status['latest']} is available" if status["outdated"] else ""))
         try:
             while not conn.closed:
                 frame_type, payload = read_frame(sock)
