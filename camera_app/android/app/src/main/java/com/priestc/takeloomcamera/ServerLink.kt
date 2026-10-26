@@ -145,6 +145,7 @@ class ServerLink(private val settings: Settings) {
                 "kind" to "hello", "role" to "camera", "token" to settings.token(hostNow),
                 "client_name" to settings.deviceName, "device_id" to settings.deviceId,
                 "platform" to "android", "app_version" to settings.appVersion,
+                "device_model" to settings.deviceModel,
             ))
         }.start()
     }

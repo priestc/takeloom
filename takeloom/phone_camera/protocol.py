@@ -21,7 +21,9 @@ Control messages (FRAME_JSON):
 
     phone -> server  {"kind": "hello", "role": "camera"|"upload", "token": "...",
                       "client_name": "...", "device_id": "...", "platform": "ios"|"android",
-                      "app_version": "..."}
+                      "app_version": "...",
+                      "device_model": "..."}  iOS: the hardware identifier ("iPhone14,4");
+                                              Android: a readable model name. See models.py.
     server -> phone  {"kind": "hello_pending"}      while a human approves pairing
                      {"kind": "hello_ack", "ok": true, "hostname": "...", "token"?: "..."}
                      {"kind": "hello_ack", "ok": false, "error": "..."}

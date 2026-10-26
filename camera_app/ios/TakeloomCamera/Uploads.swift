@@ -167,7 +167,7 @@ final class Uploader {
             connection.sendJSON([
                 "kind": "hello", "role": "upload", "token": Settings.token(for: recording.host),
                 "client_name": Settings.deviceName, "device_id": Settings.deviceID,
-                "platform": "ios", "app_version": Settings.appVersion,
+                "platform": "ios", "app_version": Settings.appVersion, "device_model": Settings.deviceModel,
             ])
         }
     }

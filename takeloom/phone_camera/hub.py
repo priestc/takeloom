@@ -37,6 +37,7 @@ from typing import Callable
 
 from ..config import AuthorizedClient
 from .app_version import version_status
+from .models import display_name
 from .protocol import (
     CAMERA_SERVER_PORT, DEVICE_PREFIX, FRAME_JSON, FRAME_PREVIEW, FRAME_UPLOAD, FRAME_VIDEO,
     ProtocolError, decode_json, decode_video, encode_json, read_frame,
@@ -75,6 +76,7 @@ class PhoneCameraInfo:
     platform: str
     ip: str
     app_version: str = ""
+    device_model: str = ""  # see models.py
     status: dict = field(default_factory=dict)
     # server_ns = phone_ns + clock_offset_ns; None until the phone's first
     # clock_sync report.
@@ -182,7 +184,10 @@ class PhoneCameraHub:
     def list_camera_devices(self) -> list[tuple[str, str]]:
         """(camera_device, display name) per connected phone, in the same
         shape video/devices.py's list_cameras returns."""
-        return [(DEVICE_PREFIX + c.device_id, f"Takeloom Camera: {c.client_name}") for c in self.cameras()]
+        return [
+            (DEVICE_PREFIX + c.device_id, f"Takeloom Camera: {display_name(c.client_name, c.platform, c.device_model)}")
+            for c in self.cameras()
+        ]
 
     # --- live video + recording control ---
 
@@ -459,6 +464,7 @@ class _Handler(socketserver.BaseRequestHandler):
             device_id=device_id, client_name=str(hello.get("client_name") or ip),
             platform=str(hello.get("platform") or ""), ip=ip,
             app_version=str(hello.get("app_version") or ""),
+            device_model=str(hello.get("device_model") or ""),
         )
         conn = _CameraConnection(sock, info)
         hub._register_camera(conn)

@@ -184,6 +184,7 @@ class Uploader(private val store: RecordingStore, private val settings: Settings
                 "kind" to "hello", "role" to "upload", "token" to settings.token(recording.host),
                 "client_name" to settings.deviceName, "device_id" to settings.deviceId,
                 "platform" to "android", "app_version" to settings.appVersion,
+                "device_model" to settings.deviceModel,
             ))
         }.start()
     }

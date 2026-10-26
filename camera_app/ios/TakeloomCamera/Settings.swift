@@ -42,6 +42,20 @@ enum Settings {
         set { defaults.set(newValue, forKey: "useFrontCamera") }
     }
 
+    /// The hardware model identifier ("iPhone14,4"): the server turns it
+    /// into the marketing name (takeloom/phone_camera/models.py), since
+    /// iOS only gives apps "iPhone" for the device's name.
+    static var deviceModel: String {
+        if let simulated = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] {
+            return simulated
+        }
+        var info = utsname()
+        uname(&info)
+        return withUnsafeBytes(of: &info.machine) { raw in
+            String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+        }
+    }
+
     static var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
     }
