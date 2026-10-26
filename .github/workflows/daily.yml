@@ -19,6 +19,9 @@ concurrency: daily-build
 jobs:
   daily:
     runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+      tag: ${{ steps.check.outputs.tag }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -88,3 +91,13 @@ jobs:
           while read -r old; do
             gh release delete "$old" --cleanup-tag --yes
           done
+
+  deb:
+    needs: daily
+    if: needs.daily.outputs.skip == 'false'
+    uses: ./.github/workflows/deb.yml
+    with:
+      ref: ${{ github.sha }}
+      release_tag: ${{ needs.daily.outputs.tag }}
+    permissions:
+      contents: write

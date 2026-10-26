@@ -88,6 +88,12 @@ jobs:
           $PY -c "import cv2, numpy, sounddevice, soundfile, fluidsynth, StreamDeck.DeviceManager, PIL.ImageTk, tkinterdnd2"
           $PY -c "from takeloom import update_check as u; assert u.install_kind() == 'packaged', u.install_kind()"
           xvfb-run -a $PY -c "import tkinter; r = tkinter.Tk(); r.update(); print('Tk', r.tk.call('info', 'patchlevel')); r.destroy()"
+          # The real UI (drag-and-drop's native tkdnd included), no hardware
+          # attached: still running after 20 s (timeout's 124) = it came up.
+          status=0
+          HOME=$(mktemp -d) xvfb-run -a timeout 20 takeloom ui > ui.log 2>&1 || status=$?
+          cat ui.log
+          if [ "$status" != 124 ]; then echo "takeloom ui exited early ($status)"; exit 1; fi
 
   attach:
     if: inputs.release_tag != ''
