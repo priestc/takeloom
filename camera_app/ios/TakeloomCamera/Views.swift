@@ -35,7 +35,10 @@ struct ContentView: View {
                     Text(error).padding(8).background(.red.opacity(0.85), in: Capsule()).foregroundStyle(.white)
                 }
                 HStack {
-                    if let status = model.uploadStatus {
+                    if model.scanning && model.serverHost.isEmpty {
+                        Label("Looking for the takeloom server…", systemImage: "antenna.radiowaves.left.and.right")
+                            .pillStyle()
+                    } else if let status = model.uploadStatus {
                         Label(status, systemImage: "arrow.up.circle").pillStyle()
                     } else if !model.pending.isEmpty {
                         Label("\(model.pending.count) recording(s) waiting to upload", systemImage: "tray.full")
@@ -55,6 +58,27 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showingSettings) {
             SettingsView().environmentObject(model)
+        }
+        .alert(model.discovered.count > 1 ? "takeloom servers found" : "takeloom server found",
+               isPresented: $model.discoveryPrompt) {
+            ForEach(model.discovered) { server in
+                Button(model.discovered.count > 1 ? "\(server.hostname) (\(server.address))" : "Connect") {
+                    model.connect(to: server.host)
+                }
+            }
+            Button("Not now", role: .cancel) {}
+        } message: {
+            if model.discovered.count == 1, let server = model.discovered.first {
+                Text("Connect to \(server.hostname) at \(server.address)? You can change it later in Settings.")
+            } else {
+                Text("Which one should this camera use? You can change it later in Settings.")
+            }
+        }
+        .alert("No takeloom server found", isPresented: $model.discoveryFoundNothing) {
+            Button("Scan again") { model.scanForServer(prompt: true) }
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Make sure `takeloom server` is running and this phone is on the same Wi-Fi, or enter its address in Settings.")
         }
         .statusBarHidden()
         .persistentSystemOverlays(.hidden)
@@ -144,11 +168,31 @@ struct SettingsView: View {
                 Section {
                     TextField("Server address (e.g. 192.168.1.20)", text: $host)
                         .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    Button {
+                        model.scanForServer(prompt: false)
+                    } label: {
+                        HStack {
+                            Text(model.scanning ? "Scanning the network…" : "Scan for server")
+                            if model.scanning { Spacer(); ProgressView() }
+                        }
+                    }
+                    .disabled(model.scanning)
+                    ForEach(model.discovered) { server in
+                        Button {
+                            host = server.host
+                        } label: {
+                            HStack {
+                                Text("\(server.hostname) — \(server.address)")
+                                if host == server.host { Spacer(); Image(systemName: "checkmark") }
+                            }
+                        }
+                    }
                     TextField("This phone's name", text: $name)
                 } header: {
                     Text("takeloom server")
                 } footer: {
-                    Text("The Mac running `takeloom server`. The first connection has to be approved there.")
+                    Text("The Mac running `takeloom server`. Scan to find it on this Wi-Fi, or type its address. "
+                         + "The first connection has to be approved there.")
                 }
                 Section("Camera") {
                     Picker("Camera", selection: $front) {

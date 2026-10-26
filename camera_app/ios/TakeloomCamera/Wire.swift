@@ -54,10 +54,10 @@ final class FramedConnection {
     /// backpressure looks at. Only touched on `queue`.
     private(set) var bytesInFlight = 0
 
-    init(host: String, port: UInt16 = Wire.port, queue: DispatchQueue) {
+    init(host: String, port: UInt16 = Wire.port, queue: DispatchQueue, connectTimeout: Int = 5) {
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
-        tcp.connectionTimeout = 5
+        tcp.connectionTimeout = connectTimeout
         let params = NWParameters(tls: nil, tcp: tcp)
         connection = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!, using: params)
         self.queue = queue

@@ -13,6 +13,12 @@ final class AppModel: ObservableObject {
     @Published var pending: [PendingRecording] = []
     @Published var cameraError: String?
     @Published var serverHost = Settings.serverHost
+    /// Network scan for the server (ServerDiscovery): running, and what it
+    /// found last. `discoveryPrompt` asks whether to use what was found.
+    @Published var scanning = false
+    @Published var discovered: [DiscoveredServer] = []
+    @Published var discoveryPrompt = false
+    @Published var discoveryFoundNothing = false
     @Published var useFrontCamera = Settings.useFrontCamera
     @Published var quality = Settings.quality
 
@@ -55,8 +61,30 @@ final class AppModel: ObservableObject {
             }
             pipeline.start { error in
                 self.cameraError = error
-                if !self.serverHost.isEmpty { self.link.connect(host: self.serverHost) }
+                if self.serverHost.isEmpty {
+                    // First launch: look for the server instead of asking for its address.
+                    self.scanForServer(prompt: true)
+                } else {
+                    self.link.connect(host: self.serverHost)
+                }
                 self.uploader.kick()
+            }
+        }
+    }
+
+    /// Scan the network for takeloom servers. With `prompt`, ask (an alert)
+    /// whether to connect to what's found; otherwise just list it (Settings).
+    func scanForServer(prompt: Bool) {
+        guard !scanning else { return }
+        scanning = true
+        discovered = []
+        Task {
+            let found = await ServerDiscovery.scan()
+            scanning = false
+            discovered = found
+            if prompt {
+                discoveryPrompt = !found.isEmpty
+                discoveryFoundNothing = found.isEmpty
             }
         }
     }

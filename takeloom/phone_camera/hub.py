@@ -397,6 +397,11 @@ class _Handler(socketserver.BaseRequestHandler):
             if frame_type != FRAME_JSON:
                 return
             hello = decode_json(payload)
+            if hello.get("kind") == "discover":
+                # A phone scanning the network for this server (no pairing
+                # needed to be found — still LAN-only, checked above).
+                self._send({"kind": "discover_ack", "server": "takeloom", "hostname": self._hub._hostname()})
+                return
             if hello.get("kind") != "hello" or not self._authenticate(hello, ip):
                 return
             device_id = str(hello.get("device_id") or "")

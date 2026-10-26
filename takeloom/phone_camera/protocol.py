@@ -19,6 +19,9 @@ since most of the traffic here is compressed video:
 
 Control messages (FRAME_JSON):
 
+    phone -> server  {"kind": "discover"}            finding the server (the app's network scan):
+    server -> phone  {"kind": "discover_ack", "server": "takeloom", "hostname": "..."}, then closes
+
     phone -> server  {"kind": "hello", "role": "camera"|"upload", "token": "...",
                       "client_name": "...", "device_id": "...", "platform": "ios"|"android",
                       "app_version": "...",

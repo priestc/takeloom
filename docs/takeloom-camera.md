@@ -15,9 +15,13 @@ the session's audio automatically, with no manual latency test.
 
 1. Run `takeloom server` on the Mac Mini as usual. It also listens for
    phones on port **51824**.
-2. Open Takeloom Camera, tap ⚙, and enter the Mac Mini's IP address. The
-   first connection shows a pairing request on the Mac (the same approval
-   flow as a Remote client). Approve it.
+2. Open Takeloom Camera. The first time, it scans the phone's Wi-Fi network
+   for the server: every address on port 51824, keeping those that answer
+   the protocol's `discover` as takeloom. Then it asks "Connect to Mac.local
+   at 192.168.1.200:51824?" (or lists them, if it finds several). Say yes and
+   it saves that address. To change it later, tap ⚙: type an address, or
+   use **Scan for server**. The first connection shows a pairing request on
+   the Mac (the same approval flow as a Remote client). Approve it.
 3. The phone shows up on the Record tab by itself, as one of the camera
    previews. There's nothing to add: every connected phone is recorded.
 4. Record as normal. Starting a session tells every connected phone to

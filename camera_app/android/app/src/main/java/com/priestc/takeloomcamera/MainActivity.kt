@@ -81,8 +81,63 @@ class MainActivity : Activity() {
 
     private fun startEverything() {
         if (textureView.isAvailable) startCamera()
-        if (settings.serverHost.isNotEmpty()) link.connect(settings.serverHost)
+        if (settings.serverHost.isNotEmpty()) {
+            link.connect(settings.serverHost)
+        } else {
+            findServerAtFirstLaunch()  // look for it instead of asking for its address
+        }
         uploader.kick()
+    }
+
+    // --- finding the server (ServerDiscovery) ---
+
+    private var scanning = false
+
+    /** Scan the network on a background thread; `onDone` on the UI thread. */
+    private fun scanForServer(onDone: (List<DiscoveredServer>) -> Unit) {
+        if (scanning) return
+        scanning = true
+        Thread({
+            val found = ServerDiscovery.scan(this)
+            runOnUiThread {
+                scanning = false
+                if (!isFinishing) onDone(found)
+            }
+        }, "server-discovery").start()
+    }
+
+    private fun findServerAtFirstLaunch() {
+        connectionText.text = "◌ Looking for the takeloom server…"
+        scanForServer { found ->
+            when {
+                found.isEmpty() -> AlertDialog.Builder(this)
+                    .setTitle("No takeloom server found")
+                    .setMessage("Make sure `takeloom server` is running and this phone is on the same Wi-Fi, " +
+                        "or enter its address in Settings.")
+                    .setPositiveButton("Scan again") { _, _ -> findServerAtFirstLaunch() }
+                    .setNegativeButton("OK") { _, _ -> showState(LinkState.Idle) }
+                    .show()
+                found.size == 1 -> AlertDialog.Builder(this)
+                    .setTitle("takeloom server found")
+                    .setMessage("Connect to ${found[0].hostname} at ${found[0].address}? " +
+                        "You can change it later in Settings.")
+                    .setPositiveButton("Connect") { _, _ -> useServer(found[0].host) }
+                    .setNegativeButton("Not now") { _, _ -> showState(LinkState.Idle) }
+                    .show()
+                else -> AlertDialog.Builder(this)
+                    .setTitle("Which takeloom server?")
+                    .setItems(found.map { "${it.hostname} (${it.address})" }.toTypedArray()) { _, i ->
+                        useServer(found[i].host)
+                    }
+                    .setNegativeButton("Not now") { _, _ -> showState(LinkState.Idle) }
+                    .show()
+            }
+        }
+    }
+
+    private fun useServer(host: String) {
+        settings.serverHost = host
+        link.connect(host)
     }
 
     override fun onDestroy() {
@@ -347,6 +402,27 @@ class MainActivity : Activity() {
         }
         qualityGroup.check(qualityButtons[settings.quality.ordinal].id)
         form.addView(hostField)
+        form.addView(Button(this).apply {
+            text = "Scan for server"
+            setOnClickListener { button ->
+                button.isEnabled = false
+                text = "Scanning the network…"
+                scanForServer { found ->
+                    button.isEnabled = true
+                    text = if (found.isEmpty()) "No server found — scan again" else "Scan for server"
+                    when (found.size) {
+                        0 -> {}
+                        1 -> hostField.setText(found[0].host)
+                        else -> AlertDialog.Builder(this@MainActivity)
+                            .setTitle("Which takeloom server?")
+                            .setItems(found.map { "${it.hostname} (${it.address})" }.toTypedArray()) { _, i ->
+                                hostField.setText(found[i].host)
+                            }
+                            .show()
+                    }
+                }
+            }
+        })
         form.addView(nameField)
         form.addView(cameraGroup)
         form.addView(qualityGroup)
