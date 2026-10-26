@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import threading
 from pathlib import Path
-from typing import Callable, TYPE_CHECKING
+from typing import Callable
 
 from ..ffmpeg_bin import CAMERA_FFMPEG, FFMPEG, FFPROBE
-
-if TYPE_CHECKING:
-    from ..streaming import StreamTarget
+from .mjpeg import read_jpeg_frames
 
 
 def ffmpeg_available() -> bool:
@@ -48,67 +47,44 @@ def _record_output_args(framerate: int) -> list[str]:
     ]
 
 
+# Preview frames' width: thumbnails in the Record tab and video-ui, and
+# video-ui's large program view (see backend.py's _CameraPreviewManager).
+PREVIEW_WIDTH = 640
+
+
 def _build_capture_cmd(
     device: str, output_path: Path, framerate: int, stream_preview: bool,
-    stream_target: "StreamTarget | None" = None,
+    stream_frames_fd: int | None = None, stream_width: int = 1280,
 ) -> list[str]:
     cmd = [CAMERA_FFMPEG, "-y", *_input_args(device, framerate)]
-    if stream_target is not None:
-        # Input 1: the live mix audio arriving over LiveAudioFeeder's FIFO,
-        # as raw interleaved float32 PCM — see takeloom/streaming.py.
-        cmd += [
-            "-thread_queue_size", "1024",
-            "-f", "f32le", "-ar", str(stream_target.sample_rate), "-ac", str(stream_target.channels),
-            "-i", str(stream_target.audio_fifo),
-        ]
-    if not stream_preview and stream_target is None:
+    if not stream_preview and stream_frames_fd is None:
         return cmd + [*_record_output_args(framerate), str(output_path)]
 
     # Split the decoded camera feed into up to three branches: "rec" (always,
     # encoded to the local output file exactly as before), "prev" (scaled
     # down to ~10fps MJPEG on stdout, for the live preview panel while this
     # process holds the camera device exclusively — see on_preview_frame),
-    # and "streamv" (scaled down and encoded live to the RTMP target). RTMP
-    # streaming can't be a separate ffmpeg process sharing the same camera
-    # device, hence tacking it onto this one instead — see streaming.py.
+    # and "stv" (stream-quality MJPEG on another pipe, for the live stream:
+    # video/stream_switcher.py streams whichever camera is the program).
+    # The stream can't come from a separate ffmpeg process sharing the
+    # camera device, hence tacking it onto this one.
     branches = ["rec"]
     if stream_preview:
         branches.append("prev")
-    if stream_target is not None:
-        branches.append("streamv")
+    if stream_frames_fd is not None:
+        branches.append("stv")
     filter_parts = [f"[0:v]split={len(branches)}" + "".join(f"[{b}]" for b in branches)]
     if stream_preview:
-        filter_parts.append("[prev]fps=10,scale=320:-2[prevout]")
-    if stream_target is not None:
-        # width <= 0 means "stream at the source resolution" — `null` is
-        # ffmpeg's video passthrough filter (there's no scaling filter for
-        # "don't scale"), just relabeling the branch for the -map below.
-        stream_filter = f"scale={stream_target.width}:-2" if stream_target.width > 0 else "null"
-        filter_parts.append(f"[streamv]{stream_filter}[streamout]")
+        filter_parts.append(f"[prev]fps=10,scale={PREVIEW_WIDTH}:-2[prevout]")
+    if stream_frames_fd is not None:
+        filter_parts.append(f"[stv]scale={stream_width}:-2[stvout]")
 
     cmd += ["-filter_complex", ";".join(filter_parts)]
     cmd += ["-map", "[rec]", *_record_output_args(framerate), str(output_path)]
     if stream_preview:
         cmd += ["-map", "[prevout]", "-f", "mjpeg", "-q:v", "5", "pipe:1"]
-    if stream_target is not None:
-        bitrate = f"{stream_target.bitrate_kbps}k"
-        cmd += [
-            "-map", "[streamout]", "-map", "1:a",
-            # No "-tune zerolatency": it forces x264 into slice-based frame
-            # threading, and combined with the tight -maxrate/-bufsize below
-            # (needed to hit a live-streaming bitrate target at all), a
-            # high-core-count machine + a busy/detailed frame can starve
-            # individual slices of bits, corrupting the frame in visible
-            # horizontal bands — reproduced locally: identical corruption
-            # with the tune on, gone with it off. A live stream's few extra
-            # seconds of encoder latency are irrelevant here anyway (YouTube
-            # itself buffers several seconds on ingest before playback).
-            "-c:v", "libx264", "-preset", "veryfast",
-            "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", f"{stream_target.bitrate_kbps * 2}k",
-            "-g", str(framerate * 2), "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "160k", "-ar", "44100",
-            "-f", "flv", stream_target.rtmp_url,
-        ]
+    if stream_frames_fd is not None:
+        cmd += ["-map", "[stvout]", "-f", "mjpeg", "-q:v", "3", f"pipe:{stream_frames_fd}"]
     return cmd
 
 
@@ -128,10 +104,11 @@ class VideoRecorder:
     can't share a device with anything else, e.g. a separate cv2 preview
     loop, hence needing to source the preview from here instead).
 
-    If stream_target is given, ffmpeg also encodes a third branch of the
-    same camera feed live to an RTMP target (see takeloom/streaming.py) —
-    for the same camera-exclusivity reason, this rides along on this
-    process rather than a separate one.
+    If on_stream_frame is given, ffmpeg also tees stream-quality MJPEG
+    (stream_width wide) out on a second pipe, handed to the callback frame
+    by frame, for the live stream (see video/stream_switcher.py) — for the
+    same camera-exclusivity reason, this rides along on this process
+    rather than a separate one.
     """
 
     def __init__(
@@ -140,13 +117,15 @@ class VideoRecorder:
         output_path: Path,
         framerate: int = 30,
         on_preview_frame: Callable[[bytes], None] | None = None,
-        stream_target: "StreamTarget | None" = None,
+        on_stream_frame: Callable[[bytes], None] | None = None,
+        stream_width: int = 1280,
     ) -> None:
         self.device = device
         self.output_path = output_path
         self.framerate = framerate
         self._on_preview_frame = on_preview_frame
-        self.stream_target = stream_target
+        self._on_stream_frame = on_stream_frame
+        self.stream_width = stream_width
         self._proc: subprocess.Popen | None = None
         self._preview_thread: threading.Thread | None = None
 
@@ -155,48 +134,31 @@ class VideoRecorder:
         if not ffmpeg_available():
             return False
         stream_preview = self._on_preview_frame is not None
-        cmd = _build_capture_cmd(self.device, self.output_path, self.framerate, stream_preview, self.stream_target)
+        stream_read_fd = stream_write_fd = None
+        if self._on_stream_frame is not None:
+            stream_read_fd, stream_write_fd = os.pipe()
+        cmd = _build_capture_cmd(
+            self.device, self.output_path, self.framerate, stream_preview, stream_write_fd, self.stream_width,
+        )
         self._proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE if stream_preview else subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            pass_fds=(stream_write_fd,) if stream_write_fd is not None else (),
         )
         if stream_preview:
             self._preview_thread = threading.Thread(
-                target=self._read_preview_frames, args=(self._proc,), daemon=True,
+                target=read_jpeg_frames, args=(self._proc.stdout, self._on_preview_frame), daemon=True,
             )
             self._preview_thread.start()
+        if stream_write_fd is not None:
+            os.close(stream_write_fd)  # ffmpeg holds its own copy; EOF comes when it exits
+            threading.Thread(
+                target=read_jpeg_frames, args=(os.fdopen(stream_read_fd, "rb"), self._on_stream_frame),
+                daemon=True,
+            ).start()
         return True
-
-    def _read_preview_frames(self, proc: subprocess.Popen) -> None:
-        """Split ffmpeg's raw MJPEG stdout stream into individual JPEG frames
-        (consecutive images, each delimited by its own SOI/EOI markers) and
-        hand each to on_preview_frame."""
-        buf = b""
-        try:
-            while True:
-                chunk = proc.stdout.read(4096)
-                if not chunk:
-                    return
-                buf += chunk
-                while True:
-                    start = buf.find(b"\xff\xd8")
-                    if start == -1:
-                        buf = b""
-                        break
-                    end = buf.find(b"\xff\xd9", start + 2)
-                    if end == -1:
-                        if start > 0:
-                            buf = buf[start:]
-                        break
-                    frame, buf = buf[start:end + 2], buf[end + 2:]
-                    try:
-                        self._on_preview_frame(frame)
-                    except Exception:
-                        pass
-        except (OSError, ValueError):
-            pass
 
     def stop(self, timeout: float = 10.0) -> bool:
         """Signal ffmpeg to finish and finalize the output file. Returns

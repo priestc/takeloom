@@ -8,8 +8,8 @@ two reasons:
 
 - the fallback session video, in case that upload never arrives (phone
   died, app killed, ...) — gaps where Wi-Fi dropped frames and all; and
-- live streaming to YouTube, the same extra ffmpeg branch VideoRecorder
-  adds for a local camera (see video/capture.py / streaming.py).
+- live streaming: stream-quality MJPEG frames for video/stream_switcher.py,
+  the same as VideoRecorder tees off a local camera (`on_stream_frame`).
 
 The phone's encoded H.264 is passed straight through (no decode) to the
 local file, written via a named pipe so ffmpeg reads it like any other
@@ -26,13 +26,11 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Callable
 
 from ..ffmpeg_bin import FFMPEG
+from ..video.mjpeg import read_jpeg_frames
 from .hub import PhoneCameraHub
-
-if TYPE_CHECKING:
-    from ..streaming import StreamTarget
 
 # About 10 s of 30 fps video. Past that the writer is hopelessly behind
 # (ffmpeg stalled): drop until the next keyframe rather than grow forever.
@@ -40,8 +38,7 @@ _MAX_QUEUED_FRAMES = 300
 
 
 def build_phone_capture_cmd(
-    video_fifo: Path, output_path: Path, framerate: int,
-    stream_target: "StreamTarget | None" = None, audio_delay_s: float = 0.0,
+    video_fifo: Path, output_path: Path, stream_frames_fd: int | None = None, stream_width: int = 1280,
 ) -> list[str]:
     cmd = [
         FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
@@ -49,17 +46,6 @@ def build_phone_capture_cmd(
         "-probesize", "1M", "-analyzeduration", "500000",
         "-f", "h264", "-i", str(video_fifo),
     ]
-    if stream_target is not None:
-        if audio_delay_s > 0:
-            # The live video reaches us late by however long capture +
-            # encode + Wi-Fi took; holding the mix back by the same amount
-            # keeps the stream lip-synced (hub's live_latency_ns).
-            cmd += ["-itsoffset", f"{audio_delay_s:.3f}"]
-        cmd += [
-            "-thread_queue_size", "1024",
-            "-f", "f32le", "-ar", str(stream_target.sample_rate), "-ac", str(stream_target.channels),
-            "-i", str(stream_target.audio_fifo),
-        ]
     # Same fragmented-MP4 reasoning as video/capture.py's _record_output_args
     # (playable however ffmpeg dies), but a stream copy — the phone already
     # encoded it.
@@ -67,20 +53,9 @@ def build_phone_capture_cmd(
         "-map", "0:v", "-c:v", "copy",
         "-movflags", "+frag_keyframe+empty_moov+default_base_moof", str(output_path),
     ]
-    if stream_target is not None:
-        stream_filter = f"scale={stream_target.width}:-2" if stream_target.width > 0 else "null"
-        bitrate = f"{stream_target.bitrate_kbps}k"
-        cmd += [
-            "-filter_complex", f"[0:v]{stream_filter},fps={framerate}[streamout]",
-            "-map", "[streamout]", "-map", "1:a",
-            # Same encoder settings as video/capture.py's stream branch —
-            # see the comment there for why no -tune zerolatency.
-            "-c:v", "libx264", "-preset", "veryfast",
-            "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", f"{stream_target.bitrate_kbps * 2}k",
-            "-g", str(framerate * 2), "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "160k", "-ar", "44100",
-            "-f", "flv", stream_target.rtmp_url,
-        ]
+    if stream_frames_fd is not None:
+        cmd += ["-map", "0:v", "-vf", f"scale={stream_width}:-2", "-f", "mjpeg", "-q:v", "3",
+                f"pipe:{stream_frames_fd}"]
     return cmd
 
 
@@ -94,13 +69,15 @@ class PhoneVideoRecorder:
         device_id: str,
         session_id: str,
         output_path: Path,
-        stream_target: "StreamTarget | None" = None,
+        on_stream_frame: Callable[[bytes], None] | None = None,
+        stream_width: int = 1280,
     ) -> None:
         self.hub = hub
         self.device_id = device_id
         self.session_id = session_id
         self.output_path = output_path
-        self.stream_target = stream_target
+        self._on_stream_frame = on_stream_frame
+        self.stream_width = stream_width
         # Per output file: several phones can be recording into one session.
         self._fifo = output_path.with_name(output_path.stem + ".h264.fifo")
         self._queue: queue.Queue = queue.Queue()
@@ -117,14 +94,22 @@ class PhoneVideoRecorder:
         info = self.hub.camera(self.device_id)
         if info is None or FFMPEG is None:
             return False
-        framerate = int(info.status.get("fps") or 30)
-        audio_delay_s = 0.0
-        if self.stream_target is not None and info.live_latency_ns:
-            audio_delay_s = max(0.0, min(2.0, info.live_latency_ns / 1e9))
         self._fifo.unlink(missing_ok=True)
         os.mkfifo(self._fifo)
-        cmd = build_phone_capture_cmd(self._fifo, self.output_path, framerate, self.stream_target, audio_delay_s)
-        self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        stream_read_fd = stream_write_fd = None
+        if self._on_stream_frame is not None:
+            stream_read_fd, stream_write_fd = os.pipe()
+        cmd = build_phone_capture_cmd(self._fifo, self.output_path, stream_write_fd, self.stream_width)
+        self._proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            pass_fds=(stream_write_fd,) if stream_write_fd is not None else (),
+        )
+        if stream_write_fd is not None:
+            os.close(stream_write_fd)
+            threading.Thread(
+                target=read_jpeg_frames, args=(os.fdopen(stream_read_fd, "rb"), self._on_stream_frame),
+                daemon=True,
+            ).start()
         self._writer = threading.Thread(target=self._write_frames, daemon=True)
         self._writer.start()
         self.hub.set_video_sink(self.device_id, self._on_frame)

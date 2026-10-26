@@ -91,6 +91,12 @@ class RemoteBackend(Backend):
     def session_cameras(self) -> list[tuple[str, str]]:
         return [tuple(c) for c in self._client.call("session_cameras", {})["cameras"]]
 
+    def get_program_camera(self) -> str:
+        return self._client.call("get_program_camera", {})["camera"]
+
+    def set_program_camera(self, camera_device: str) -> None:
+        self._client.call("set_program_camera", {"camera": camera_device})
+
     def camera_versions(self) -> dict[str, dict]:
         try:
             return self._client.call("camera_versions", {})["versions"]

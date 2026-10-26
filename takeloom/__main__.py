@@ -415,6 +415,21 @@ def install_launcher_command() -> None:
         raise SystemExit(1)
 
 
+@main.command(name="video-ui")
+@click.option(
+    "--remote", "remote_ip", default=None,
+    help="Connect to the takeloom server at this IP/host (e.g. --remote=192.168.1.200). Default: an "
+         "\"always connect\" remote, else a server running on this machine, else this machine itself.",
+)
+def video_ui_command(remote_ip: str | None) -> None:
+    """Open the video window: every camera along the top, the program
+    ("out") camera large in the middle. Click a camera (or press its number)
+    to make it the program camera, which the live stream shows; each switch
+    during a session is logged so the stream can be rebuilt."""
+    from .ui.video_ui import run
+    run(remote_ip=remote_ip)
+
+
 @main.command(name="detect-test")
 def detect_test_command() -> None:
     """Open a standalone window listing every configured instrument and

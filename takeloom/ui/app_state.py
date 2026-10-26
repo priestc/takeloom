@@ -27,6 +27,11 @@ class AppState:
         self.local_backend = LocalBackend()
         self.backend: Backend = self.local_backend
         self.remote_name: str = ""  # hostname of the connected remote; "" when backend is local
+        # Builds this window's UI on the root once connected — what
+        # app.py's handle_remote_disconnect rebuilds after a reconnect.
+        # None: the main tabbed UI (app.py's _build_tabs); the video-ui
+        # (video_ui.py) sets its own.
+        self.build_ui = None
         self._recording_active: bool = False
         self._listeners: list[Listener] = []
         # Local live monitoring is deliberately NOT started here — see

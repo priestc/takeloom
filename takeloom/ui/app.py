@@ -201,7 +201,7 @@ def handle_remote_disconnect(root: tk.Misc, app_state: AppState, host: str, port
 
     _show_connect_screen(
         root, app_state, host, port, token,
-        on_connected=lambda: _build_tabs(root, app_state, select_title="Record"),
+        on_connected=app_state.build_ui or (lambda: _build_tabs(root, app_state, select_title="Record")),
         initial_status=f"Disconnected ({reason}) — reconnecting to {host}...",
     )
 

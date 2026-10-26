@@ -145,6 +145,26 @@ musician, project, and date; that requires creating your own free Google Cloud O
 credentials. See [YouTube Streaming Setup](docs/youtube-streaming-setup.md) for the
 steps, and why it can't just be a one-click sign-in.
 
+### Video Window
+
+```bash
+takeloom video-ui
+```
+
+Opens the video operator's window: a thumbnail of every camera along the top (the
+main camera, any added on Recording Devices, and every connected Takeloom Camera
+phone) and the **program** ("out") camera large in the middle. Click a thumbnail, or
+press its number key, to make it the program camera. The live stream shows the
+program camera and switches the moment you pick another (no restart). During a
+session every switch is written to `session_log.json` as a `program_camera` event,
+with its position on the session's audio timeline, so the streamed video can be
+rebuilt afterwards from each camera's own recording. The program camera is the main
+camera until another is picked.
+
+Like the main window, it drives the Mac Mini's `takeloom server`: `--remote=IP`, an
+"always connect" remote, or a server running on the same machine. The main window
+keeps its video for now.
+
 ## Project Structure
 
 A project is just a setlist file — `<projects_dir>/My Album.json`. Everything else lives in

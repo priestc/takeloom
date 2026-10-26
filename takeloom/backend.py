@@ -994,6 +994,22 @@ class Backend(ABC):
         ...
 
     @abstractmethod
+    def get_program_camera(self) -> str:
+        """The program ("out") camera: the one the live stream shows, picked
+        in the video-ui. One of session_cameras()' devices — the main
+        camera until another is picked, or if the picked one is gone. ""
+        if there are no cameras."""
+        ...
+
+    @abstractmethod
+    def set_program_camera(self, camera_device: str) -> None:
+        """Make camera_device the program camera: the live stream switches
+        to it, and during a session the switch is logged (session_log.json's
+        "program_camera" events) so the streamed video can be rebuilt from
+        the cameras' recordings. Announced with "program_camera_changed"."""
+        ...
+
+    @abstractmethod
     def camera_versions(self) -> dict[str, dict]:
         """camera_device -> {"version", "latest", "outdated"} for each
         connected Takeloom Camera phone: the app version it's running, the
@@ -1337,7 +1353,8 @@ class _CameraPreviewManager:
             )
             return
         interval = 1.0 / self._fps
-        target_width = 320
+        from .video.capture import PREVIEW_WIDTH
+        target_width = PREVIEW_WIDTH
         # Some failure modes (e.g. macOS denying camera permission to this
         # process) leave isOpened() True but every read() failing forever —
         # treat a long unbroken run of failed reads the same as a failed open.
@@ -1427,6 +1444,9 @@ class _SessionEvent:
     # being changed later, and two voices recorded in the same session
     # file as distinctly as if they were different instruments.
     synth_voice: str = ""
+    # The camera a "program_camera" event switched the program feed to
+    # (a session_cameras() device). Empty for every other event.
+    camera: str = ""
 
     def to_dict(self) -> dict:
         d = {
@@ -1441,6 +1461,8 @@ class _SessionEvent:
             d["track_index"] = self.track_index
         if self.track_name:
             d["track_name"] = self.track_name
+        if self.camera:
+            d["camera"] = self.camera
         return d
 
 
@@ -1478,6 +1500,7 @@ class _ActiveSession:
     session_video_raw: Path | None = None
     session_mix_flac: Path | None = None
     stream_feeder: object | None = None  # LiveAudioFeeder, when streaming to YouTube is on for this session
+    stream_switcher: object | None = None  # video/stream_switcher.py's StreamSwitcher, likewise
     youtube_broadcast_id: str | None = None  # set when a titled broadcast was created/bound for this session
     video_start_wall_time: str | None = None
     video_start_track_name: str = ""
@@ -1809,6 +1832,9 @@ class LocalBackend(Backend):
             lambda: [device for device, _label in self.session_cameras()], on_error=self._on_preview_error,
         )
         self._phone_hub = None  # PhoneCameraHub, when attach_phone_camera_hub() is called
+        # The program camera picked in the video-ui (see get_program_camera);
+        # None until one is picked: the main camera.
+        self._program_camera: str | None = None
         # "Sticky" mixer levels: once the operator nudges backing/takes volume,
         # that level carries forward to every track loaded afterward (like a
         # mixing-console fader), instead of each track reverting to its own
@@ -1877,6 +1903,42 @@ class LocalBackend(Backend):
 
     def camera_versions(self) -> dict[str, dict]:
         return self._phone_hub.camera_versions() if self._phone_hub is not None else {}
+
+    def _resolve_program_camera(self, cameras: list[tuple[str, str]] | None = None) -> str:
+        cameras = self.session_cameras() if cameras is None else cameras
+        devices = [device for device, _label in cameras]
+        if self._program_camera in devices:
+            return self._program_camera
+        return devices[0] if devices else ""
+
+    def get_program_camera(self) -> str:
+        return self._resolve_program_camera()
+
+    def set_program_camera(self, camera_device: str) -> None:
+        cameras = self.session_cameras()
+        if camera_device not in [device for device, _label in cameras]:
+            raise BackendError(f"No such camera: {camera_device}")
+        with self._record_lock:
+            changed = camera_device != self._resolve_program_camera(cameras)
+            self._program_camera = camera_device
+            session = self._active_session
+            if session is not None and changed:
+                if session.stream_switcher is not None:
+                    session.stream_switcher.set_program(camera_device)
+                self._log_program_camera(session, camera_device, cameras)
+        if changed:
+            self._emit("program_camera_changed", {"camera": camera_device})
+
+    def _log_program_camera(self, session: "_ActiveSession", camera_device: str,
+                            cameras: list[tuple[str, str]]) -> None:
+        """A "program_camera" event: from this point on the session's
+        timeline (frame, like every event), the program feed — and the live
+        stream, if one's running — shows camera_device."""
+        label = next((lbl for device, lbl in cameras if device == camera_device), camera_device)
+        self._log_session_event(
+            "program_camera", f"label={label}; streaming={session.stream_switcher is not None}",
+            frame=session.engine.session_frames, camera=camera_device,
+        )
 
     def session_cameras(self) -> list[tuple[str, str]]:
         config = self.get_config()
@@ -4379,9 +4441,10 @@ class LocalBackend(Backend):
         if session.midi_input is not None:
             session.midi_input.close()
         if session.stream_feeder:
-            # Before video_recorder.stop() — see the matching comment in
-            # _end_session for why this order matters.
+            # Before the switcher — see the matching comment in _end_session.
             session.stream_feeder.stop()
+        if session.stream_switcher:
+            session.stream_switcher.stop()
         if session.video_recorder:
             session.video_recorder.stop()
         self._stop_extra_cameras(session)
@@ -5573,6 +5636,7 @@ class LocalBackend(Backend):
     def _log_session_event(
         self, event_type: str, details: str = "",
         frame: int | None = None, track_index: int | None = None, track_name: str = "",
+        camera: str = "",
     ) -> None:
         session = self._active_session
         if session is None:
@@ -5593,6 +5657,7 @@ class LocalBackend(Backend):
             instrument_label=session.inst.label,
             input_label=session.inst.input_label,
             synth_voice=synth_voice,
+            camera=camera,
         ))
         # Written to disk on every event, not just once at clean session
         # end — session_log.json used to only exist at all once
@@ -5767,6 +5832,7 @@ class LocalBackend(Backend):
         mix_start_frame = 0
         mix_start_ns = None
         stream_feeder = None
+        stream_switcher = None
         youtube_broadcast_id = None
         phone_mix_start_ns = None
         preview_paused = False
@@ -5785,6 +5851,54 @@ class LocalBackend(Backend):
                 self._preview.pause()
                 self._emit("preview_paused", {})
 
+        # The live stream: one StreamSwitcher (video/stream_switcher.py) fed
+        # stream-quality frames by every camera below, streaming whichever
+        # is the program camera (set_program_camera, from the video-ui).
+        if config.streaming_enabled and config.youtube_stream_key and cameras:
+            from .streaming import LiveAudioFeeder, StreamTarget, fifo_supported, youtube_rtmp_url
+            if fifo_supported():
+                from .video.stream_switcher import StreamSwitcher
+                stream_feeder = LiveAudioFeeder(
+                    session_dir / "stream_audio.fifo",
+                    sample_rate=config.sample_rate, channels=engine.output_channels,
+                )
+                stream_feeder.start()
+                stream_switcher = StreamSwitcher(StreamTarget(
+                    rtmp_url=youtube_rtmp_url(config.youtube_stream_key),
+                    audio_fifo=stream_feeder.fifo_path,
+                    sample_rate=config.sample_rate, channels=engine.output_channels,
+                    width=config.streaming_video_width, bitrate_kbps=config.streaming_bitrate_kbps,
+                ), program=self._resolve_program_camera(cameras), log_path=session_dir / "stream.log")
+                # Bind a freshly titled broadcast before ffmpeg starts
+                # pushing RTMP, so it's already in place once data starts
+                # flowing (see _create_youtube_broadcast). Best-effort:
+                # title automation failing never blocks the stream itself.
+                if (
+                    config.youtube_oauth_client_id
+                    and config.youtube_oauth_client_secret
+                    and config.youtube_oauth_refresh_token
+                ):
+                    youtube_broadcast_id = self._create_youtube_broadcast(config, project, inst)
+                if not stream_switcher.start():
+                    stream_switcher = None
+            else:
+                self._emit("streaming_status", {
+                    "status": "Live streaming isn't supported on this platform.", "active": False,
+                })
+        elif config.streaming_enabled and config.youtube_stream_key:
+            self._emit("streaming_status", {
+                "status": "Streaming needs a camera — set one up on the Recording Devices tab.", "active": False,
+            })
+
+        def stream_tee(device: str) -> dict:
+            """A camera recorder's keyword arguments for feeding the stream."""
+            if stream_switcher is None:
+                return {}
+            return {
+                "on_stream_frame": lambda jpeg, d=device: stream_switcher.push_frame(d, jpeg),
+                "stream_width": stream_switcher.stream_width,
+            }
+
         if use_phone and (
             self._phone_hub is None or self._phone_hub.camera(phone_device_id(camera_device)) is None
         ):
@@ -5798,38 +5912,6 @@ class LocalBackend(Backend):
                     pause_preview()
                 session_video_raw = session_dir / "session_video_raw.mp4"
                 session_mix_flac = session_dir / "session_mix.flac"
-
-                stream_target = None
-                if config.streaming_enabled and config.youtube_stream_key:
-                    from .streaming import LiveAudioFeeder, StreamTarget, fifo_supported, youtube_rtmp_url
-                    if fifo_supported():
-                        stream_feeder = LiveAudioFeeder(
-                            session_dir / "stream_audio.fifo",
-                            sample_rate=config.sample_rate, channels=engine.output_channels,
-                        )
-                        stream_feeder.start()
-                        stream_target = StreamTarget(
-                            rtmp_url=youtube_rtmp_url(config.youtube_stream_key),
-                            audio_fifo=stream_feeder.fifo_path,
-                            sample_rate=config.sample_rate, channels=engine.output_channels,
-                            width=config.streaming_video_width, bitrate_kbps=config.streaming_bitrate_kbps,
-                        )
-                        # Bind a freshly titled broadcast before ffmpeg starts
-                        # pushing RTMP, so it's already in place once data
-                        # starts flowing (see _create_youtube_broadcast).
-                        # Best-effort: title automation failing never blocks
-                        # the stream itself.
-                        if (
-                            config.youtube_oauth_client_id
-                            and config.youtube_oauth_client_secret
-                            and config.youtube_oauth_refresh_token
-                        ):
-                            youtube_broadcast_id = self._create_youtube_broadcast(config, project, inst)
-                    else:
-                        stream_feeder = None
-                        self._emit("streaming_status", {
-                            "status": "Live streaming isn't supported on this platform.", "active": False,
-                        })
 
                 # on_preview_frame tees a low-res copy of every frame back
                 # through _CameraPreviewManager (see push_external_frame) —
@@ -5845,13 +5927,13 @@ class LocalBackend(Backend):
                     self._phone_hub.expect_upload(session_dir.name, session_dir, device_id)
                     video_recorder = PhoneVideoRecorder(
                         self._phone_hub, device_id, session_dir.name, session_video_raw,
-                        stream_target=stream_target,
+                        **stream_tee(camera_device),
                     )
                 else:
                     video_recorder = VideoRecorder(
                         camera_device, session_video_raw,
                         on_preview_frame=lambda jpeg, d=camera_device: self._preview.push_external_frame(d, jpeg),
-                        stream_target=stream_target,
+                        **stream_tee(camera_device),
                     )
                 if video_recorder.start():
                     # Where the mix/video timeline begins on the session-audio
@@ -5863,28 +5945,11 @@ class LocalBackend(Backend):
                     if use_phone:
                         phone_mix_start_ns = mix_start_ns
                     video_start_wall_time = wall_timestamp()
-                    if stream_feeder is not None:
-                        engine.set_stream_sink(stream_feeder.push)
-                        self._emit("streaming_status", {"status": "Streaming live to YouTube.", "active": True})
                 else:
                     video_recorder = None
                     session_video_raw = None
-                    if stream_feeder is not None:
-                        stream_feeder.stop()
-                        stream_feeder = None
-                    if youtube_broadcast_id is not None:
-                        # ffmpeg never actually started, so RTMP data never
-                        # flows and enableAutoStart never fires — without
-                        # this the broadcast would sit orphaned in YouTube
-                        # Studio forever instead of ending itself.
-                        self._complete_youtube_broadcast(config, youtube_broadcast_id)
-                        youtube_broadcast_id = None
                     if use_phone:
                         self._phone_hub.forget_upload(session_dir.name, device_id)
-        elif config.streaming_enabled and config.youtube_stream_key:
-            self._emit("streaming_status", {
-                "status": "Streaming needs a camera — set one up on the Recording Devices tab.", "active": False,
-            })
 
         # Every other camera: started after the main one and the mix, so the
         # main camera's timing (what the hand-tuned offset was measured
@@ -5900,7 +5965,9 @@ class LocalBackend(Backend):
                 from .phone_camera.recorder import PhoneVideoRecorder
                 upload_file = f"{stem}_phone.mp4"
                 self._phone_hub.expect_upload(session_dir.name, session_dir, device_id, upload_file)
-                recorder = PhoneVideoRecorder(self._phone_hub, device_id, session_dir.name, session_dir / raw_file)
+                recorder = PhoneVideoRecorder(
+                    self._phone_hub, device_id, session_dir.name, session_dir / raw_file, **stream_tee(device),
+                )
                 if recorder.start():
                     extra_cameras.append(_ExtraCameraRecording(
                         device, label, recorder, raw_file, final_file, upload_file,
@@ -5912,6 +5979,7 @@ class LocalBackend(Backend):
                 recorder = VideoRecorder(
                     device, session_dir / raw_file,
                     on_preview_frame=lambda jpeg, d=device: self._preview.push_external_frame(d, jpeg),
+                    **stream_tee(device),
                 )
                 if recorder.start():
                     extra_cameras.append(_ExtraCameraRecording(device, label, recorder, raw_file, final_file))
@@ -5930,6 +5998,24 @@ class LocalBackend(Backend):
             self._preview.resume()
             self._emit("preview_resumed", {})
 
+        if stream_switcher is not None and (video_recorder is not None or extra_cameras):
+            engine.set_stream_sink(stream_feeder.push)
+            self._emit("streaming_status", {"status": "Streaming live to YouTube.", "active": True})
+        elif stream_feeder is not None:
+            # No camera actually started: nothing to stream.
+            stream_feeder.stop()
+            if stream_switcher is not None:
+                stream_switcher.stop()
+            stream_feeder = stream_switcher = None
+            if youtube_broadcast_id is not None:
+                # RTMP data never flows, so enableAutoStart never fires —
+                # without this the broadcast would sit orphaned in YouTube
+                # Studio forever instead of ending itself.
+                self._complete_youtube_broadcast(config, youtube_broadcast_id)
+                youtube_broadcast_id = None
+            self._emit("streaming_status", {"status": "No camera started, so nothing is streaming.",
+                                            "active": False})
+
         engine.set_on_song_end(self._on_song_naturally_ended)
         self._active_session = _ActiveSession(
             engine=engine, project=project, inst=inst, midi_input=midi_input, session_dir=session_dir,
@@ -5939,7 +6025,7 @@ class LocalBackend(Backend):
             session_flac=session_flac, session_video=session_dir / "session_video.mp4",
             video_recorder=video_recorder, session_video_raw=session_video_raw,
             session_mix_flac=session_mix_flac, video_start_wall_time=video_start_wall_time,
-            mix_start_frame=mix_start_frame, stream_feeder=stream_feeder,
+            mix_start_frame=mix_start_frame, stream_feeder=stream_feeder, stream_switcher=stream_switcher,
             youtube_broadcast_id=youtube_broadcast_id,
             phone_mix_start_ns=phone_mix_start_ns,
             extra_cameras=extra_cameras, mix_start_ns=mix_start_ns, preview_paused=preview_paused,
@@ -5948,6 +6034,8 @@ class LocalBackend(Backend):
             midi_log=midi_log,
         )
         self._log_session_event("session_start", f"instrument={inst.full_name}")
+        if cameras:
+            self._log_program_camera(self._active_session, self._resolve_program_camera(cameras), cameras)
 
     def end_session(self) -> None:
         self._end_session(missing_ok=False)
@@ -5987,20 +6075,18 @@ class LocalBackend(Backend):
             self._start_monitoring_locked()
 
             if session.stream_feeder:
-                # Closes the FIFO before video_recorder.stop() sends ffmpeg
-                # its 'q' — ffmpeg's demuxer can be sitting in a blocking
-                # read() on the audio FIFO input waiting for more data (there
-                # won't be any, now that set_stream_sink(None) above stopped
-                # feeding it), and 'q' on stdin only gets noticed once ffmpeg
-                # is back in its main loop; closing this first delivers EOF
-                # on that read() so it returns and 'q' actually lands instead
-                # of ffmpeg hanging indefinitely.
+                # Closes the FIFO before the stream switcher's ffmpeg is told
+                # to finish — its demuxer can be sitting in a blocking read()
+                # on the audio FIFO waiting for more data (there won't be
+                # any, now that set_stream_sink(None) above stopped feeding
+                # it); closing this first delivers EOF on that read(), so
+                # ffmpeg sees both inputs end and finishes instead of hanging.
                 session.stream_feeder.stop()
+            if session.stream_switcher:
+                # Ends the RTMP connection.
+                session.stream_switcher.stop()
                 self._emit("streaming_status", {"status": "Stream ended.", "active": False})
             if session.video_recorder:
-                # Ends the RTMP connection too, if streaming was on: it's the
-                # same ffmpeg process (see _begin_session_locked), and this
-                # stop() is what finalizes it.
                 if not session.video_recorder.stop():
                     self._emit("recording_status", {
                         "status": "Camera recording didn't stop cleanly (camera powered off?) — "
