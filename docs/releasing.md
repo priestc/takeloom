@@ -40,8 +40,15 @@ Every few development days, make a release:
 
 or Actions tab → Release → Run workflow. It tags the current `main` as the
 next version, builds and smoke-tests it, pushes the tag, and publishes a
-GitHub release with the commits since the previous release. Each
-distribution channel (PyPI, the Homebrew tap, the apt repository, Flathub,
-the app stores) is published from this same workflow as it's added.
+GitHub release with the commits since the previous release. Then it sends
+the release to each distribution channel:
+
+- **PyPI** (`pipx install takeloom`): trusted publishing, so no token is
+  stored. PyPI's takeloom project trusts workflow `release.yml` in the
+  GitHub environment `pypi`. Renaming either breaks publishing until the
+  publisher settings on pypi.org are updated to match.
+
+The Homebrew tap, the apt repository, Flathub and the app stores get added
+here the same way.
 
 It refuses to run if `main` is already exactly a release.

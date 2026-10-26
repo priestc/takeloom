@@ -88,3 +88,20 @@ jobs:
         with:
           name: dist
           path: dist/
+
+  pypi:
+    # Trusted publishing: PyPI's takeloom project trusts this repo's
+    # release.yml in the "pypi" environment, so no token is stored anywhere.
+    needs: release
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/takeloom/${{ needs.release.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

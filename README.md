@@ -15,9 +15,13 @@ See [Prerequisites](docs/prerequisites.md) for install instructions for each ope
 ## Install
 
 ```bash
-pipx install git+https://github.com/priestc/takeloom.git
+pipx install takeloom
 takeloom install-launcher
 ```
+
+That's the latest release from PyPI. To follow every commit on `main`
+instead (and auto-update to it on each launch):
+`pipx install git+https://github.com/priestc/takeloom.git`
 
 `takeloom install-launcher` adds Takeloom to the Applications folder
 (macOS) or to the applications menu and desktop (Linux), so the UI opens
