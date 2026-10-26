@@ -50,12 +50,12 @@ modules:
       - -Denable-systemd=OFF
       - -Denable-openmp=OFF
     sources:
-      # git, not the release tarball: 2.6 vendors gcem as a submodule,
-      # which GitHub's tarballs leave out (and the build can't download).
-      - type: git
-        url: https://github.com/FluidSynth/fluidsynth.git
-        tag: v2.6.1
-        commit: 71e85b2ca6bf48641ba7e2261d8f2640ae473773
+      # 2.4, not 2.5+: those pull libraries in at build time (a gcem git
+      # submodule, signalsmith-linear via CMake FetchContent), which the
+      # offline build can't do. takeloom only needs the basic synth.
+      - type: archive
+        url: https://github.com/FluidSynth/fluidsynth/archive/refs/tags/v2.4.8.tar.gz
+        sha256: d6d04e9014557906ee42aa1fe3cd580840ea482d4c3b1a45fddd45ec606d6e97
 
   - name: hidapi
     buildsystem: cmake-ninja
