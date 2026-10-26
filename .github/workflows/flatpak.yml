@@ -80,11 +80,14 @@ jobs:
         run: |
           set -x
           flatpak install --user -y --noninteractive bundles/*.flatpak
-          # Which bundled libraries the dynamic loader can see (diagnostic).
-          flatpak run --command=sh $APP -c 'ls /app/lib; ldconfig -p | grep -iE "fluid|portaudio|hidapi"' || true
+          # The native libraries built in the manifest are all where the
+          # loader looks (the Python bindings find them through it).
+          for lib in libportaudio.so.2 libfluidsynth.so.3 libhidapi-libusb.so.0 libhidapi-hidraw.so.0; do
+            flatpak run --command=sh $APP -c "ldconfig -p | grep -q '$lib'" || { echo "$lib not on the library path"; exit 1; }
+          done
           flatpak run $APP --help
           flatpak run --command=/app/python/bin/python3 $APP -c \
-            "import cv2, numpy, sounddevice, soundfile, fluidsynth, StreamDeck.DeviceManager, PIL.ImageTk, tkinterdnd2; from takeloom import update_check as u; assert u.install_kind() == 'packaged'"
+            "import cv2, numpy, sounddevice, soundfile, fluidsynth, PIL.ImageTk, tkinterdnd2; from StreamDeck.DeviceManager import DeviceManager; DeviceManager().enumerate(); from takeloom import update_check as u; assert u.install_kind() == 'packaged'"
           # The real UI, no hardware attached: still running after 20 s
           # (timeout's 124) = it came up.
           status=0
