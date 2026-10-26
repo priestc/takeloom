@@ -62,8 +62,11 @@ ostree init --mode=archive-z2 --repo="$FP/repo"
 for bundle in "$FLATPAKS"/*.flatpak; do
   flatpak build-import-bundle --gpg-sign="$KEY" --gpg-homedir="$GNUPGHOME" "$FP/repo" "$bundle"
 done
+# No --generate-static-deltas: they'd roughly double the repository's size,
+# and GitHub Pages sites are capped at 1 GB (the .debs share it).
 flatpak build-update-repo --gpg-sign="$KEY" --gpg-homedir="$GNUPGHOME" \
-  --title="takeloom" --default-branch=stable --generate-static-deltas --prune "$FP/repo"
+  --title="takeloom" --default-branch=stable --prune "$FP/repo"
+du -sh "$SITE"/*
 gpgkey=$(gpg --batch --export "$KEY" | base64 -w0)
 cat > "$FP/takeloom.flatpakrepo" <<REPO
 [Flatpak Repo]
