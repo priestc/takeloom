@@ -273,10 +273,38 @@ def setup_recording_devices() -> None:
 def ui_command(remote_ip: str | None) -> None:
     """Launch the graphical Takeloom interface."""
     from . import update_check
-    update_check.check_and_restart(log=click.echo)
+    update_check.check_and_restart(StudioConfig.load(), log=click.echo)
 
     from .ui.app import run
     run(remote_ip=remote_ip)
+
+
+@main.command(name="dev-mode")
+@click.argument("state", required=False, type=click.Choice(["on", "off"]))
+def dev_mode_command(state: str | None) -> None:
+    """Show or set development mode: follow GitHub's main, updating on each
+    launch of the UI, instead of releases. Takes effect next launch."""
+    from . import update_check
+    config = StudioConfig.load()
+    kind = update_check.install_kind()
+    if not update_check.development_mode_available():
+        if kind == "editable":
+            click.echo("This is an editable install: it always runs its working copy, so "
+                       "development mode doesn't apply.")
+        else:
+            click.echo("Development mode needs a pipx install (pipx install takeloom); this copy "
+                       "is updated by whatever installed it.")
+        if state is not None:
+            raise SystemExit(1)
+        return
+    if state is not None:
+        config.development_mode = state == "on"
+        config.save()
+    on = update_check.development_mode_enabled(config)
+    following = "GitHub's main" if kind == "git" else "a release"
+    click.echo(f"Development mode is {'on' if on else 'off'} (currently installed from {following}).")
+    if state is not None and on != (kind == "git"):
+        click.echo("Takeloom switches over the next time the UI opens.")
 
 
 @main.command(name="install-launcher")
@@ -300,7 +328,7 @@ def detect_test_command() -> None:
     it's built on (see Backend.start_detect_all's docstring) — there's no
     --remote option."""
     from . import update_check
-    update_check.check_and_restart(log=click.echo)
+    update_check.check_and_restart(StudioConfig.load(), log=click.echo)
 
     from .ui.detect_test import run
     run()

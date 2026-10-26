@@ -1,11 +1,25 @@
 # Builds and releases
 
 Development is unchanged: commits go straight to `main`, the Mac Mini runs
-an editable install of this working copy, and the laptop's `takeloom ui`
-reinstalls from `main` via pipx whenever it's behind (`update_check.py`).
-That self-update only ever applies to a pipx-from-git install. A package
-manager's install (PyPI, Homebrew, apt, ...) has no git commit recorded,
-so takeloom leaves updating it to the package manager.
+an editable install of this working copy, and the laptop follows `main`
+in development mode.
+
+## Development mode
+
+A pipx install can follow GitHub's `main` instead of releases: on each
+launch, `takeloom ui` reinstalls from `main` if it's moved, and restarts
+(`update_check.py`). Turn it on or off in the Remote tab's "This
+Computer's Takeloom" section, or with `takeloom dev-mode on|off`. It takes
+effect the next time the UI opens:
+
+- on, in a release install: switches to `main`;
+- off, in a `main` install: switches back to the latest PyPI release;
+- never set: on for a `main` install, so existing ones keep updating.
+
+With it off, nothing is checked at launch. Installs that pipx doesn't
+manage (Homebrew, apt, the App Store) don't have development mode; their
+package manager updates them. The Mac Mini's editable install always runs
+its working copy, so it doesn't either.
 
 ## Versions
 

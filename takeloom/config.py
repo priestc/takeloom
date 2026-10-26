@@ -284,6 +284,10 @@ class StudioConfig:
     youtube_title_template: str = "{date} * {musician} * {project}"
     youtube_description_template: str = "{studio}, {studio-location}, {instrument name}"
     youtube_broadcast_visibility: str = "unlisted"  # "public" | "unlisted" | "private"
+    # This computer's install follows GitHub's main, updating on each
+    # launch (see update_check.py). None = never set: on for an install
+    # that's already following main, off otherwise.
+    development_mode: bool | None = None
     window_width: int = 1100  # remembered main window size, so it reopens as it was left
     window_height: int = 650
     known_remotes: list[KnownRemote] = field(default_factory=list)  # remotes this machine can connect to
