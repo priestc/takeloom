@@ -73,6 +73,30 @@ the release to each distribution channel:
   static ffmpeg at install time (see `ffmpeg_bin.py`). `brew install
   --HEAD` builds `main` instead.
 
-The apt repository, Flathub and the app stores get added here the same way.
+- **apt** (Debian/Ubuntu, amd64 + arm64): `deb.yml` builds a `.deb` per
+  architecture (`packaging/deb/build_deb.sh`) and test-installs each on
+  clean Debian 12, Ubuntu 22.04 and Ubuntu 24.04 containers, including
+  launching the UI under Xvfb. The `.deb`s are attached to the release.
+  Then `apt-repo.yml` indexes them and signs the index
+  (`packaging/apt/build_repo.sh`, key in the `APT_SIGNING_KEY` secret),
+  deploys it to GitHub Pages at <https://priestc.github.io/takeloom/apt>,
+  and installs from it in a clean container. The repository always holds
+  the latest release; older `.deb`s stay on their GitHub releases.
+
+  Each `.deb` carries its own Python (a pinned python-build-standalone
+  build, in `/opt/takeloom`), so one package fits every Debian/Ubuntu
+  release. System libraries, ffmpeg included, come from apt. Bumping the
+  bundled Python means editing `PBS_RELEASE`, `PBS_PYTHON` and the
+  checksums at the top of `build_deb.sh`.
+
+  The signing key also lives in the Mac Mini's GPG keyring
+  (`gpg --list-secret-keys "takeloom apt repository"`). That's the backup:
+  replacing the key means every apt user has to re-download it.
+
+  Daily builds attach `.deb`s to their pre-release too, but never publish
+  to the apt repository. To try a packaging change without releasing:
+  `gh workflow run deb.yml`.
+
+Flathub and the app stores get added here the same way.
 
 It refuses to run if `main` is already exactly a release.

@@ -21,7 +21,8 @@ takeloom install-launcher
 
 That's the latest release from PyPI. Or with Homebrew (macOS/Linux), which
 also installs the system libraries takeloom needs:
-`brew install priestc/takeloom/takeloom`. To follow every commit on `main`
+`brew install priestc/takeloom/takeloom`. Or with apt (Debian/Ubuntu): see
+<https://priestc.github.io/takeloom/>. To follow every commit on `main`
 instead (and auto-update to it on each launch):
 `pipx install git+https://github.com/priestc/takeloom.git`
 
