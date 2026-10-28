@@ -2,8 +2,10 @@
 Wall-mounted phone mount (Command-strip) — parametric generator.
 
 Three printed parts, joined with 2x M5x16 bolts + 2x M5 hex nuts:
-  1. wall_plate   – flat back sticks to Command strips; horizontal fin = PAN joint
-  2. arm          – horizontal disc (pan) -> vertical disc (TILT)
+  1. wall_plate   – flat back sticks to Command strips; horizontal fin = PAN joint.
+                    Pan bolt head sits UNDER the fin (reach it from below when mounted high).
+  2. arm          – horizontal disc (pan) -> vertical disc (TILT); both nuts are in the arm
+                    (top of the pan boss, outer face of the tilt plate).
   3. cradle       – phone's back lies flat against a solid front plate; camera
                     bump overhangs the open end. Loads "lift-and-hook" from the
                     screen side: top edge up under the deep lip, swing the bottom
@@ -34,6 +36,7 @@ LIP_BOT = 4.0       # lower front lip height
 BOLT_R = 2.75       # M5 clearance
 NUT_R = 8.4 / np.sqrt(3)   # M5 nut, 8mm AF + clearance -> circumradius
 NUT_D = 4.2
+PAN_BOSS_T = 8.0    # arm thickness at the pan joint (room for the nut pocket on top)
 DISC_R = 12.0
 JOINT_T = 6.0       # pan fin / cradle tongue thickness
 ARM_PLATE_T = 8.0   # arm's vertical (tilt) plate thickness
@@ -89,11 +92,10 @@ def wall_plate():
                             (PLATE_T + 12, zc - JOINT_T)]])
     gusset = yz_extrude(gus_cs, -2, 2)
     m = plate + fin + gusset
-    # pan bolt hole (vertical in use, horizontal in print -> teardrop)
+    # pan bolt hole (vertical in use, horizontal in print -> teardrop).
+    # Bolt goes in from BELOW: head on the fin's underside, nut on top of the arm.
     hole = teardrop(BOLT_R, 40).translate([0, piv_y, zc - 20])
-    nut = CrossSection.circle(NUT_R, 6).rotate(30).extrude(NUT_D + 0.01) \
-        .translate([0, piv_y, zc - JOINT_T - 0.01])
-    m = m - hole - nut
+    m = m - hole
     # print orientation: back face (y=0) on bed -> rotate so +Y becomes +Z
     return m, m.rotate([-90, 0, 0]).rotate([180, 0, 0])
 
@@ -105,12 +107,20 @@ def arm():
     vplate_cs = CrossSection.batch_hull([rect2(ARM_LEN - 12, ARM_LEN + 8, 0, JOINT_T),
                                          circ(DISC_R, ARM_LEN, tz)])
     vplate = yz_extrude(vplate_cs, -ARM_PLATE_T / 2, ARM_PLATE_T / 2)
-    m = bar + vplate
+    boss = Manifold.cylinder(PAN_BOSS_T, DISC_R, DISC_R, SEG)
+    m = bar + vplate + boss
     m = m - Manifold.cylinder(40, BOLT_R, BOLT_R, SEG).translate([0, 0, -5])
+    # pan nut: hex pocket in the top of the boss (pan bolt comes up from under the wall-plate fin)
+    m = m - CrossSection.circle(NUT_R, 6).extrude(NUT_D + 0.01).translate([0, 0, PAN_BOSS_T - NUT_D])
     # tilt hole along X, teardrop point toward +Z
     th = teardrop(BOLT_R, 40)            # along z, point +y
     th = th.transform(np.array([[0, 0, 1, -20], [1, 0, 0, ARM_LEN], [0, 1, 0, tz]]))
     m = m - th
+    # tilt nut: hex pocket in the arm plate's outer face (-x). The bolt head is on the
+    # cradle side, facing the cradle's open end where the phone slides in.
+    # One hex corner points up so the pocket prints without support.
+    tnut = CrossSection.circle(NUT_R, 6).rotate(90)
+    m = m - yz_extrude(tnut.translate([ARM_LEN, tz]), -ARM_PLATE_T / 2 - 0.01, -ARM_PLATE_T / 2 + NUT_D)
     return m, m, tz
 
 
@@ -159,10 +169,8 @@ def cradle():
     tongue_cs = CrossSection.batch_hull([rect2(-w, T + w, -w - 1, -w), circ(DISC_R, ay, az)])
     tongue = yz_extrude(tongue_cs, -w, -w + JOINT_T)
     m = m + tongue
+    # tilt bolt hole; the bolt HEAD sits on the tongue's open-end face (+x)
     m = m - Manifold.cylinder(40, BOLT_R, BOLT_R, SEG).rotate([0, 90, 0]).translate([-20, ay, az])
-    nut = CrossSection.circle(NUT_R, 6).extrude(NUT_D + 0.01).rotate([0, 90, 0]) \
-        .translate([-w + JOINT_T - NUT_D, ay, az])
-    m = m - nut
     # print orientation: closed end on the bed (+X up). x=-w face -> z=0
     pr = m.translate([w, 0, 0]).rotate([0, -90, 0])
     pr = pr.translate([0, 0, -pr.bounding_box()[2]])
@@ -204,6 +212,7 @@ if __name__ == "__main__":
     _, am_p, _ = arm()
     _, cr_p, _ = cradle()
     for name, m in [("wall_plate", on_bed(wp_p)), ("arm", on_bed(am_p)),
+                    ("arm_left", on_bed(am_p.mirror([1, 0, 0]))),   # tilt nut on the other face
                     ("cradle_right", on_bed(cr_p)),
                     ("cradle_left", on_bed(cr_p.mirror([1, 0, 0])))]:
         t = to_trimesh(m)

@@ -4,7 +4,7 @@ A 3D-printable wall mount that holds a phone in landscape for filming. It sticks
 
 | Version | Joints | Status |
 |---|---|---|
-| [v1](v1/) | Pan + tilt, clamped with 2× M5 bolts | Printed and tested |
+| [v1](v1/) | Pan + tilt, clamped with 2× M5 bolts | Printed and tested; bolt direction since flipped for high mounting |
 | [v2](v2/) | Pan + tilt, magnetic toothed joints (12× 5×2 mm magnets), no bolts | Designed, not yet printed |
 
 ![v1 with an iPhone 16 Pro Max](v1/images/phones.png)

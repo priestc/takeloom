@@ -3,10 +3,17 @@
 Three printed parts joined by two M5 bolts:
 
 1. **Wall plate** — sticks to the wall with Command strips. A horizontal fin forms the **pan** joint.
-2. **Arm** — 30 mm between pivots. Flat disc at the wall end (pan), upright disc at the far end (**tilt**).
+2. **Arm** — 30 mm between pivots. Flat disc at the wall end (pan), upright disc at the far end (**tilt**). Both nuts sit in the arm.
 3. **Cradle** — holds the phone in landscape. The phone's back lies flat against a diamond-mesh front plate, and the camera bump hangs just past the open end.
 
 ![Renders](images/phones.png)
+
+Both bolt heads face the directions you reach from when the mount is up high:
+
+- **Pan bolt:** the head is **under** the wall-plate fin, so you can adjust it from below.
+- **Tilt bolt:** the head is on the cradle's **open-end** side, where the phone slides in.
+
+![Bolt orientation](images/bolts.png)
 
 ## Files
 
@@ -14,14 +21,15 @@ Three printed parts joined by two M5 bolts:
 |---|---|
 | `3mf/phone_mount_plate_right.3mf` | All three parts on one plate, ready for Bambu Studio |
 | `3mf/phone_mount_plate_left.3mf` | Same, with the mirrored cradle |
-| `stl/wall_plate.stl`, `stl/arm.stl` | Individual parts, already in print orientation |
-| `stl/cradle_right.stl`, `stl/cradle_left.stl` | The cradle and its mirror image — print one |
+| `stl/wall_plate.stl` | Wall plate, already in print orientation |
+| `stl/arm.stl`, `stl/arm_left.stl` | Arm for the right cradle, and its mirror image for the left cradle |
+| `stl/cradle_right.stl`, `stl/cradle_left.stl` | The cradle and its mirror image — print one, with the matching arm |
 | `src/wall_phone_mount.py` | Parametric generator for all parts |
 | `src/fitcheck.py` | 2D simulation that checks a phone can be loaded and removed |
 
 ### Left or right cradle?
 
-The cradle attaches to the arm at one end, so the phone sticks out to one side of the pivot. It can swing about 90° away from the wall but only 15–20° toward it. Pick the side that points the long end away from the wall. For straight-on filming (a few degrees of swivel), either one works.
+The cradle attaches to the arm at one end, so the phone sticks out to one side of the pivot. It can swing about 90° away from the wall but only 15–20° toward it. Pick the side that points the long end away from the wall. For straight-on filming (a few degrees of swivel), either one works. Print the matching arm: `arm.stl` with the right cradle, `arm_left.stl` with the left (the 3MF plates already pair them).
 
 ## Hardware
 
@@ -48,10 +56,11 @@ When you open the 3MF, Bambu Studio says *"The 3mf file has invalid config, load
 
 ## Assembly
 
-1. Press the M5 nuts into the hex pockets: one under the wall-plate fin, one in the cradle's tongue.
-2. Bolt the arm onto the fin (pan) and the cradle onto the arm (tilt), bolt heads on the arm side.
-3. Clean the wall and the back of the plate with rubbing alcohol. Apply the Command strips with the pull tabs hanging below the plate, press for 30 s, and wait an hour before loading a phone.
-4. Loosen both bolts slightly, aim, and snug them down.
+1. Press the two M5 nuts into the hex pockets in the arm: one in the top of the round pan boss, one in the outer face of the upright tilt plate (the face away from the cradle).
+2. **Pan:** set the arm on top of the wall-plate fin and push the bolt up **from underneath** the fin, through the fin and arm, into the nut.
+3. **Tilt:** hold the cradle's tongue against the arm's upright plate and push the bolt in **from the cradle's open-end side**, through the tongue and the plate, into the nut.
+4. Clean the wall and the back of the plate with rubbing alcohol. Apply the Command strips with the pull tabs hanging below the plate, press for 30 s, and wait an hour before loading a phone.
+5. Loosen both bolts slightly, aim, and snug them down. With the mount up high, you reach the pan bolt from below and the tilt bolt from the phone's open end.
 
 ## Loading the phone
 
