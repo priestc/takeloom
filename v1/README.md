@@ -23,7 +23,7 @@ For a mount up high, the suggested setup (shown below) puts the **pan head under
 
 | Path | What it is |
 |---|---|
-| `3mf/phone_mount_v1_right_project.3mf` | **Bambu Studio project, ready to print**: H2D, Generic PETG, 4 walls, 30% gyroid, 5 mm brim, plus 100% infill on the arm and wall plate and a 100% infill modifier on the cradle's bottom 10 mm |
+| `3mf/phone_mount_v1_right_project.3mf` | **Bambu Studio project, ready to print**: H2D, Generic PETG, 4 walls, 30% gyroid, 5 mm brim, plus a 100% infill cylinder modifier around each bolt (one on the wall-plate fin, two on the arm, one on the cradle tongue) |
 | `3mf/phone_mount_v1_right_captive_nuts_project.3mf` | Same, with the captive-nut arm and both nut pauses (7.20 and 25.20 mm) already added |
 | `3mf/..._left_project.3mf`, `..._left_captive_nuts_project.3mf` | Left-cradle versions of both projects |
 | `3mf/phone_mount_plate_right.3mf` | All three parts on one plate, geometry only (any slicer) |
