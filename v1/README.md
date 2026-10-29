@@ -33,7 +33,7 @@ The cradle attaches to the arm at one end, so the phone sticks out to one side o
 
 ## Hardware
 
-- 2× **M5 × 16 mm** bolts (socket head, or thumb screws for tool-free aiming)
+- 2× **M5 × 16 mm Phillips pan-head** machine screws (up to ~10 mm head diameter fits; thumb screws also work for tool-free aiming)
 - 2× **M5 hex nuts**, standard 8 mm across flats. Nylon-insert lock nuts are too thick for the pockets.
 - Optional: 2× M5 flat washers
 - 1–2× **Command Large** strips (the plate is 46 × 80 mm; two side by side is best)
