@@ -23,7 +23,10 @@ For a mount up high, the suggested setup (shown below) puts the **pan head under
 
 | Path | What it is |
 |---|---|
-| `3mf/phone_mount_plate_right.3mf` | All three parts on one plate, ready for Bambu Studio |
+| `3mf/phone_mount_v1_right_project.3mf` | **Bambu Studio project, ready to print**: H2D, Generic PETG, 4 walls, 30% gyroid, 5 mm brim, plus 100% infill on the arm and wall plate and a 100% infill modifier on the cradle's bottom 10 mm |
+| `3mf/phone_mount_v1_right_captive_nuts_project.3mf` | Same, with the captive-nut arm and both nut pauses (7.20 and 25.20 mm) already added |
+| `3mf/..._left_project.3mf`, `..._left_captive_nuts_project.3mf` | Left-cradle versions of both projects |
+| `3mf/phone_mount_plate_right.3mf` | All three parts on one plate, geometry only (any slicer) |
 | `3mf/phone_mount_plate_left.3mf` | Same, with the mirrored cradle |
 | `stl/wall_plate.stl` | Wall plate, already in print orientation |
 | `3mf/phone_mount_plate_right_captive_nuts.3mf`, `..._left_captive_nuts.3mf` | Same plates with the **captive-nut arm** (nuts sealed inside during printing) |
@@ -61,7 +64,7 @@ Tested on a Bambu Lab H2D with PETG.
 
 ### Solid infill around the screws
 
-The plastic the screws clamp should be solid so it doesn't crush when you tighten. The 3MF can't carry slicer settings (see the note below), so set this in Bambu Studio. It takes about a minute:
+The plastic the screws clamp should be solid so it doesn't crush when you tighten. The `*_project.3mf` files already include this. If you use the geometry-only plates instead, set it in Bambu Studio. It takes about a minute:
 
 1. **Arm** and **wall plate:** right-click each → *Edit Process Settings* → *Strength* → *Sparse infill density* **100 %**. Both are small, so making the whole part solid costs only about 15 g of extra filament.
 2. **Cradle:** right-click it → *Height range Modifier*, set the range to **0–10 mm**, then set that range's *Sparse infill density* to **100 %**. The cradle prints standing on its closed end, so its screw tongue is the bottom 8 mm of the print.
@@ -79,6 +82,8 @@ Instead of pressing the nuts into open pockets afterwards, the captive-nut arm h
 - Because the nuts are sealed in, the screws always go in from the other side: the **pan screw up from under the wall-plate fin**, and the **tilt screw from the cradle's open-end side**.
 
 **Adding the pauses in Bambu Studio**
+
+The `*_captive_nuts_project.3mf` files already contain both pauses. To add them yourself to a geometry-only plate:
 
 1. Open `phone_mount_plate_right_captive_nuts.3mf` (or the `_left` one) and slice.
 2. In *Preview*, drag the vertical layer slider to **7.20 mm**. That's the first layer that roofs over the flat pan-nut cavity. Right-click the slider's handle and choose **Add pause**.
