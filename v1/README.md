@@ -26,7 +26,9 @@ For a mount up high, the suggested setup (shown below) puts the **pan head under
 | `3mf/phone_mount_plate_right.3mf` | All three parts on one plate, ready for Bambu Studio |
 | `3mf/phone_mount_plate_left.3mf` | Same, with the mirrored cradle |
 | `stl/wall_plate.stl` | Wall plate, already in print orientation |
+| `3mf/phone_mount_plate_right_captive_nuts.3mf`, `..._left_captive_nuts.3mf` | Same plates with the **captive-nut arm** (nuts sealed inside during printing) |
 | `stl/arm.stl`, `stl/arm_left.stl` | Arm for the right cradle, and its mirror image for the left cradle |
+| `stl/arm_captive.stl`, `stl/arm_captive_left.stl` | Captive-nut versions of the arm |
 | `stl/cradle_right.stl`, `stl/cradle_left.stl` | The cradle and its mirror image — print one, with the matching arm |
 | `src/wall_phone_mount.py` | Parametric generator for all parts |
 | `src/fitcheck.py` | 2D simulation that checks a phone can be loaded and removed |
@@ -65,6 +67,27 @@ The plastic the screws clamp should be solid so it doesn't crush when you tighte
 2. **Cradle:** right-click it → *Height range Modifier*, set the range to **0–10 mm**, then set that range's *Sparse infill density* to **100 %**. The cradle prints standing on its closed end, so its screw tongue is the bottom 8 mm of the print.
 
 When you open the 3MF, Bambu Studio says *"The 3mf file has invalid config, load geometry data only"*. Click OK — the file contains geometry only, and your own printer settings are used.
+
+## Option: nuts sealed inside the arm (captive nuts)
+
+Instead of pressing the nuts into open pockets afterwards, the captive-nut arm has two closed cavities. You pause the print, drop a nut into each, and the printer seals them in. The nuts can't fall out or spin, and there's nothing to line up during assembly.
+
+![Captive-nut cutaway](images/captive_cutaway.png)
+
+- **Pan nut:** lies flat inside the arm's round end.
+- **Tilt nut:** stands on edge inside the upright plate, corner down in a V seat.
+- Because the nuts are sealed in, the screws always go in from the other side: the **pan screw up from under the wall-plate fin**, and the **tilt screw from the cradle's open-end side**.
+
+**Adding the pauses in Bambu Studio**
+
+1. Open `phone_mount_plate_right_captive_nuts.3mf` (or the `_left` one) and slice.
+2. In *Preview*, drag the vertical layer slider to **7.20 mm**. That's the first layer that roofs over the flat pan-nut cavity. Right-click the slider's handle and choose **Add pause**.
+3. Do the same at **25.20 mm**, the first layer that roofs over the tilt-nut slot.
+4. Check each pause in the preview. The layer just below it should still show the cavity open, and the paused layer should start covering it.
+
+**At each pause:** drop an M5 nut into the open cavity. For the tilt nut, drop it in on edge so it settles corner-down into the V at the bottom. Press it down so nothing sticks up: the nut sits 0.4–0.6 mm below the next layer. Then resume.
+
+The cavity roofs are printed as short bridges right over the nuts, so expect them to look a little rough from underneath. That doesn't matter, because the roofs carry no load.
 
 ## Assembly
 

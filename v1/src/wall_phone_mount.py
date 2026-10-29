@@ -38,6 +38,9 @@ BOLT_R = 2.75       # M5 clearance
 NUT_R = 8.4 / np.sqrt(3)   # M5 nut, 8mm AF + clearance -> circumradius
 NUT_D = 4.2
 PAN_BOSS_T = 8.0    # arm thickness at the pan joint (room for the nut pocket on top)
+LAYER_H = 0.2       # used to put the captive-nut cavity roofs exactly on a layer boundary
+NUT_CAV_H = 4.4     # captive-nut cavity thickness (nut is 4.0)
+PAN_NUT_Z0 = 2.6    # captive pan nut: floor under the cavity (the nut is pulled down onto it)
 DISC_R = 12.0
 JOINT_T = 6.0       # arm bar thickness
 FIN_T = 8.0         # wall-plate fin thickness (room for a nut pocket on its underside)
@@ -108,7 +111,14 @@ def wall_plate():
 
 
 # ======================= ARM =======================
-def arm():
+def _snap_up(z):
+    return float(np.ceil(round(z / LAYER_H, 6)) * LAYER_H)
+
+
+def arm(captive=False):
+    """captive=False: open hex pockets on the arm's outer faces.
+    captive=True : the two nuts are sealed inside the arm during printing. The print is
+                   paused at captive_pause_heights() to drop each nut into its cavity."""
     bar = CrossSection.batch_hull([circ(DISC_R), circ(8, 0, ARM_LEN)]).extrude(JOINT_T)
     tz = JOINT_T + 14                    # tilt axis height
     vplate_cs = CrossSection.batch_hull([rect2(ARM_LEN - 12, ARM_LEN + 8, 0, JOINT_T),
@@ -117,18 +127,35 @@ def arm():
     boss = Manifold.cylinder(PAN_BOSS_T, DISC_R, DISC_R, SEG)
     m = bar + vplate + boss
     m = m - Manifold.cylinder(40, BOLT_R, BOLT_R, SEG).translate([0, 0, -5])
-    # pan nut: hex pocket in the top of the boss (pan bolt comes up from under the wall-plate fin)
-    m = m - CrossSection.circle(NUT_R, 6).extrude(NUT_D + 0.01).translate([0, 0, PAN_BOSS_T - NUT_D])
     # tilt hole along X, teardrop point toward +Z
     th = teardrop(BOLT_R, 40)            # along z, point +y
     th = th.transform(np.array([[0, 0, 1, -20], [1, 0, 0, ARM_LEN], [0, 1, 0, tz]]))
     m = m - th
-    # tilt nut: hex pocket in the arm plate's outer face (-x). The bolt head is on the
-    # cradle side, facing the cradle's open end where the phone slides in.
-    # One hex corner points up so the pocket prints without support.
-    tnut = CrossSection.circle(NUT_R, 6).rotate(90)
-    m = m - yz_extrude(tnut.translate([ARM_LEN, tz]), -ARM_PLATE_T / 2 - 0.01, -ARM_PLATE_T / 2 + NUT_D)
+    hexcs = CrossSection.circle(NUT_R, 6)
+    if not captive:
+        # pan nut: hex pocket in the top of the boss
+        m = m - hexcs.extrude(NUT_D + 0.01).translate([0, 0, PAN_BOSS_T - NUT_D])
+        # tilt nut: hex pocket in the arm plate's outer face (-x), one corner up so it prints cleanly
+        m = m - yz_extrude(hexcs.rotate(90).translate([ARM_LEN, tz]), -ARM_PLATE_T / 2 - 0.01, -ARM_PLATE_T / 2 + NUT_D)
+        return m, m, tz
+    pan_top, tilt_top = captive_pause_heights()
+    # pan nut: flat hex cavity sealed inside the boss; roof is printed after the pause
+    m = m - hexcs.extrude(pan_top - PAN_NUT_Z0).translate([0, 0, PAN_NUT_Z0])
+    # tilt nut: stands on edge in the upright plate, corner down in a V seat, with a
+    # straight-sided slot above it up to a flat roof printed after the pause
+    af = NUT_R * np.sqrt(3)              # across flats incl. clearance
+    slot = CrossSection.batch_hull([hexcs.rotate(90).translate([ARM_LEN, tz]),
+                                    rect2(ARM_LEN - af / 2, ARM_LEN + af / 2, tz, tilt_top)])
+    x0 = -ARM_PLATE_T / 2 + 1.0          # 1 mm outer skin; the nut is pulled toward the cradle side
+    m = m - yz_extrude(slot, x0, x0 + NUT_CAV_H)
     return m, m, tz
+
+
+def captive_pause_heights():
+    """Print heights (mm above the bed, arm printed flat) of the two cavity roofs.
+    Pause BEFORE the layer that starts at each height."""
+    tz = JOINT_T + 14
+    return _snap_up(PAN_NUT_Z0 + NUT_CAV_H), _snap_up(tz + NUT_R + 0.15)
 
 
 # ======================= CRADLE =======================
@@ -223,9 +250,12 @@ if __name__ == "__main__":
     _, cr_p, _ = cradle()
     for name, m in [("wall_plate", on_bed(wp_p)), ("arm", on_bed(am_p)),
                     ("arm_left", on_bed(am_p.mirror([1, 0, 0]))),   # tilt nut on the other face
+                    ("arm_captive", on_bed(arm(captive=True)[1])),
+                    ("arm_captive_left", on_bed(arm(captive=True)[1].mirror([1, 0, 0]))),
                     ("cradle_right", on_bed(cr_p)),
                     ("cradle_left", on_bed(cr_p.mirror([1, 0, 0])))]:
         t = to_trimesh(m)
         t.export(f"{out}/{name}.stl")
-        print(f"{name:13s} watertight={t.is_watertight} vol={t.volume/1000:.1f}cm3 "
+        print(f"{name:17s} watertight={t.is_watertight} vol={t.volume/1000:.1f}cm3 "
               f"bbox={np.round(t.extents,1)}")
+    print("captive-nut arm: pause before the layers at %.1f mm (pan nut) and %.1f mm (tilt nut)" % captive_pause_heights())
