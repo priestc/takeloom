@@ -87,7 +87,8 @@ def yz_extrude(cs, x0, x1):
 
 
 # ======================= WALL PLATE =======================
-def wall_plate():
+def wall_plate(nut_pocket=True):
+    """nut_pocket=False for the captive-nut build: the screw head side is a plain flat face."""
     zc = PLATE_H / 2 + 6          # fin top
     piv_y = PLATE_T + 18
     plate = box(-PLATE_W / 2, PLATE_W / 2, 0, PLATE_T, 0, PLATE_H)
@@ -105,7 +106,7 @@ def wall_plate():
     # one hex corner points away from the wall = up when printed on its back
     nut = CrossSection.circle(NUT_R, 6).rotate(90).extrude(NUT_D + 0.01) \
         .translate([0, piv_y, zc - FIN_T - 0.01])
-    m = m - hole - nut
+    m = m - hole - (nut if nut_pocket else Manifold())
     # print orientation: back face (y=0) on bed -> rotate so +Y becomes +Z
     return m, m.rotate([-90, 0, 0]).rotate([180, 0, 0])
 
@@ -159,7 +160,8 @@ def captive_pause_heights():
 
 
 # ======================= CRADLE =======================
-def cradle():
+def cradle(nut_pocket=True):
+    """nut_pocket=False for the captive-nut build: the screw head side is a plain flat face."""
     L, w = CRADLE_LEN, WALL
     # FRONT plate (subject side, meshed below): the phone's back lies flat against it.
     # Lips are on the screen side (toward the wall), so the screen stays visible
@@ -206,7 +208,8 @@ def cradle():
     # tilt bolt hole, with a hex pocket in the tongue's open-end face (+x). Together with the
     # pocket in the arm plate's outer face, the nut can go on either side.
     m = m - Manifold.cylinder(40, BOLT_R, BOLT_R, SEG).rotate([0, 90, 0]).translate([-20, ay, az])
-    m = m - yz_extrude(CrossSection.circle(NUT_R, 6).rotate(90).translate([ay, az]),
+    if nut_pocket:
+        m = m - yz_extrude(CrossSection.circle(NUT_R, 6).rotate(90).translate([ay, az]),
                        -w + TONGUE_T - NUT_D, -w + TONGUE_T + 0.01)
     # print orientation: closed end on the bed (+X up). x=-w face -> z=0
     pr = m.translate([w, 0, 0]).rotate([0, -90, 0])
@@ -251,11 +254,14 @@ if __name__ == "__main__":
     for name, m in [("wall_plate", on_bed(wp_p)), ("arm", on_bed(am_p)),
                     ("arm_left", on_bed(am_p.mirror([1, 0, 0]))),   # tilt nut on the other face
                     ("arm_captive", on_bed(arm(captive=True)[1])),
+                    ("wall_plate_no_pocket", on_bed(wall_plate(nut_pocket=False)[1])),
+                    ("cradle_right_no_pocket", on_bed(cradle(nut_pocket=False)[1])),
+                    ("cradle_left_no_pocket", on_bed(cradle(nut_pocket=False)[1].mirror([1, 0, 0]))),
                     ("arm_captive_left", on_bed(arm(captive=True)[1].mirror([1, 0, 0]))),
                     ("cradle_right", on_bed(cr_p)),
                     ("cradle_left", on_bed(cr_p.mirror([1, 0, 0])))]:
         t = to_trimesh(m)
         t.export(f"{out}/{name}.stl")
-        print(f"{name:17s} watertight={t.is_watertight} vol={t.volume/1000:.1f}cm3 "
+        print(f"{name:23s} watertight={t.is_watertight} vol={t.volume/1000:.1f}cm3 "
               f"bbox={np.round(t.extents,1)}")
     print("captive-nut arm: pause before the layers at %.1f mm (pan nut) and %.1f mm (tilt nut)" % captive_pause_heights())

@@ -24,7 +24,7 @@ For a mount up high, the suggested setup (shown below) puts the **pan head under
 | Path | What it is |
 |---|---|
 | `3mf/phone_mount_v1_right_project.3mf` | **Bambu Studio project, ready to print**: H2D, Generic PETG, 4 walls, 30% gyroid, 5 mm brim, plus a 12 mm (washer-sized) 100% infill cylinder around each bolt: one on the wall-plate fin, two on the arm, one on the cradle tongue |
-| `3mf/phone_mount_v1_right_captive_nuts_project.3mf` | Same, with the captive-nut arm and both nut pauses (7.20 and 25.20 mm) already added |
+| `3mf/phone_mount_v1_right_captive_nuts_project.3mf` | Same, with the captive-nut arm and both nut pauses (7.20 and 25.20 mm) already added. The wall plate and cradle in this version have no nut pockets, just flat faces for the screw heads. |
 | `3mf/..._left_project.3mf`, `..._left_captive_nuts_project.3mf` | Left-cradle versions of both projects |
 | `3mf/phone_mount_plate_right.3mf` | All three parts on one plate, geometry only (any slicer) |
 | `3mf/phone_mount_plate_left.3mf` | Same, with the mirrored cradle |
@@ -32,6 +32,7 @@ For a mount up high, the suggested setup (shown below) puts the **pan head under
 | `3mf/phone_mount_plate_right_captive_nuts.3mf`, `..._left_captive_nuts.3mf` | Same plates with the **captive-nut arm** (nuts sealed inside during printing) |
 | `stl/arm.stl`, `stl/arm_left.stl` | Arm for the right cradle, and its mirror image for the left cradle |
 | `stl/arm_captive.stl`, `stl/arm_captive_left.stl` | Captive-nut versions of the arm |
+| `stl/wall_plate_no_pocket.stl`, `stl/cradle_*_no_pocket.stl` | Wall plate and cradle for the captive-nut build (flat faces, no nut pockets) |
 | `stl/cradle_right.stl`, `stl/cradle_left.stl` | The cradle and its mirror image — print one, with the matching arm |
 | `src/wall_phone_mount.py` | Parametric generator for all parts |
 | `src/fitcheck.py` | 2D simulation that checks a phone can be loaded and removed |
@@ -80,6 +81,7 @@ Instead of pressing the nuts into open pockets afterwards, the captive-nut arm h
 - **Pan nut:** lies flat inside the arm's round end.
 - **Tilt nut:** stands on edge inside the upright plate, corner down in a V seat.
 - Because the nuts are sealed in, the screws always go in from the other side: the **pan screw up from under the wall-plate fin**, and the **tilt screw from the cradle's open-end side**.
+- The wall plate and cradle in the captive-nut files have **no nut pockets**. The screw heads and washers sit on flat, solid faces.
 
 **Adding the pauses in Bambu Studio**
 
