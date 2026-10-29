@@ -1,17 +1,21 @@
 # Phone Wall Mount — v1
 
-Three printed parts joined by two M5 bolts:
+Three printed parts joined by two M5 screws:
 
 1. **Wall plate** — sticks to the wall with Command strips. A horizontal fin forms the **pan** joint.
-2. **Arm** — 30 mm between pivots. Flat disc at the wall end (pan), upright disc at the far end (**tilt**). Both nuts sit in the arm.
+2. **Arm** — 30 mm between pivots. Flat disc at the wall end (pan), upright disc at the far end (**tilt**).
 3. **Cradle** — holds the phone in landscape. The phone's back lies flat against a diamond-mesh front plate, and the camera bump hangs just past the open end.
 
 ![Renders](images/phones.png)
 
-Both bolt heads face the directions you reach from when the mount is up high:
+Each joint has a **hex nut pocket on both of its outer faces**, so you choose which side the screw head goes on and put the nut in the pocket on the other side:
 
-- **Pan bolt:** the head is **under** the wall-plate fin, so you can adjust it from below.
-- **Tilt bolt:** the head is on the cradle's **open-end** side, where the phone slides in.
+| Joint | Outer face 1 | Outer face 2 |
+|---|---|---|
+| Pan (wall plate ↔ arm) | Underside of the wall-plate fin | Top of the arm's round boss |
+| Tilt (arm ↔ cradle) | Cradle tongue, open-end side | Arm's upright plate, outer side |
+
+For a mount up high, the suggested setup (shown below) puts the **pan head under the fin**, adjusted from below, and the **tilt head on the cradle's open-end side**, where the phone slides in.
 
 ![Bolt orientation](images/bolts.png)
 
@@ -33,9 +37,9 @@ The cradle attaches to the arm at one end, so the phone sticks out to one side o
 
 ## Hardware
 
-- 2× **M5 × 16 mm Phillips pan-head** machine screws (up to ~10 mm head diameter fits; thumb screws also work for tool-free aiming)
+- 2× **M5 × 20 mm Phillips pan-head** machine screws (thumb screws also work for tool-free aiming)
 - 2× **M5 hex nuts**, standard 8 mm across flats. Nylon-insert lock nuts are too thick for the pockets.
-- Optional: 2× M5 flat washers
+- 2× **M5 flat washers** (10 mm OD or larger), one under each screw head. The head sits over the unused hex pocket on its side, and the washer gives it a full flat face to bear on.
 - 1–2× **Command Large** strips (the plate is 46 × 80 mm; two side by side is best)
 - Optional: thin adhesive foam or rubber on the front plate to stop sliding
 
@@ -51,16 +55,24 @@ Tested on a Bambu Lab H2D with PETG.
 | Infill | 30 % gyroid |
 | Supports | Off — every part is designed to print without them |
 | Brim | Outer brim only, 5 mm (needed for the tall cradle) |
+| Around the screw holes | **100 % infill** (see below) |
+
+### Solid infill around the screws
+
+The plastic the screws clamp should be solid so it doesn't crush when you tighten. The 3MF can't carry slicer settings (see the note below), so set this in Bambu Studio. It takes about a minute:
+
+1. **Arm** and **wall plate:** right-click each → *Edit Process Settings* → *Strength* → *Sparse infill density* **100 %**. Both are small, so making the whole part solid costs only about 15 g of extra filament.
+2. **Cradle:** right-click it → *Height range Modifier*, set the range to **0–10 mm**, then set that range's *Sparse infill density* to **100 %**. The cradle prints standing on its closed end, so its screw tongue is the bottom 8 mm of the print.
 
 When you open the 3MF, Bambu Studio says *"The 3mf file has invalid config, load geometry data only"*. Click OK — the file contains geometry only, and your own printer settings are used.
 
 ## Assembly
 
-1. Press the two M5 nuts into the hex pockets in the arm: one in the top of the round pan boss, one in the outer face of the upright tilt plate (the face away from the cradle).
-2. **Pan:** set the arm on top of the wall-plate fin and push the bolt up **from underneath** the fin, through the fin and arm, into the nut.
-3. **Tilt:** hold the cradle's tongue against the arm's upright plate and push the bolt in **from the cradle's open-end side**, through the tongue and the plate, into the nut.
+1. Decide which side each screw head goes on, and press a nut into the hex pocket on the **other** side. For the suggested setup, both nuts go in the arm: one in the top of the round pan boss, one in the outer face of the upright tilt plate.
+2. **Pan:** set the arm on top of the wall-plate fin. Put a washer on the screw and push it through the fin and arm into the nut (suggested: up from **underneath** the fin).
+3. **Tilt:** hold the cradle's tongue against the arm's upright plate. Put a washer on the screw and push it through the tongue and plate into the nut (suggested: from the cradle's **open-end** side).
 4. Clean the wall and the back of the plate with rubbing alcohol. Apply the Command strips with the pull tabs hanging below the plate, press for 30 s, and wait an hour before loading a phone.
-5. Loosen both bolts slightly, aim, and snug them down. With the mount up high, you reach the pan bolt from below and the tilt bolt from the phone's open end.
+5. Loosen both screws slightly, aim, and snug them down. With the suggested setup and the mount up high, you reach the pan screw from below and the tilt screw from the phone's open end.
 
 ## Loading the phone
 

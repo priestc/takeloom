@@ -1,7 +1,8 @@
 """
 Wall-mounted phone mount (Command-strip) — parametric generator.
 
-Three printed parts, joined with 2x M5x16 bolts + 2x M5 hex nuts:
+Three printed parts, joined with 2x M5x20 screws + 2x M5 hex nuts (+ washers under the heads).
+Each joint has a hex nut pocket on both of its outer faces, so the nut can go on either side.
   1. wall_plate   – flat back sticks to Command strips; horizontal fin = PAN joint.
                     Pan bolt head sits UNDER the fin (reach it from below when mounted high).
   2. arm          – horizontal disc (pan) -> vertical disc (TILT); both nuts are in the arm
@@ -38,7 +39,9 @@ NUT_R = 8.4 / np.sqrt(3)   # M5 nut, 8mm AF + clearance -> circumradius
 NUT_D = 4.2
 PAN_BOSS_T = 8.0    # arm thickness at the pan joint (room for the nut pocket on top)
 DISC_R = 12.0
-JOINT_T = 6.0       # pan fin / cradle tongue thickness
+JOINT_T = 6.0       # arm bar thickness
+FIN_T = 8.0         # wall-plate fin thickness (room for a nut pocket on its underside)
+TONGUE_T = 8.0      # cradle tongue thickness (room for a nut pocket on its open-end face)
 ARM_PLATE_T = 8.0   # arm's vertical (tilt) plate thickness
 MESH_FRONT = True   # diamond mesh in the plate the phone's back rests on
 MESH_HOLE = 12.0    # diamond hole size (point to point)
@@ -87,15 +90,19 @@ def wall_plate():
     plate = box(-PLATE_W / 2, PLATE_W / 2, 0, PLATE_T, 0, PLATE_H)
     fin_cs = CrossSection.batch_hull([rect2(-14, 14, PLATE_T - 1, PLATE_T),
                                       circ(DISC_R, 0, piv_y)])
-    fin = fin_cs.extrude(JOINT_T).translate([0, 0, zc - JOINT_T])
-    gus_cs = CrossSection([[(PLATE_T - 1, zc - JOINT_T), (PLATE_T - 1, zc - JOINT_T - 16),
-                            (PLATE_T + 12, zc - JOINT_T)]])
+    fin = fin_cs.extrude(FIN_T).translate([0, 0, zc - FIN_T])
+    gus_cs = CrossSection([[(PLATE_T - 1, zc - FIN_T), (PLATE_T - 1, zc - FIN_T - 16),
+                            (PLATE_T + 12, zc - FIN_T)]])
     gusset = yz_extrude(gus_cs, -2, 2)
     m = plate + fin + gusset
     # pan bolt hole (vertical in use, horizontal in print -> teardrop).
-    # Bolt goes in from BELOW: head on the fin's underside, nut on top of the arm.
+    # Hex pockets on BOTH outer faces of the pan joint (this one, and the top of the
+    # arm boss), so the nut can go on either side and the head on the other.
     hole = teardrop(BOLT_R, 40).translate([0, piv_y, zc - 20])
-    m = m - hole
+    # one hex corner points away from the wall = up when printed on its back
+    nut = CrossSection.circle(NUT_R, 6).rotate(90).extrude(NUT_D + 0.01) \
+        .translate([0, piv_y, zc - FIN_T - 0.01])
+    m = m - hole - nut
     # print orientation: back face (y=0) on bed -> rotate so +Y becomes +Z
     return m, m.rotate([-90, 0, 0]).rotate([180, 0, 0])
 
@@ -167,10 +174,13 @@ def cradle():
     # tilt tongue under the floor, at the closed end
     ay, az = 9.0, -w - 16
     tongue_cs = CrossSection.batch_hull([rect2(-w, T + w, -w - 1, -w), circ(DISC_R, ay, az)])
-    tongue = yz_extrude(tongue_cs, -w, -w + JOINT_T)
+    tongue = yz_extrude(tongue_cs, -w, -w + TONGUE_T)
     m = m + tongue
-    # tilt bolt hole; the bolt HEAD sits on the tongue's open-end face (+x)
+    # tilt bolt hole, with a hex pocket in the tongue's open-end face (+x). Together with the
+    # pocket in the arm plate's outer face, the nut can go on either side.
     m = m - Manifold.cylinder(40, BOLT_R, BOLT_R, SEG).rotate([0, 90, 0]).translate([-20, ay, az])
+    m = m - yz_extrude(CrossSection.circle(NUT_R, 6).rotate(90).translate([ay, az]),
+                       -w + TONGUE_T - NUT_D, -w + TONGUE_T + 0.01)
     # print orientation: closed end on the bed (+X up). x=-w face -> z=0
     pr = m.translate([w, 0, 0]).rotate([0, -90, 0])
     pr = pr.translate([0, 0, -pr.bounding_box()[2]])
