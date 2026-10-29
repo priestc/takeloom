@@ -23,7 +23,7 @@ For a mount up high, the suggested setup (shown below) puts the **pan head under
 
 | Path | What it is |
 |---|---|
-| `3mf/phone_mount_v1_right_project.3mf` | **Bambu Studio project, ready to print**: H2D, Generic PETG, 4 walls, 30% gyroid, 5 mm brim, plus a 100% infill cylinder modifier around each bolt (one on the wall-plate fin, two on the arm, one on the cradle tongue) |
+| `3mf/phone_mount_v1_right_project.3mf` | **Bambu Studio project, ready to print**: H2D, Generic PETG, 4 walls, 30% gyroid, 5 mm brim, plus a 12 mm (washer-sized) 100% infill cylinder around each bolt: one on the wall-plate fin, two on the arm, one on the cradle tongue |
 | `3mf/phone_mount_v1_right_captive_nuts_project.3mf` | Same, with the captive-nut arm and both nut pauses (7.20 and 25.20 mm) already added |
 | `3mf/..._left_project.3mf`, `..._left_captive_nuts_project.3mf` | Left-cradle versions of both projects |
 | `3mf/phone_mount_plate_right.3mf` | All three parts on one plate, geometry only (any slicer) |
@@ -44,7 +44,7 @@ The cradle attaches to the arm at one end, so the phone sticks out to one side o
 
 - 2× **M5 × 20 mm Phillips pan-head** machine screws (thumb screws also work for tool-free aiming)
 - 2× **M5 hex nuts**, standard 8 mm across flats. Nylon-insert lock nuts are too thick for the pockets.
-- 2× **M5 flat washers** (10 mm OD or larger), one under each screw head. The head sits over the unused hex pocket on its side, and the washer gives it a full flat face to bear on.
+- 2× **M5 flat washers** (10–12 mm OD; the project files make a 12 mm solid zone under each), one under each screw head. The head sits over the unused hex pocket on its side, and the washer gives it a full flat face to bear on.
 - 1–2× **Command Large** strips (the plate is 46 × 80 mm; two side by side is best)
 - Optional: thin adhesive foam or rubber on the front plate to stop sliding
 
