@@ -23,6 +23,15 @@ final class H264Encoder {
     private var height = 0
     private let lock = NSLock()
     private var forceKeyframe = false
+    /// For the status message: frames out so far, and the last failure
+    /// (session create or encode), so a silent encoder shows on the server.
+    private(set) var framesOut = 0
+    private(set) var lastError: OSStatus = noErr
+    /// An encode failed (lock): start a new session on the next frame. iOS
+    /// tears compression sessions down while the app is in the background
+    /// (the phone locking, say), and every encode after that fails — so
+    /// without this, the feed stops for good once the app comes back.
+    private var resetPending = false
 
     init(bitrate: Int, fps: Int, maxWidth: Int? = nil, limitBursts: Bool = false) {
         self.bitrate = bitrate
@@ -74,7 +83,11 @@ final class H264Encoder {
     func encode(_ pixelBuffer: CVPixelBuffer, pts: CMTime, duration: CMTime) {
         let (w, h) = outputSize(sourceWidth: CVPixelBufferGetWidth(pixelBuffer),
                                 sourceHeight: CVPixelBufferGetHeight(pixelBuffer))
-        if session == nil || w != width || h != height {
+        lock.lock()
+        let reset = resetPending
+        resetPending = false
+        lock.unlock()
+        if reset || session == nil || w != width || h != height {
             invalidate()
             guard makeSession(width: w, height: h) else { return }
             requestKeyframe()
@@ -87,13 +100,25 @@ final class H264Encoder {
         lock.unlock()
         let props: CFDictionary? = key ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary : nil
 
-        VTCompressionSessionEncodeFrame(
+        let status = VTCompressionSessionEncodeFrame(
             session, imageBuffer: pixelBuffer, presentationTimeStamp: pts, duration: duration,
             frameProperties: props, infoFlagsOut: nil
         ) { [weak self] status, _, sampleBuffer in
-            guard status == noErr, let sampleBuffer, CMSampleBufferDataIsReady(sampleBuffer) else { return }
+            guard status == noErr, let sampleBuffer, CMSampleBufferDataIsReady(sampleBuffer) else {
+                if status != noErr { self?.encodeFailed(status) }
+                return
+            }
+            self?.framesOut += 1
             self?.onOutput?(sampleBuffer)
         }
+        if status != noErr { encodeFailed(status) }
+    }
+
+    private func encodeFailed(_ status: OSStatus) {
+        lock.lock()
+        lastError = status
+        resetPending = true
+        lock.unlock()
     }
 
     private func makeSession(width: Int, height: Int) -> Bool {
@@ -103,7 +128,10 @@ final class H264Encoder {
             encoderSpecification: nil, imageBufferAttributes: nil, compressedDataAllocator: nil,
             outputCallback: nil, refcon: nil, compressionSessionOut: &created
         )
-        guard status == noErr, let created else { return false }
+        guard status == noErr, let created else {
+            lastError = status
+            return false
+        }
         let set = { (key: CFString, value: CFTypeRef) in
             _ = VTSessionSetProperty(created, key: key, value: value)
         }

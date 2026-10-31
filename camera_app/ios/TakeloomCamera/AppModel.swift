@@ -216,6 +216,8 @@ final class AppModel: ObservableObject {
             "live_adaptive": true,
             "live_width": pipeline.liveSize.width, "live_height": pipeline.liveSize.height,
             "live_bitrate": pipeline.liveBitrate,
+            "live_frames": pipeline.liveEncoderStats.frames,
+            "live_error": pipeline.liveEncoderStats.error,
         ]
         fields["battery"] = device.0 >= 0 ? device.0 : NSNull()
         return fields

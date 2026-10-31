@@ -219,6 +219,11 @@ final class CameraPipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         liveEncoder.invalidate()  // a new size: a new session (and keyframe) on the next frame
     }
 
+    /// The live encoder's frames out so far and last error (status message).
+    var liveEncoderStats: (frames: Int, error: Int32) {
+        (liveEncoder.framesOut, liveEncoder.lastError)
+    }
+
     /// The live feed's frame size (for the status message).
     var liveSize: (width: Int, height: Int) {
         liveEncoder.outputSize(sourceWidth: frameWidth, sourceHeight: frameHeight)

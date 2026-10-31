@@ -86,6 +86,16 @@ class PhoneCameraInfo:
     # how stale the live feed is when it reaches us — what a live stream's
     # audio is delayed by to line up with it (see recorder.py).
     live_latency_ns: int | None = None
+    # Live video received on this connection, for the one-off report
+    # _report_live_feed logs a few seconds in.
+    connected_at: float = field(default_factory=time.monotonic)
+    video_frames: int = 0
+    video_bytes: int = 0
+    live_reported: bool = False
+
+
+# How long after a phone connects its live feed gets checked and logged.
+_LIVE_REPORT_AFTER_S = 10.0
 
 
 @dataclass
@@ -509,6 +519,8 @@ class _Handler(socketserver.BaseRequestHandler):
                 frame_type, payload = read_frame(sock)
                 if frame_type == FRAME_VIDEO:
                     pts_ns, keyframe, data = decode_video(payload)
+                    info.video_frames += 1
+                    info.video_bytes += len(data)
                     if info.clock_offset_ns is not None:
                         latency = time.monotonic_ns() - (pts_ns + info.clock_offset_ns)
                         prev = info.live_latency_ns
@@ -522,6 +534,26 @@ class _Handler(socketserver.BaseRequestHandler):
             conn.closed = True
             hub._unregister_camera(conn)
             hub._log(f"Takeloom Camera '{info.client_name}' ({ip}) disconnected")
+
+    def _report_live_feed(self, info: PhoneCameraInfo) -> None:
+        """Once per connection, a few seconds in: what live video actually
+        arrived, next to what the phone says it's sending — the first thing
+        to look at when a phone's feed looks wrong or missing."""
+        elapsed = time.monotonic() - info.connected_at
+        if info.live_reported or elapsed < _LIVE_REPORT_AFTER_S:
+            return
+        info.live_reported = True
+        st = info.status
+        phone = (f"phone reports {st.get('live_width')}x{st.get('live_height')} at "
+                 f"{(st.get('live_bitrate') or 0) / 1e6:.1f} Mbps, {st.get('live_frames')} frames encoded"
+                 + (f", encoder error {st.get('live_error')}" if st.get("live_error") else "")
+                 if "live_frames" in st else "phone doesn't report its encoder (older app)")
+        if info.video_frames:
+            got = (f"{info.video_frames / elapsed:.0f} fps, "
+                   f"{info.video_bytes * 8 / elapsed / 1e6:.1f} Mbps over the first {elapsed:.0f} s")
+        else:
+            got = f"NO live video in {elapsed:.0f} s"
+        self._hub._log(f"Takeloom Camera '{info.client_name}' live feed: {got} ({phone})")
 
     def _on_camera_message(self, conn: _CameraConnection, msg: dict) -> None:
         hub = self._hub
@@ -539,6 +571,7 @@ class _Handler(socketserver.BaseRequestHandler):
             conn.info.status = {k: v for k, v in msg.items() if k != "kind"}
             if before != {k: conn.info.status.get(k) for k in _LIVE_STATUS_KEYS}:
                 hub._on_live_change()
+            self._report_live_feed(conn.info)
         elif kind == "recording_started":
             with hub._lock:
                 key = (str(msg.get("session_id")), conn.info.device_id)
