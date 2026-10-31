@@ -101,6 +101,11 @@ class _ExpectedUpload:
     error: str = ""
 
 
+# Status fields that change bandwidth.py's plan: whether a phone's live feed
+# can adapt, and its recording size (a non-adaptive feed's bitrate).
+_LIVE_STATUS_KEYS = ("live_adaptive", "height")
+
+
 class PhoneCameraHub:
     def __init__(
         self,
@@ -132,6 +137,7 @@ class PhoneCameraHub:
         self._session_dir_resolver: Callable[[str], Path | None] = lambda session_id: None
         self._on_preview: Callable[[str, bytes], None] = lambda device_id, jpeg: None
         self._on_change: Callable[[], None] = lambda: None
+        self._on_live_change: Callable[[], None] = lambda: None
         self._tcp_server: _ThreadingTCPServer | None = None
 
     # --- lifecycle ---
@@ -163,10 +169,16 @@ class PhoneCameraHub:
         on_preview: Callable[[str, bytes], None],
         on_change: Callable[[], None],
         session_dir_resolver: Callable[[str], Path | None],
+        on_live_change: Callable[[], None] = lambda: None,
     ) -> None:
         self._on_preview = on_preview
         self._on_change = on_change
         self._session_dir_resolver = session_dir_resolver
+        # A phone's live feed reported a change (bandwidth.py re-plans).
+        self._on_live_change = on_live_change
+
+    def log(self, message: str) -> None:
+        self._log(message)
 
     # --- queries ---
 
@@ -523,7 +535,10 @@ class _Handler(socketserver.BaseRequestHandler):
             conn.info.clock_offset_ns = int(msg["offset_ns"])
             conn.info.clock_rtt_ns = int(msg.get("rtt_ns") or 0)
         elif kind == "status":
+            before = {k: conn.info.status.get(k) for k in _LIVE_STATUS_KEYS}
             conn.info.status = {k: v for k, v in msg.items() if k != "kind"}
+            if before != {k: conn.info.status.get(k) for k in _LIVE_STATUS_KEYS}:
+                hub._on_live_change()
         elif kind == "recording_started":
             with hub._lock:
                 key = (str(msg.get("session_id")), conn.info.device_id)

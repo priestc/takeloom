@@ -32,6 +32,7 @@ final class AppModel: ObservableObject {
 
         link.nowNs = { [pipeline] in pipeline.nowNs() }
         link.onNeedKeyframe = { [pipeline] in pipeline.requestKeyframe() }
+        link.onLiveQuality = { [pipeline] width, bitrate in pipeline.setLiveQuality(maxWidth: width, bitrate: bitrate) }
         link.statusProvider = { [weak self] in self?.statusFields() ?? [:] }
         link.onState = { [weak self] state in
             Task { @MainActor in
@@ -211,6 +212,10 @@ final class AppModel: ObservableObject {
             "free_bytes": free ?? 0,
             "recording_session": pipeline.currentRecordingSession ?? NSNull(),
             "pending_uploads": RecordingStore.all().filter { $0.rejected == nil }.count,
+            // The live feed, apart from the recording (bandwidth.py on the server).
+            "live_adaptive": true,
+            "live_width": pipeline.liveSize.width, "live_height": pipeline.liveSize.height,
+            "live_bitrate": pipeline.liveBitrate,
         ]
         fields["battery"] = device.0 >= 0 ? device.0 : NSNull()
         return fields

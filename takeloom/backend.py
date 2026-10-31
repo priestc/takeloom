@@ -1920,6 +1920,9 @@ class LocalBackend(Backend):
         # whoever wants it at full resolution (see _on_full_preview_wanted).
         self._phone_full_previews: dict = {}
         self._phone_full_previews_lock = threading.Lock()
+        # The last plan bandwidth.describe() logged; serializes re-planning.
+        self._bandwidth_plan: str | None = None
+        self._bandwidth_lock = threading.Lock()
         # (monotonic time, scan) — see _scan_cameras.
         self._camera_scan: tuple[float, list | None] = (0.0, None)
         self._camera_scan_lock = threading.Lock()
@@ -2019,6 +2022,7 @@ class LocalBackend(Backend):
                 self._log_program_camera(session, camera_device, cameras)
         if changed:
             self._emit("program_camera_changed", {"camera": camera_device})
+            self._plan_phone_bandwidth()  # the program phone gets the biggest share
 
     def _log_program_camera(self, session: "_ActiveSession", camera_device: str,
                             cameras: list[tuple[str, str]]) -> None:
@@ -2131,11 +2135,42 @@ class LocalBackend(Backend):
             on_preview=self._on_phone_preview,
             on_change=self._on_phone_cameras_changed,
             session_dir_resolver=self._local_session_dir_path,
+            on_live_change=self._plan_phone_bandwidth,
         )
 
     def _on_phone_cameras_changed(self) -> None:
         self._scan_cameras(force=True)  # also remembers a phone seen for the first time
         self._emit("session_cameras_changed", {})
+        self._plan_phone_bandwidth()
+
+    def _plan_phone_bandwidth(self) -> None:
+        """Share the Wi-Fi budget between the connected phones' live feeds
+        (phone_camera/bandwidth.py) and tell each one its part."""
+        hub = self._phone_hub
+        if hub is None:
+            return
+        from .phone_camera import bandwidth
+        with self._bandwidth_lock:
+            # A phone that hasn't sent its first status yet counts as
+            # adaptive: an app that isn't gets re-planned when it does.
+            phones = [
+                bandwidth.Phone(DEVICE_PREFIX + c.device_id,
+                                adaptive=not c.status or c.status.get("live_adaptive") is True, status=c.status)
+                for c in hub.cameras()
+            ]
+            if not phones:
+                self._bandwidth_plan = None
+                return
+            cameras = self.session_cameras()
+            program = self._resolve_program_camera(cameras)
+            budget = self.get_config().camera_wifi_budget_mbps or bandwidth.DEFAULT_BUDGET_MBPS
+            qualities = bandwidth.plan(phones, program, budget)
+            for device, quality in qualities.items():
+                hub.send(phone_device_id(device), quality.message())
+            summary = bandwidth.describe(phones, qualities, dict(cameras), program, budget)
+            if summary != self._bandwidth_plan:
+                self._bandwidth_plan = summary
+                hub.log(summary)
 
     def _on_phone_preview(self, device_id: str, jpeg: bytes) -> None:
         # Every connected phone is one of session_cameras().

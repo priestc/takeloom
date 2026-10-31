@@ -45,6 +45,28 @@ Camera lists every camera ever seen. There you can:
 
 What's streamed live is the program camera, picked in `takeloom video-ui`.
 
+### Sharing the Wi-Fi
+
+Each phone encodes twice: its recording at the quality picked in ⚙ (kept on
+the phone, uploaded after the session) and a lighter **live feed** for the
+stream, the previews and the fallback video. The server splits a Wi-Fi
+budget between the phones' live feeds: `camera_wifi_budget_mbps` in the
+config, 20 Mbps by default. The program camera gets three shares to every
+other phone's one, so adding phones lowers the others' quality instead of
+flooding the network. With three phones that's 8 Mbps at 1080p for the
+program camera and 3 Mbps at 720p for each of the others. The split is
+re-done when a phone connects or leaves and when the program camera
+changes, and the server log shows it ("Live camera feeds: …").
+
+- iOS changes size and bitrate as told, but holds its size while recording
+  (the fallback video can't change size partway) and switches when it ends.
+- Android's live feed is fixed at up to 720p; only its bitrate follows the
+  budget. A phone whose camera can't feed a second encoder falls back to a
+  single encode for both, at the full recording bitrate.
+- A phone on an older app version can't adapt either. Its full bitrate
+  (12 Mbps at 1080p, 35 at 4K) comes off the budget first, and the log
+  says to update it.
+
 Each camera besides the main one is saved whole as its own
 `cameraN_<name>.mp4` in the session, with the same audio tracks and
 watermark as `session_video.mp4`. A phone's copy gets its own measured

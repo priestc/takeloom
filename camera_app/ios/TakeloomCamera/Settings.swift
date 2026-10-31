@@ -76,8 +76,9 @@ enum VideoQuality: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Bits/s for the one encode that feeds both the live stream and the
-    /// recorded file — high enough to be a keeper, low enough for Wi-Fi.
+    /// Bits/s for the recorded file — a keeper. The live feed is its own,
+    /// lighter encode (CameraPipeline), and these go over Wi-Fi only as the
+    /// after-session upload. The server's bandwidth.py mirrors these.
     var bitrate: Int {
         switch self {
         case .hd720: return 6_000_000

@@ -151,6 +151,7 @@ class MainActivity : Activity() {
     private fun wire() {
         link.nowNs = { engine.nowNs() }
         link.onNeedKeyframe = { engine.requestKeyframe() }
+        link.onLiveQuality = { _, bitrate -> if (bitrate > 0) engine.setLiveQuality(bitrate) }
         link.statusProvider = { statusFields() }
         link.onState = { state -> main.post { showState(state); if (state is LinkState.Connected) uploader.kick() } }
         link.onCommand = { msg -> main.post { handleCommand(msg) } }
@@ -292,6 +293,10 @@ class MainActivity : Activity() {
             "free_bytes" to store.directory.usableSpace,
             "recording_session" to engine.recordingSession,
             "pending_uploads" to store.all().count { it.rejected == null },
+            // The live feed, apart from the recording (bandwidth.py on the server).
+            "live_adaptive" to engine.liveAdaptive,
+            "live_width" to engine.liveWidth, "live_height" to engine.liveHeight,
+            "live_bitrate" to engine.liveBitrate,
         )
     }
 

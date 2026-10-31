@@ -40,6 +40,8 @@ class ClockSync {
 class ServerLink(private val settings: Settings) {
     var onState: (LinkState) -> Unit = {}
     var onCommand: (JSONObject) -> Unit = {}
+    /** live_quality from the server: (max width, bits/s) for the live feed. */
+    var onLiveQuality: (Int, Int) -> Unit = { _, _ -> }
     var statusProvider: () -> JSONObject = { JSONObject() }
     var nowNs: () -> Long = { System.nanoTime() }
     var onNeedKeyframe: () -> Unit = {}
@@ -182,6 +184,7 @@ class ServerLink(private val settings: Settings) {
                 }
             }
             "request_keyframe" -> onNeedKeyframe()
+            "live_quality" -> onLiveQuality(msg.optInt("max_width"), msg.optInt("bitrate"))
             else -> onCommand(msg)
         }
     }

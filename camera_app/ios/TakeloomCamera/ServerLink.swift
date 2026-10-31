@@ -42,6 +42,8 @@ final class ServerLink {
     var statusProvider: (() -> [String: Any])?
     var nowNs: () -> Int64 = { Int64(DispatchTime.now().uptimeNanoseconds) }
     var onNeedKeyframe: (() -> Void)?
+    /// live_quality from the server: (max width, bits/s) for the live feed.
+    var onLiveQuality: ((Int, Int) -> Void)?
 
     private var connection: FramedConnection?
     private var host = ""
@@ -186,6 +188,11 @@ final class ServerLink {
             }
         case "request_keyframe":
             onNeedKeyframe?()
+        case "live_quality":
+            if let width = (message["max_width"] as? NSNumber)?.intValue,
+               let bitrate = (message["bitrate"] as? NSNumber)?.intValue {
+                onLiveQuality?(width, bitrate)
+            }
         default:
             onCommand?(message)
         }

@@ -38,9 +38,14 @@ data class FinishedRecording(
 )
 
 /**
- * Camera2 capture into one hardware H.264 encode, whose output goes to the
- * live feed ([onEncodedFrame]) and, during a session, the recording file
- * ([Mp4Recorder], which adds the mic).
+ * Camera2 capture into two hardware H.264 encodes: the recording's (full
+ * quality, into [Mp4Recorder] during a session, which adds the mic) and the
+ * live feed's ([onEncodedFrame], up to 720p, at the bitrate the server's
+ * Wi-Fi budget gives this phone — [setLiveQuality]). The live encoder's size
+ * is fixed while the camera runs: changing it means a new capture session,
+ * which would put a gap in a recording. A camera that can't feed a third
+ * surface gets the old single encode, shared by both ([liveAdaptive] false:
+ * the server then counts this phone's whole recording bitrate).
  *
  * Every timestamp here is on the camera's sensor clock — either boot time or
  * monotonic, depending on the device (SENSOR_INFO_TIMESTAMP_SOURCE). [nowNs]
@@ -57,12 +62,13 @@ class CameraEngine(context: Context) {
     private val handler = Handler(thread.looper)
     private var device: CameraDevice? = null
     private var session: CameraCaptureSession? = null
-    private var encoder: MediaCodec? = null
+    private var encoder: MediaCodec? = null  // the recording's
     private var encoderSurface: Surface? = null
+    private var liveEncoder: MediaCodec? = null
+    private var liveSurface: Surface? = null
     private var previewSurface: Surface? = null
-    private var drainThread: Thread? = null
+    private val drainThreads = mutableListOf<Thread>()
     @Volatile private var draining = false
-    @Volatile private var codecConfig: ByteArray? = null  // SPS+PPS, Annex-B
     @Volatile private var videoFormat: MediaFormat? = null
     @Volatile private var recorder: Mp4Recorder? = null
 
@@ -74,6 +80,15 @@ class CameraEngine(context: Context) {
     var height = 1080
         private set
     var front = false
+        private set
+    @Volatile var liveAdaptive = false
+        private set
+    var liveWidth = 1280
+        private set
+    var liveHeight = 720
+        private set
+    /** Until the server says otherwise: modest enough for several phones. */
+    @Volatile var liveBitrate = 3_000_000
         private set
 
     fun nowNs(): Long = if (useBootTime) SystemClock.elapsedRealtimeNanos() else System.nanoTime()
@@ -122,9 +137,22 @@ class CameraEngine(context: Context) {
         height = size.height
 
         try {
-            startEncoder(quality.bitrate)
+            val (codec, surface) = startEncoder(width, height, quality.bitrate, live = false)
+            encoder = codec
+            encoderSurface = surface
         } catch (e: Exception) {
             return@post onError("Couldn't start the video encoder: ${e.message}")
+        }
+        val liveSize = chooseLiveSize(id)
+        liveWidth = liveSize?.width ?: width
+        liveHeight = liveSize?.height ?: height
+        liveAdaptive = false
+        if (liveSize != null) {
+            runCatching { startEncoder(liveSize.width, liveSize.height, liveBitrate, live = true) }.onSuccess {
+                liveEncoder = it.first
+                liveSurface = it.second
+                liveAdaptive = true
+            }
         }
         texture.setDefaultBufferSize(width, height)
         val preview = Surface(texture)
@@ -149,15 +177,24 @@ class CameraEngine(context: Context) {
         }, handler)
     }
 
+    /** The live feed's size: the largest of the camera's no wider than 1280 in the recording's aspect. */
+    private fun chooseLiveSize(id: String): Size? {
+        val map = manager.getCameraCharacteristics(id).get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        return map?.getOutputSizes(MediaCodec::class.java)?.filter {
+            it.width <= 1280 && it.width.toLong() * height == it.height.toLong() * width
+        }?.maxByOrNull { it.width }
+    }
+
     @Suppress("DEPRECATION")
     private fun createSession(camera: CameraDevice, preview: Surface) {
         val encoderInput = encoderSurface ?: return
-        camera.createCaptureSession(listOf(preview, encoderInput), object : CameraCaptureSession.StateCallback() {
+        val live = liveSurface
+        val targets = listOfNotNull(preview, encoderInput, live)
+        camera.createCaptureSession(targets, object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(s: CameraCaptureSession) {
                 session = s
                 val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                    addTarget(preview)
-                    addTarget(encoderInput)
+                    targets.forEach { addTarget(it) }
                     set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(fps, fps))
                     set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
                 }
@@ -165,12 +202,20 @@ class CameraEngine(context: Context) {
             }
 
             override fun onConfigureFailed(s: CameraCaptureSession) {
-                onError("Couldn't configure the camera at ${width}x$height.")
+                if (live != null) {
+                    // No third stream on this camera: one encode for both.
+                    stopLiveEncoder()
+                    liveWidth = width
+                    liveHeight = height
+                    createSession(camera, preview)
+                } else {
+                    onError("Couldn't configure the camera at ${width}x$height.")
+                }
             }
         }, handler)
     }
 
-    private fun startEncoder(bitrate: Int) {
+    private fun startEncoder(width: Int, height: Int, bitrate: Int, live: Boolean): Pair<MediaCodec, Surface> {
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
@@ -184,6 +229,12 @@ class CameraEngine(context: Context) {
             setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel42)
         }
         val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+        val cbr = MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
+        if (live && codec.codecInfo.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                .encoderCapabilities.isBitrateModeSupported(cbr)) {
+            // Constant bitrate for the live feed: no bursts to flood the Wi-Fi.
+            format.setInteger(MediaFormat.KEY_BITRATE_MODE, cbr)
+        }
         try {
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         } catch (e: Exception) {
@@ -192,21 +243,34 @@ class CameraEngine(context: Context) {
             format.removeKey(MediaFormat.KEY_LEVEL)
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         }
-        encoderSurface = codec.createInputSurface()
+        val surface = codec.createInputSurface()
         codec.start()
-        encoder = codec
         draining = true
-        drainThread = Thread({ drain(codec) }, "video-encoder").apply { start() }
+        drainThreads += Thread({ drain(codec, live) }, if (live) "live-encoder" else "video-encoder").apply { start() }
+        return codec to surface
     }
 
-    private fun drain(codec: MediaCodec) {
+    private fun stopLiveEncoder() {
+        liveAdaptive = false
+        val codec = liveEncoder ?: return
+        liveEncoder = null
+        runCatching { codec.stop() }
+        runCatching { codec.release() }
+        liveSurface?.release()
+        liveSurface = null
+    }
+
+    /** One encoder's output: the live encoder's to the network; the
+     *  recording's to the file (and the network too, without a live one). */
+    private fun drain(codec: MediaCodec, live: Boolean) {
         val info = MediaCodec.BufferInfo()
+        var codecConfig: ByteArray? = null  // SPS+PPS, Annex-B
         while (draining) {
             val index = try { codec.dequeueOutputBuffer(info, 10_000) } catch (_: Exception) { break }
             when {
                 index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                     val format = codec.outputFormat
-                    videoFormat = format
+                    if (!live) videoFormat = format
                     val sps = format.getByteBuffer("csd-0")
                     val pps = format.getByteBuffer("csd-1")
                     if (sps != null && pps != null) codecConfig = bytesOf(sps) + bytesOf(pps)
@@ -223,8 +287,10 @@ class CameraEngine(context: Context) {
                         // MediaCodec already emits Annex-B; SPS/PPS go in
                         // front of each keyframe for the live decoder.
                         val config = codecConfig
-                        onEncodedFrame(ptsNs, keyframe, if (keyframe && config != null) config + data else data)
-                        recorder?.writeVideo(buffer, info, keyframe)
+                        if (live || !liveAdaptive) {
+                            onEncodedFrame(ptsNs, keyframe, if (keyframe && config != null) config + data else data)
+                        }
+                        if (!live) recorder?.writeVideo(buffer, info, keyframe)
                     }
                     codec.releaseOutputBuffer(index, false)
                 }
@@ -232,9 +298,23 @@ class CameraEngine(context: Context) {
         }
     }
 
-    fun requestKeyframe() {
+    /** The live feed's (the server asks, e.g. a decoder joining). */
+    fun requestKeyframe() = requestSyncFrame(liveEncoder ?: encoder)
+
+    private fun requestRecordingKeyframe() = requestSyncFrame(encoder)
+
+    private fun requestSyncFrame(codec: MediaCodec?) {
         runCatching {
-            encoder?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
+            codec?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
+        }
+    }
+
+    /** The server's share of the Wi-Fi for this phone (live_quality). Only
+     *  the bitrate: the live size is fixed while the camera runs. */
+    fun setLiveQuality(bitrate: Int) {
+        liveBitrate = bitrate
+        runCatching {
+            liveEncoder?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bitrate) })
         }
     }
 
@@ -246,16 +326,16 @@ class CameraEngine(context: Context) {
         runCatching { device?.close() }
         device = null
         draining = false
-        drainThread?.join(500)
-        drainThread = null
+        drainThreads.forEach { it.join(500) }
+        drainThreads.clear()
         runCatching { encoder?.stop() }
         runCatching { encoder?.release() }
         encoder = null
         encoderSurface?.release()
         encoderSurface = null
+        stopLiveEncoder()
         previewSurface?.release()
         previewSurface = null
-        codecConfig = null
         videoFormat = null
     }
 
@@ -269,7 +349,7 @@ class CameraEngine(context: Context) {
         if (recorder != null) return onFailed("Already recording another session.")
         if (format == null) return onFailed("The camera isn't running.")
         try {
-            recorder = Mp4Recorder(sessionId, file, format, useBootTime, onStarted) { requestKeyframe() }
+            recorder = Mp4Recorder(sessionId, file, format, useBootTime, onStarted) { requestRecordingKeyframe() }
         } catch (e: Exception) {
             onFailed("Couldn't start recording: ${e.message}")
         }

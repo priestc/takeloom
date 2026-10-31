@@ -2,12 +2,19 @@ import CoreMedia
 import Foundation
 import VideoToolbox
 
-/// The app's one hardware H.264 encode. Its output goes two places: Annex-B
-/// over the network as the live feed, and the same compressed samples
-/// straight into the session recording (SessionRecorder, passthrough).
+/// A hardware H.264 encode. CameraPipeline runs two: the recording's (full
+/// size and bitrate, straight into SessionRecorder) and the live feed's
+/// (Annex-B over the network, at whatever size and bitrate the server's
+/// Wi-Fi budget gives this phone — `maxWidth`, `setBitrate`).
 final class H264Encoder {
     var bitrate: Int
     var fps: Int
+    /// Encode at most this wide, scaled by VideoToolbox (aspect kept); nil:
+    /// the camera's own size. A change starts a new session (and keyframe).
+    var maxWidth: Int?
+    /// Cap bursts as well as the average — for the live feed, so a keyframe
+    /// never floods the Wi-Fi.
+    let limitBursts: Bool
     /// Called on VideoToolbox's thread with each encoded frame.
     var onOutput: ((CMSampleBuffer) -> Void)?
 
@@ -17,9 +24,33 @@ final class H264Encoder {
     private let lock = NSLock()
     private var forceKeyframe = false
 
-    init(bitrate: Int, fps: Int) {
+    init(bitrate: Int, fps: Int, maxWidth: Int? = nil, limitBursts: Bool = false) {
         self.bitrate = bitrate
         self.fps = fps
+        self.maxWidth = maxWidth
+        self.limitBursts = limitBursts
+    }
+
+    /// The size frames come out at, for a `sourceWidth` x `sourceHeight` camera.
+    func outputSize(sourceWidth: Int, sourceHeight: Int) -> (width: Int, height: Int) {
+        guard let maxWidth, sourceWidth > maxWidth, sourceWidth > 0 else { return (sourceWidth, sourceHeight) }
+        let height = Int((Double(maxWidth) * Double(sourceHeight) / Double(sourceWidth)).rounded()) & ~1
+        return (maxWidth & ~1, max(2, height))
+    }
+
+    /// Takes effect on the running session, no new keyframe needed.
+    func setBitrate(_ bitrate: Int) {
+        self.bitrate = bitrate
+        if let session { applyBitrate(session) }
+    }
+
+    private func applyBitrate(_ session: VTCompressionSession) {
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
+        if limitBursts {
+            // At most 1.5x the average in any one second, in bytes.
+            let limits = [Double(bitrate) * 1.5 / 8, 1.0] as CFArray
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limits)
+        }
     }
 
     deinit {
@@ -41,8 +72,8 @@ final class H264Encoder {
     }
 
     func encode(_ pixelBuffer: CVPixelBuffer, pts: CMTime, duration: CMTime) {
-        let w = CVPixelBufferGetWidth(pixelBuffer)
-        let h = CVPixelBufferGetHeight(pixelBuffer)
+        let (w, h) = outputSize(sourceWidth: CVPixelBufferGetWidth(pixelBuffer),
+                                sourceHeight: CVPixelBufferGetHeight(pixelBuffer))
         if session == nil || w != width || h != height {
             invalidate()
             guard makeSession(width: w, height: h) else { return }
@@ -81,7 +112,7 @@ final class H264Encoder {
         // No B-frames: decode order == presentation order, which keeps the
         // raw live stream (no timestamps on the wire into ffmpeg) simple.
         set(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)
-        set(kVTCompressionPropertyKey_AverageBitRate, bitrate as CFNumber)
+        applyBitrate(created)
         set(kVTCompressionPropertyKey_ExpectedFrameRate, fps as CFNumber)
         // A keyframe every 2 s: how fast the live feed recovers from a
         // dropped frame, and matches the server's own fragment cadence.

@@ -287,6 +287,10 @@ class StudioConfig:
     last_selected_instrument: str = ""
     latency_compensation_ms: float = 0.0  # ms to trim from start of takes during playback
     video_latency_compensation_ms: float = 0.0  # ms to shift video relative to audio when muxing recordings
+    # Total Wi-Fi bandwidth the Takeloom Camera phones' live feeds share
+    # (phone_camera/bandwidth.py). Their recordings don't count: they're
+    # uploaded after the session.
+    camera_wifi_budget_mbps: float = 20.0
     studio_musician: str = ""
     studio_name: str = ""
     studio_location: str = ""

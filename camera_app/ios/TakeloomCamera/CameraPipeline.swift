@@ -11,8 +11,10 @@ struct FinishedRecording {
     let height: Int
 }
 
-/// Camera + mic capture feeding one H.264 encoder, whose output goes to the
-/// live feed (`onEncodedFrame`) and, during a session, the recording file.
+/// Camera + mic capture feeding two H.264 encoders: the live feed's
+/// (`onEncodedFrame`, sized and paced by the server's Wi-Fi budget —
+/// `setLiveQuality`) and, during a session only, the recording's (full
+/// quality, into the file, which is uploaded afterwards).
 ///
 /// Every timestamp here is on the capture session's synchronization clock —
 /// the same clock `nowNs()` reads for the server clock pings, which is what
@@ -36,7 +38,16 @@ final class CameraPipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     private var videoInput: AVCaptureDeviceInput?
     private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
     private var rotationObservation: NSKeyValueObservation?
-    private let encoder: H264Encoder
+    private let recordEncoder: H264Encoder
+    private let liveEncoder: H264Encoder
+    /// videoQueue: whether frames go to recordEncoder (a recording's on).
+    private var recordEncoding = false
+    /// What the live feed is running at, for the status message.
+    private(set) var liveBitrate = CameraPipeline.defaultLiveBitrate
+    private(set) var liveMaxWidth = CameraPipeline.defaultLiveMaxWidth
+    /// Until the server says otherwise: modest enough for several phones.
+    static let defaultLiveBitrate = 3_000_000
+    static let defaultLiveMaxWidth = 1280
     private let ciContext = CIContext()
     private var lastPreviewTime = CFAbsoluteTimeGetCurrent()
     private var previewBusy = false
@@ -60,9 +71,12 @@ final class CameraPipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     override init() {
         previewLayer = AVCaptureVideoPreviewLayer(session: session)
         previewLayer.videoGravity = .resizeAspect
-        encoder = H264Encoder(bitrate: Settings.quality.bitrate, fps: 30)
+        recordEncoder = H264Encoder(bitrate: Settings.quality.bitrate, fps: 30)
+        liveEncoder = H264Encoder(bitrate: CameraPipeline.defaultLiveBitrate, fps: 30,
+                                  maxWidth: CameraPipeline.defaultLiveMaxWidth, limitBursts: true)
         super.init()
-        encoder.onOutput = { [weak self] sampleBuffer in self?.handleEncoded(sampleBuffer) }
+        recordEncoder.onOutput = { [weak self] sampleBuffer in self?.handleRecorded(sampleBuffer) }
+        liveEncoder.onOutput = { [weak self] sampleBuffer in self?.handleLive(sampleBuffer) }
     }
 
     var clock: CMClock {
@@ -91,8 +105,11 @@ final class CameraPipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             }
             self.position = position
             self.quality = quality
-            self.encoder.bitrate = quality.bitrate
-            self.encoder.invalidate()
+            self.videoQueue.sync {
+                self.recordEncoder.bitrate = quality.bitrate
+                self.recordEncoder.invalidate()
+                self.liveEncoder.invalidate()
+            }
             let error = self.configure()
             DispatchQueue.main.async { completion(error) }
         }
@@ -177,8 +194,34 @@ final class CameraPipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         }
     }
 
+    /// The live feed's (the server asks, e.g. a decoder joining).
     func requestKeyframe() {
-        encoder.requestKeyframe()
+        liveEncoder.requestKeyframe()
+    }
+
+    /// The server's share of the Wi-Fi for this phone (live_quality). The
+    /// bitrate applies at once; a new size waits while recording, since the
+    /// server keeps the live feed as the session's fallback video, and one
+    /// file can't change size partway.
+    func setLiveQuality(maxWidth: Int, bitrate: Int) {
+        videoQueue.async {
+            self.liveBitrate = bitrate
+            self.liveMaxWidth = maxWidth
+            self.liveEncoder.setBitrate(bitrate)
+            if !self.recordEncoding { self.applyLiveWidth() }
+        }
+    }
+
+    /// videoQueue.
+    private func applyLiveWidth() {
+        guard liveEncoder.maxWidth != liveMaxWidth else { return }
+        liveEncoder.maxWidth = liveMaxWidth
+        liveEncoder.invalidate()  // a new size: a new session (and keyframe) on the next frame
+    }
+
+    /// The live feed's frame size (for the status message).
+    var liveSize: (width: Int, height: Int) {
+        liveEncoder.outputSize(sourceWidth: frameWidth, sourceHeight: frameHeight)
     }
 
     // MARK: - Capture callbacks
@@ -189,8 +232,12 @@ final class CameraPipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             return
         }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        encoder.encode(pixelBuffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
-                       duration: CMSampleBufferGetDuration(sampleBuffer))
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let duration = CMSampleBufferGetDuration(sampleBuffer)
+        liveEncoder.encode(pixelBuffer, pts: pts, duration: duration)
+        if recordEncoding {
+            recordEncoder.encode(pixelBuffer, pts: pts, duration: duration)
+        }
         maybeSendPreview(pixelBuffer)
     }
 
@@ -213,11 +260,15 @@ final class CameraPipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         }
     }
 
-    private func handleEncoded(_ sampleBuffer: CMSampleBuffer) {
+    private func handleLive(_ sampleBuffer: CMSampleBuffer) {
         let keyframe = H264Encoder.isKeyframe(sampleBuffer)
         if let onEncodedFrame, let annexB = H264Encoder.annexB(sampleBuffer, keyframe: keyframe) {
             onEncodedFrame(CMSampleBufferGetPresentationTimeStamp(sampleBuffer).nanoseconds, keyframe, annexB)
         }
+    }
+
+    private func handleRecorded(_ sampleBuffer: CMSampleBuffer) {
+        let keyframe = H264Encoder.isKeyframe(sampleBuffer)
         writerQueue.async {
             self.recorder?.appendVideo(sampleBuffer, keyframe: keyframe)
         }
@@ -237,7 +288,10 @@ final class CameraPipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             let recorder = SessionRecorder(sessionID: sessionID, url: url)
             recorder.onStarted = { pts in onStarted(pts.nanoseconds) }
             self.recorder = recorder
-            self.encoder.requestKeyframe()
+            self.videoQueue.async {
+                self.recordEncoding = true
+                self.recordEncoder.requestKeyframe()
+            }
         }
     }
 
@@ -246,6 +300,12 @@ final class CameraPipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             guard let recorder = self.recorder, recorder.sessionID == sessionID else { return }
             self.recorder = nil
             self.stoppingRecorder = true
+            self.videoQueue.async {
+                // Idle between sessions: only the live feed costs battery.
+                self.recordEncoding = false
+                self.recordEncoder.invalidate()
+                self.applyLiveWidth()  // any size the server asked for meanwhile
+            }
             let width = self.frameWidth, height = self.frameHeight
             recorder.finish { error in
                 self.writerQueue.async { self.stoppingRecorder = false }

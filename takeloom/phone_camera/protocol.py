@@ -11,7 +11,9 @@ since most of the traffic here is compressed video:
     FRAME_JSON     UTF-8 JSON object with a "kind" (control messages below)
     FRAME_VIDEO    8-byte BE int64 capture timestamp (ns, phone clock) +
                    1 flag byte (bit 0 = keyframe) + one H.264 access unit,
-                   Annex-B, SPS/PPS repeated ahead of every keyframe
+                   Annex-B, SPS/PPS repeated ahead of every keyframe: the
+                   live feed, a separate encode from the recording, at the
+                   size and bitrate live_quality sets
     FRAME_PREVIEW  one small JPEG (~320px wide, a few per second) for the
                    Record tab's live preview
     FRAME_UPLOAD   a chunk of the finished recording's file bytes (upload
@@ -38,7 +40,15 @@ Control messages (FRAME_JSON):
                      recent ping — NTP's estimate, computed phone-side)
     phone -> server  {"kind": "status", "width", "height", "fps", "camera": "back"|"front",
                       "battery": 0..1|null, "charging": bool, "free_bytes": n,
-                      "recording_session": "..."|null, "pending_uploads": n}
+                      "recording_session": "..."|null, "pending_uploads": n,
+                      "live_adaptive": bool, "live_width", "live_height", "live_bitrate"}
+                     (live_*: from apps that follow live_quality; without
+                     live_adaptive, the live feed is the recording's encode)
+
+    server -> phone  {"kind": "live_quality", "max_width": n, "bitrate": n}
+                     this phone's share of the Wi-Fi (bandwidth.py), whenever
+                     it changes. iOS holds a new size until a recording
+                     ends; Android's live size is fixed (bitrate only).
 
     server -> phone  {"kind": "start_recording", "session_id": "..."}
     phone -> server  {"kind": "recording_started", "session_id": "...", "video_start_pts_ns": n}
