@@ -160,8 +160,9 @@ def captive_pause_heights():
 
 
 # ======================= CRADLE =======================
-def cradle(nut_pocket=True):
-    """nut_pocket=False for the captive-nut build: the screw head side is a plain flat face."""
+def cradle(nut_pocket=True, tongue=True):
+    """nut_pocket=False for the captive-nut build: the screw head side is a plain flat face.
+    tongue=False: no tilt joint at all (used by the one-piece tripod cradle)."""
     L, w = CRADLE_LEN, WALL
     # FRONT plate (subject side, meshed below): the phone's back lies flat against it.
     # Lips are on the screen side (toward the wall), so the screen stays visible
@@ -203,6 +204,9 @@ def cradle(nut_pocket=True):
     # tilt tongue under the floor, at the closed end
     ay, az = 9.0, -w - 16
     tongue_cs = CrossSection.batch_hull([rect2(-w, T + w, -w - 1, -w), circ(DISC_R, ay, az)])
+    if not tongue:
+        pr = m.translate([w, 0, 0]).rotate([0, -90, 0])
+        return m, pr.translate([0, 0, -pr.bounding_box()[2]]), (ay, az)
     tongue = yz_extrude(tongue_cs, -w, -w + TONGUE_T)
     m = m + tongue
     # tilt bolt hole, with a hex pocket in the tongue's open-end face (+x). Together with the
