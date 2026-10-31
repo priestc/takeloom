@@ -72,7 +72,7 @@ Review and expire after 90 days. `--no-testflight` skips the upload, and
 to retry a failed upload. A version can be uploaded only once. Android is
 still installed from Android Studio.
 
-One-time setup (already done once; here for a new Mac or account):
+One-time setup, per Apple account (step 1 again on a new Mac):
 
 1. Xcode › Settings › Accounts: logged into the Apple developer account
    (team `6V798W6LMZ`).
