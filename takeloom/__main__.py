@@ -280,12 +280,29 @@ def ui_command(remote_ip: str | None) -> None:
     run(remote_ip=remote_ip)
 
 
+@main.command(name="camera-testflight")
+def camera_testflight_command() -> None:
+    """Upload the iOS Takeloom Camera, at its current camera_app/VERSION, to
+    TestFlight: what `make-release --camera` does last, on its own (e.g. to
+    retry a failed upload). Needs this Mac's Xcode, logged into the Apple
+    developer account."""
+    from .camera_release import CameraReleaseError, checkout_root
+    from .testflight import TestFlightError, upload
+    try:
+        upload(checkout_root(), log=click.echo)
+    except (CameraReleaseError, TestFlightError) as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+
+
 @main.command(name="make-release")
 @click.argument("bump", type=click.Choice(["patch", "minor", "major"]))
 @click.option("--watch", is_flag=True, help="Follow the release until it finishes.")
 @click.option("--camera", is_flag=True,
               help="Release the Takeloom Camera apps (camera_app/) instead of takeloom.")
-def make_release_command(bump: str, watch: bool, camera: bool) -> None:
+@click.option("--no-testflight", is_flag=True,
+              help="With --camera: don't upload the iOS app to TestFlight.")
+def make_release_command(bump: str, watch: bool, camera: bool, no_testflight: bool) -> None:
     """Release takeloom: bump the PATCH/MINOR/MAJOR part of the version and
     publish GitHub's current main everywhere (GitHub, PyPI, Homebrew, apt,
     Flatpak). Runs .github/workflows/release.yml through the GitHub CLI
@@ -293,7 +310,8 @@ def make_release_command(bump: str, watch: bool, camera: bool) -> None:
 
     With --camera, release the Takeloom Camera apps instead: bump
     camera_app/VERSION (only if camera_app/ changed since the last camera
-    release), commit, tag camera-vX.Y.Z and push, from this checkout."""
+    release), commit, tag camera-vX.Y.Z and push, from this checkout, then
+    upload the iOS app to TestFlight."""
     import shutil
     import subprocess
     from .update_check import _REPO_URL
@@ -301,7 +319,7 @@ def make_release_command(bump: str, watch: bool, camera: bool) -> None:
     if camera:
         from .camera_release import CameraReleaseError, make_camera_release
         try:
-            make_camera_release(bump, log=click.echo, confirm=click.confirm)
+            make_camera_release(bump, log=click.echo, confirm=click.confirm, testflight=not no_testflight)
         except CameraReleaseError as e:
             click.echo(f"Error: {e}", err=True)
             raise SystemExit(1)

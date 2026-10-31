@@ -62,6 +62,27 @@ rather than on GitHub, since the apps are built locally with Xcode and
 Android Studio. Both stores' integer build number is derived from the
 version: 1.2.3 becomes 10203.
 
+Last, it uploads the iOS app to **TestFlight** (`takeloom/testflight.py`):
+an Xcode archive and export to App Store Connect, signed with the Apple
+account this Mac's Xcode is logged into. Apple processes the build for
+10–30 minutes; then the TestFlight app on each phone offers the update (or
+installs it, with automatic updates on). Internal-testing builds skip App
+Review and expire after 90 days. `--no-testflight` skips the upload, and
+`takeloom camera-testflight` uploads the current version on its own, e.g.
+to retry a failed upload. A version can be uploaded only once. Android is
+still installed from Android Studio.
+
+One-time setup (already done once; here for a new Mac or account):
+
+1. Xcode › Settings › Accounts: logged into the Apple developer account
+   (team `6V798W6LMZ`).
+2. App Store Connect › Apps › + › New App: iOS, bundle ID
+   `com.priestc.takeloomcamera`, any name and SKU.
+3. Its TestFlight tab › Internal Testing › +: a group with yourself in it,
+   with automatic distribution on, so every build goes straight to it.
+4. On each phone: install TestFlight from the App Store, sign in with the
+   same Apple ID, and accept the invite.
+
 Camera tags don't affect takeloom's own version, which only counts `v*`
 tags. takeloom ships `camera_app/VERSION` in its package, so the Record
 tab shows each connected phone's app version and warns when it's older

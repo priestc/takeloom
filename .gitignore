@@ -17,6 +17,7 @@ camera_app/ios/TakeloomCamera.xcodeproj/
 camera_app/android/.gradle/
 camera_app/android/local.properties
 camera_app/android/app/build/
+camera_app/android/.idea/
 .DS_Store
 
 # Tokens/keys saved locally by hand — never commit these.

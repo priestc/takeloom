@@ -14,7 +14,9 @@ built locally with Xcode and Android Studio:
    reads VERSION itself;
 3. commit, tag camera-vX.Y.Z, push both;
 4. make a GitHub release for the tag, never marked "latest" (that's
-   takeloom's own).
+   takeloom's own);
+5. upload the iOS app to TestFlight (testflight.py), unless told not to.
+   Android is still installed from Android Studio.
 
 Camera tags never affect takeloom's version, which only counts v* tags.
 takeloom ships camera_app/VERSION (see phone_camera/app_version.py), so a
@@ -92,7 +94,8 @@ def write_version(root: Path, version: str) -> list[Path]:
     return [version_file, spec]
 
 
-def make_camera_release(bump: str, log=print, confirm=lambda question: True, root: Path | None = None) -> str:
+def make_camera_release(bump: str, log=print, confirm=lambda question: True, root: Path | None = None,
+                        testflight: bool = True) -> str:
     """Release the camera apps (see the module docstring). Returns the new
     version. `root`: the checkout to release from (default: this one)."""
     root = root or checkout_root()
@@ -142,6 +145,12 @@ def make_camera_release(bump: str, log=print, confirm=lambda question: True, roo
             log(f"GitHub release: {result.stdout.strip()}")
         else:
             log(f"(Couldn't create the GitHub release: {result.stderr.strip()})")
-    log("Build and install the apps from Xcode / Android Studio to ship it. takeloom's next "
-        "release carries the new version, so older phones get flagged.")
+    if testflight:
+        from .testflight import TestFlightError, upload
+        try:
+            upload(root, log=log)
+        except TestFlightError as e:
+            log(f"(TestFlight upload failed: {e} Retry with `takeloom camera-testflight`.)")
+    log("Android: build and install from Android Studio. takeloom's next release carries the "
+        "new version, so older phones get flagged.")
     return version
