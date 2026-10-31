@@ -136,25 +136,27 @@ python3 wall_phone_mount.py   # writes STLs to ./out/
 
 `src/fitcheck.py` needs `shapely` and checks that a phone of a given size can be loaded and removed.
 
-## Tripod version (one piece)
+## Tripod adapter
 
-The cradle fused to a solid base that screws onto any standard **1/4"-20** tripod screw. It has no joints and needs no M5 hardware: aim it with the tripod head.
+A single printed block that puts an **already-printed cradle** on any standard **1/4"-20** tripod screw. It's fixed, with no tilt joint: aim with the tripod head.
 
-![Tripod cradle](images/tripod.png)
+![Tripod adapter](images/tripod.png)
 
-Built for strength:
+- **Fits the cradle you already have.** The cradle's tongue drops into a fitted slot, and one M5 screw goes through the tongue's existing hole. It fits cradles with or without the nut pocket.
+- **Strong, and can't rotate.** The cradle's floor rests on the block's flat top for 107 mm of its length, so the phone's weight goes into the block, not the screw. The tongue is held on both faces and around its rounded bottom, so the cradle can't rotate even 1° if the screw loosens.
+- **Balanced.** The 1/4"-20 nut sits within 4 mm of the cradle + phone center of gravity for all three phones.
+- **No print pauses and no supports.** It prints upright on its flat bottom. Both nuts drop into shafts from the top face before the cradle goes on, and the cradle then covers them.
 
-- **Full-length solid base.** A 15 mm base runs under the whole cradle, so the cradle is supported along its entire length. The project file prints the base at 100% infill.
-- **No weak layer lines.** It prints like the cradle, standing on its closed end, so every layer runs straight across the joint between base and cradle.
-- **Steel thread.** A 1/4"-20 hex nut is sealed in during printing, centered under the cradle and phone's center of gravity (within 4 mm for all three phones). The tripod screw pulls the nut toward the tripod, so the thin floor under the nut only gets squeezed.
-- **Blind screw hole.** Even a long tripod screw stops 4 mm short of the phone.
+**Files:** `3mf/tripod_adapter_project.3mf` is ready to print, with 100% infill around the tongue seat, the M5 nut and the tripod nut. `stl/tripod_adapter.stl` is geometry only.
 
-| File | What it is |
-|---|---|
-| `3mf/tripod_cradle_captive_project.3mf` | Ready to print. **Pause at 84.40 mm**: drop the 1/4"-20 nut into the slot, corner down, then resume |
-| `3mf/tripod_cradle_project.3mf` | No pause: slide the nut into the slot from the base's side face after printing |
-| `stl/tripod_cradle*.stl` | Geometry only |
+**Hardware:** one **1/4"-20 hex nut** (7/16" across flats), one **M5 × 20** screw, one M5 nut and one washer.
 
-**Hardware:** one 1/4"-20 hex nut (7/16" across flats, 7/32" thick). Measure it first: the slot fits up to about 11.3 mm across the flats and 5.8 mm thick.
+**Assembly**
 
-All three phones load and unload the usual way with a tripod head under the base. I checked this in the 2D load/unload simulation with a 50 mm head.
+1. Drop the 1/4"-20 nut into the hex shaft in the middle of the block. It falls to the floor near the bottom.
+2. Drop the M5 nut into the narrow shaft next to the tongue slot, flats vertical. It settles into a V at the bottom, lined up with the screw.
+3. Lower the cradle's tongue into the slot, so the cradle floor sits flat on the block.
+4. Put the washer on the M5 screw and drive it in from the closed-end face, through the cheek and tongue into the nut.
+5. Screw the adapter onto the tripod.
+
+**Tongue thickness:** the slot is sized for an 8 mm tongue, which is every cradle printed since the "nut pockets on both sides" change. If yours measures 6 mm, set `TONGUE_T_FIT = 6.0` in `src/tripod_adapter.py` and regenerate.
