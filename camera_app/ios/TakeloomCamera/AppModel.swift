@@ -33,6 +33,7 @@ final class AppModel: ObservableObject {
         link.nowNs = { [pipeline] in pipeline.nowNs() }
         link.onNeedKeyframe = { [pipeline] in pipeline.requestKeyframe() }
         link.onLiveQuality = { [pipeline] width, bitrate in pipeline.setLiveQuality(maxWidth: width, bitrate: bitrate) }
+        link.onFraming = { [pipeline] framing in pipeline.setFraming(framing) }
         link.statusProvider = { [weak self] in self?.statusFields() ?? [:] }
         link.onState = { [weak self] state in
             Task { @MainActor in
@@ -218,8 +219,10 @@ final class AppModel: ObservableObject {
             "live_bitrate": pipeline.liveBitrate,
             "live_frames": pipeline.liveEncoderStats.frames,
             "live_error": pipeline.liveEncoderStats.error,
+            "framing": pipeline.framing.dictionary,
         ]
         fields["battery"] = device.0 >= 0 ? device.0 : NSNull()
+        if let caps = pipeline.zoomCaps { fields["zoom_caps"] = caps.dictionary }
         return fields
     }
 }

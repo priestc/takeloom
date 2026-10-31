@@ -111,9 +111,10 @@ class _ExpectedUpload:
     error: str = ""
 
 
-# Status fields that change bandwidth.py's plan: whether a phone's live feed
-# can adapt, and its recording size (a non-adaptive feed's bitrate).
-_LIVE_STATUS_KEYS = ("live_adaptive", "height")
+# Status fields the backend reacts to: whether a phone's live feed can
+# adapt and its recording size (bandwidth.py's plan), and what it can zoom
+# (framing.py; video-ui's controls).
+_LIVE_STATUS_KEYS = ("live_adaptive", "height", "zoom_caps")
 
 
 class PhoneCameraHub:

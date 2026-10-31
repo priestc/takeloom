@@ -42,6 +42,8 @@ class ServerLink(private val settings: Settings) {
     var onCommand: (JSONObject) -> Unit = {}
     /** live_quality from the server: (max width, bits/s) for the live feed. */
     var onLiveQuality: (Int, Int) -> Unit = { _, _ -> }
+    /** framing from the server: zoom and pan. */
+    var onFraming: (Framing) -> Unit = {}
     var statusProvider: () -> JSONObject = { JSONObject() }
     var nowNs: () -> Long = { System.nanoTime() }
     var onNeedKeyframe: () -> Unit = {}
@@ -185,6 +187,7 @@ class ServerLink(private val settings: Settings) {
             }
             "request_keyframe" -> onNeedKeyframe()
             "live_quality" -> onLiveQuality(msg.optInt("max_width"), msg.optInt("bitrate"))
+            "framing" -> onFraming(Framing(msg.optDouble("zoom", 1.0), msg.optDouble("x", 0.5), msg.optDouble("y", 0.5)))
             else -> onCommand(msg)
         }
     }

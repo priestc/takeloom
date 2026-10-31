@@ -51,8 +51,11 @@ _READ_ONLY_OPS = {
     "search_inspiration_artists", "search_inspiration_by_filter", "find_inspiration_track",
     "is_recording", "get_monitoring_mode", "get_voice_switch", "poll_vault_pairing", "check_vault_server",
     "list_sessions", "get_session_detail", "analyze_take", "fetch_take_file", "fetch_backing_file", "fetch_take_video",
-    "list_completed_takes", "benchmark_audio_modifiers", "get_song_mix",
+    "list_completed_takes", "benchmark_audio_modifiers", "get_song_mix", "get_camera_framing",
 }
+# Not read-only, but sent many times a second (dragging a camera's framing
+# in video-ui), so not logged either.
+_QUIET_OPS = {"set_camera_framing", "set_preview_full_resolution"}
 
 
 def _is_local_network(ip: str) -> bool:
@@ -331,7 +334,7 @@ class _ClientHandler(socketserver.StreamRequestHandler):
         op = msg.get("op")
         args = msg.get("args") or {}
         who = f"{self.client_name} ({self.client_address[0]})"
-        if op not in _READ_ONLY_OPS:
+        if op not in _READ_ONLY_OPS and op not in _QUIET_OPS:
             self._owner._log(f"[{_timestamp()}] {who}: {op}" + (f" {args}" if args else ""))
         try:
             if op == "subscribe_preview":

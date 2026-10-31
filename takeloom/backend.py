@@ -1031,6 +1031,22 @@ class Backend(ABC):
         ...
 
     @abstractmethod
+    def get_camera_framing(self, camera_device: str) -> dict:
+        """A camera's zoom and pan (phone_camera/framing.py): {"supported",
+        "zoom", "x", "y", "min", "max", "lenses", "pan"}. Only Takeloom
+        Camera phones can be framed ("supported" False otherwise); "min"/
+        "max"/"lenses"/"pan" are what the phone reported it can do."""
+        ...
+
+    @abstractmethod
+    def set_camera_framing(self, camera_device: str, zoom: float, x: float, y: float) -> dict:
+        """Zoom and pan a phone (see get_camera_framing, whose shape this
+        returns, clamped to what the phone can do). Remembered per camera
+        and sent again whenever the phone connects. Announced with
+        "camera_framing_changed"."""
+        ...
+
+    @abstractmethod
     def camera_versions(self) -> dict[str, dict]:
         """camera_device -> {"version", "latest", "outdated"} for each
         connected Takeloom Camera phone: the app version it's running, the
@@ -1920,6 +1936,7 @@ class LocalBackend(Backend):
         # whoever wants it at full resolution (see _on_full_preview_wanted).
         self._phone_full_previews: dict = {}
         self._phone_full_previews_lock = threading.Lock()
+        self._framing_lock = threading.Lock()
         # The last plan bandwidth.describe() logged; serializes re-planning.
         self._bandwidth_plan: str | None = None
         self._bandwidth_lock = threading.Lock()
@@ -1997,6 +2014,57 @@ class LocalBackend(Backend):
 
     def camera_versions(self) -> dict[str, dict]:
         return self._phone_hub.camera_versions() if self._phone_hub is not None else {}
+
+    def _phone_zoom_caps(self, camera_device: str) -> dict | None:
+        if self._phone_hub is None or not is_phone_device(camera_device):
+            return None
+        info = self._phone_hub.camera(phone_device_id(camera_device))
+        caps = info.status.get("zoom_caps") if info is not None else None
+        return caps if isinstance(caps, dict) else None
+
+    def _framing_result(self, camera_device: str, framing, caps: dict | None) -> dict:
+        return {
+            "camera": camera_device, "supported": caps is not None, **framing.to_dict(),
+            "min": (caps or {}).get("min", 1.0), "max": (caps or {}).get("max", 1.0),
+            "lenses": (caps or {}).get("lenses", [1.0]), "pan": bool((caps or {}).get("pan")),
+        }
+
+    def get_camera_framing(self, camera_device: str) -> dict:
+        from .phone_camera.framing import Framing
+        known = next((c for c in self.get_config().known_cameras if c.key == camera_device), None)
+        caps = self._phone_zoom_caps(camera_device)
+        return self._framing_result(camera_device, Framing.from_dict(known.framing if known else None).clamped(caps),
+                                    caps)
+
+    def set_camera_framing(self, camera_device: str, zoom: float, x: float, y: float) -> dict:
+        from .phone_camera.framing import Framing
+        caps = self._phone_zoom_caps(camera_device)
+        if caps is None:
+            raise BackendError("Only a connected Takeloom Camera phone (app 1.2 or later) can be zoomed and panned.")
+        framing = Framing(zoom, x, y).clamped(caps)
+        self._phone_hub.send(phone_device_id(camera_device), framing.message())
+        with self._framing_lock:
+            config = self.get_config()
+            known = next((c for c in config.known_cameras if c.key == camera_device), None)
+            if known is not None and known.framing != framing.to_dict():
+                known.framing = framing.to_dict()
+                config.save(self._config_path)
+        result = self._framing_result(camera_device, framing, caps)
+        self._emit("camera_framing_changed", result)
+        return result
+
+    def _send_phone_framings(self) -> None:
+        """Every connected phone its remembered framing (they start at 1x,
+        centered)."""
+        from .phone_camera.framing import Framing
+        if self._phone_hub is None:
+            return
+        known = {c.key: c for c in self.get_config().known_cameras}
+        for info in self._phone_hub.cameras():
+            camera = known.get(DEVICE_PREFIX + info.device_id)
+            if camera is not None and camera.framing:
+                framing = Framing.from_dict(camera.framing).clamped(info.status.get("zoom_caps") or None)
+                self._phone_hub.send(info.device_id, framing.message())
 
     def _resolve_program_camera(self, cameras: list[tuple[str, str]] | None = None) -> str:
         cameras = self.session_cameras() if cameras is None else cameras
@@ -2135,13 +2203,21 @@ class LocalBackend(Backend):
             on_preview=self._on_phone_preview,
             on_change=self._on_phone_cameras_changed,
             session_dir_resolver=self._local_session_dir_path,
-            on_live_change=self._plan_phone_bandwidth,
+            on_live_change=self._on_phone_status_changed,
         )
 
     def _on_phone_cameras_changed(self) -> None:
         self._scan_cameras(force=True)  # also remembers a phone seen for the first time
         self._emit("session_cameras_changed", {})
         self._plan_phone_bandwidth()
+        self._send_phone_framings()
+
+    def _on_phone_status_changed(self) -> None:
+        self._plan_phone_bandwidth()
+        # A phone reported what it can zoom (or that changed: a camera
+        # switch): framing controls and limits may differ now.
+        self._send_phone_framings()
+        self._emit("camera_framing_changed", {})
 
     def _plan_phone_bandwidth(self) -> None:
         """Share the Wi-Fi budget between the connected phones' live feeds

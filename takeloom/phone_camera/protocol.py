@@ -45,6 +45,11 @@ Control messages (FRAME_JSON):
                      (live_*: from apps that follow live_quality; without
                      live_adaptive, the live feed is the recording's encode)
 
+    server -> phone  {"kind": "framing", "zoom": f, "x": f, "y": f}
+                     zoom and pan (framing.py), on connecting and when changed
+                     in video-ui. The phone reports what it can do in its
+                     status: "zoom_caps": {"min", "max", "lenses": [...],
+                     "pan": bool}, and what it's doing: "framing".
     server -> phone  {"kind": "live_quality", "max_width": n, "bitrate": n}
                      this phone's share of the Wi-Fi (bandwidth.py), whenever
                      it changes. iOS holds a new size until a recording

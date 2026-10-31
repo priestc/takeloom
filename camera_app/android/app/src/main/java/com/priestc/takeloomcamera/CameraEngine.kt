@@ -18,6 +18,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.media.MediaRecorder
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
@@ -90,6 +91,12 @@ class CameraEngine(context: Context) {
     /** Until the server says otherwise: modest enough for several phones. */
     @Volatile var liveBitrate = 3_000_000
         private set
+    /** Zoom/pan from the server, and what this camera can do (status). */
+    @Volatile var framing = Framing()
+        private set
+    @Volatile var zoomCaps: ZoomCaps? = null
+        private set
+    private var request: CaptureRequest.Builder? = null
 
     fun nowNs(): Long = if (useBootTime) SystemClock.elapsedRealtimeNanos() else System.nanoTime()
 
@@ -130,6 +137,7 @@ class CameraEngine(context: Context) {
         this.front = front
         val id = cameraId(front) ?: return@post onError("No camera available.")
         val chars = manager.getCameraCharacteristics(id)
+        zoomCaps = ZoomCaps(chars)
         useBootTime = chars.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
             CameraMetadata.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
         val size = chooseSize(front, quality)
@@ -198,7 +206,8 @@ class CameraEngine(context: Context) {
                     set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(fps, fps))
                     set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
                 }
-                s.setRepeatingRequest(request.build(), null, handler)
+                this@CameraEngine.request = request
+                applyFraming()
             }
 
             override fun onConfigureFailed(s: CameraCaptureSession) {
@@ -309,6 +318,25 @@ class CameraEngine(context: Context) {
         }
     }
 
+    /** Zoom and pan from the server (framing message). */
+    fun setFraming(framing: Framing) = handler.post {
+        this.framing = framing
+        applyFraming()
+    }
+
+    /** On the camera thread: the zoom ratio and crop region, then the request again. */
+    private fun applyFraming() {
+        val s = session ?: return
+        val r = request ?: return
+        val caps = zoomCaps ?: return
+        val (ratio, crop) = caps.plan(framing)
+        if (ratio != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            r.set(CaptureRequest.CONTROL_ZOOM_RATIO, ratio)
+        }
+        r.set(CaptureRequest.SCALER_CROP_REGION, crop)
+        runCatching { s.setRepeatingRequest(r.build(), null, handler) }
+    }
+
     /** The server's share of the Wi-Fi for this phone (live_quality). Only
      *  the bitrate: the live size is fixed while the camera runs. */
     fun setLiveQuality(bitrate: Int) {
@@ -323,6 +351,7 @@ class CameraEngine(context: Context) {
     private fun stopLocked() {
         runCatching { session?.close() }
         session = null
+        request = null
         runCatching { device?.close() }
         device = null
         draining = false

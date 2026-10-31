@@ -44,6 +44,8 @@ final class ServerLink {
     var onNeedKeyframe: (() -> Void)?
     /// live_quality from the server: (max width, bits/s) for the live feed.
     var onLiveQuality: ((Int, Int) -> Void)?
+    /// framing from the server: zoom and pan.
+    var onFraming: ((Framing) -> Void)?
 
     private var connection: FramedConnection?
     private var host = ""
@@ -188,6 +190,11 @@ final class ServerLink {
             }
         case "request_keyframe":
             onNeedKeyframe?()
+        case "framing":
+            if let zoom = (message["zoom"] as? NSNumber)?.doubleValue,
+               let x = (message["x"] as? NSNumber)?.doubleValue, let y = (message["y"] as? NSNumber)?.doubleValue {
+                onFraming?(Framing(zoom: zoom, x: x, y: y))
+            }
         case "live_quality":
             if let width = (message["max_width"] as? NSNumber)?.intValue,
                let bitrate = (message["bitrate"] as? NSNumber)?.intValue {

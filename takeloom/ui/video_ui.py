@@ -5,7 +5,13 @@ front and center, the program ("out") camera: the one the live stream
 shows. The thumbnails run on the small, smooth preview frames; the program
 view asks for its camera at full resolution, a few frames a second (see
 backend.py's PreviewSubscription), so it's sharp, and over Remote only that
-one camera costs full-resolution bandwidth. Click a thumbnail, or press its number key, to make it the program
+one camera costs full-resolution bandwidth.
+
+A Takeloom Camera phone in the program view can be zoomed and panned
+(Backend.set_camera_framing; phone_camera/framing.py): scroll to zoom, drag
+to pan, the lens buttons below it, or +/-, 0 (reset) and the arrow keys.
+The phone zooms optically where it can and crops for the rest, and the
+server remembers each camera's framing for the next time it connects. Click a thumbnail, or press its number key, to make it the program
 camera (Backend.set_program_camera): the stream switches to it, and during a
 session the switch goes into the session log, so the streamed video can be
 rebuilt afterwards from the cameras' recordings.
@@ -29,6 +35,8 @@ from .app_state import AppState
 
 THUMB_W, THUMB_H = 224, 126
 RENDER_INTERVAL_MS = 50  # at most ~20 redraws a second, whatever the cameras send
+FRAMING_SEND_INTERVAL_S = 0.1  # while dragging/scrolling: at most 10 framing updates a second
+ZOOM_STEP = 1.15  # per scroll notch / +/- press
 PROGRAM_COLOR = "#d32f2f"
 IDLE_COLOR = "#3a3a3a"
 BG = "#111111"
@@ -64,6 +72,12 @@ class VideoUIFrame(tk.Frame):
         # send them) it shows the small frames instead.
         self._program_full = False
         self._program_imgtk = None
+        # The program camera's framing (Backend.get_camera_framing's dict),
+        # as shown and as being changed here; None if it can't be framed.
+        self._framing: dict | None = None
+        self._framing_pending: dict | None = None  # newest change not yet sent
+        self._framing_sender_busy = False
+        self._drag_start: tuple[int, int, float, float] | None = None
 
         self.strip = tk.Frame(self, background=BG)
         self.strip.pack(side="top", fill="x", padx=12, pady=(12, 8))
@@ -72,9 +86,18 @@ class VideoUIFrame(tk.Frame):
         self.status_var = tk.StringVar(value="")
         tk.Label(self, textvariable=self.status_var, background=BG, foreground="#bbbbbb",
                  anchor="w").pack(side="bottom", fill="x", padx=12, pady=8)
+        # Zoom/pan controls for the program camera, shown when it has any.
+        self.framing_bar = tk.Frame(self, background=BG)
+        self.framing_bar.pack(side="bottom", fill="x", padx=12, pady=(8, 0))
         self.program_view = tk.Label(self, background="black", foreground="#888888",
                                      text="No camera", font=("TkDefaultFont", 16))
         self.program_view.pack(side="top", fill="both", expand=True, padx=12)
+        self.program_view.bind("<MouseWheel>", self._on_wheel)
+        self.program_view.bind("<Button-4>", lambda _e: self._zoom_by(ZOOM_STEP))  # X11 scroll
+        self.program_view.bind("<Button-5>", lambda _e: self._zoom_by(1 / ZOOM_STEP))
+        self.program_view.bind("<ButtonPress-1>", self._on_drag_start)
+        self.program_view.bind("<B1-Motion>", self._on_drag)
+        self.program_view.bind("<ButtonRelease-1>", lambda _e: setattr(self, "_drag_start", None))
 
         self.app_state.add_listener(self._on_app_state_changed)
         self.bind("<Destroy>", self._on_destroy)
@@ -148,6 +171,12 @@ class VideoUIFrame(tk.Frame):
             return
         if event == "program_camera_changed":
             self._set_program(data.get("camera", ""))
+        elif event == "camera_framing_changed":
+            if data.get("camera") == self._program and "zoom" in data:
+                if self._drag_start is None and self._framing_pending is None:
+                    self._show_framing(data)  # someone else's change (or the server's clamp)
+            elif not data.get("camera"):
+                self._refresh_framing()  # a phone's zoom abilities changed
         elif event == "session_cameras_changed":
             self._refresh()
         elif event == "streaming_status":
@@ -199,6 +228,117 @@ class VideoUIFrame(tk.Frame):
             index = int(event.char) - 1
             if index < len(self._cameras):
                 self._choose(self._cameras[index][0])
+        elif event.char in ("+", "="):
+            self._zoom_by(ZOOM_STEP)
+        elif event.char in ("-", "_"):
+            self._zoom_by(1 / ZOOM_STEP)
+        elif event.char == "0":
+            self._change_framing(zoom=1.0, x=0.5, y=0.5)
+        elif event.keysym in ("Left", "Right", "Up", "Down") and self._framing is not None:
+            step = self._visible_fraction() * 0.1
+            dx = {"Left": -step, "Right": step}.get(event.keysym, 0.0)
+            dy = {"Up": -step, "Down": step}.get(event.keysym, 0.0)
+            self._change_framing(x=self._framing["x"] + dx, y=self._framing["y"] + dy)
+
+    # --- framing (zoom/pan) ---
+
+    def _refresh_framing(self) -> None:
+        device, backend = self._program, self._backend
+        if not device:
+            self._show_framing(None)
+            return
+
+        def done(result, error) -> None:
+            if self.winfo_exists() and device == self._program:
+                self._show_framing(result if result and result.get("supported") and not error else None)
+        self._run(lambda: backend.get_camera_framing(device), done)
+
+    def _show_framing(self, framing: dict | None) -> None:
+        """Rebuild the bar under the program view for `framing`."""
+        self._framing = framing
+        for child in self.framing_bar.winfo_children():
+            child.destroy()
+        if framing is None:
+            return
+
+        def button(text, command, active=False) -> None:
+            tk.Button(self.framing_bar, text=text, command=command, takefocus=False,
+                      highlightbackground=PROGRAM_COLOR if active else BG,
+                      foreground="white" if active else "black").pack(side="left", padx=(0, 4))
+
+        for lens in framing.get("lenses") or []:
+            label = f"{lens:g}×"
+            button(label, lambda z=lens: self._change_framing(zoom=z), active=abs(framing["zoom"] - lens) < 0.01)
+        button("−", lambda: self._zoom_by(1 / ZOOM_STEP))
+        tk.Label(self.framing_bar, text=f"{framing['zoom']:.1f}×", width=6, background=BG,
+                 foreground="white").pack(side="left")
+        button("+", lambda: self._zoom_by(ZOOM_STEP))
+        if framing.get("pan"):
+            button("Center", lambda: self._change_framing(x=0.5, y=0.5))
+        hint = "Scroll to zoom" + (", drag to pan" if framing.get("pan") else "") + "; remembered for this camera"
+        tk.Label(self.framing_bar, text=hint, background=BG, foreground="#888888").pack(side="left", padx=12)
+
+    def _visible_fraction(self) -> float:
+        """How much of the camera's widest view the program view shows."""
+        f = self._framing or {}
+        return float(f.get("min", 1.0)) / max(float(f.get("zoom", 1.0)), 1e-6)
+
+    def _zoom_by(self, factor: float) -> None:
+        if self._framing is not None:
+            self._change_framing(zoom=self._framing["zoom"] * factor)
+
+    def _on_wheel(self, event) -> None:
+        if event.delta:
+            self._zoom_by(ZOOM_STEP if event.delta > 0 else 1 / ZOOM_STEP)
+
+    def _on_drag_start(self, event) -> None:
+        if self._framing is not None and self._framing.get("pan"):
+            self._drag_start = (event.x, event.y, self._framing["x"], self._framing["y"])
+
+    def _on_drag(self, event) -> None:
+        if self._drag_start is None or self._framing is None:
+            return
+        x0, y0, fx, fy = self._drag_start
+        # The picture moves with the mouse, like a map: dragging right shows
+        # what's to the left.
+        width = self._program_imgtk.width() if self._program_imgtk else self.program_view.winfo_width()
+        height = self._program_imgtk.height() if self._program_imgtk else self.program_view.winfo_height()
+        visible = self._visible_fraction()
+        self._change_framing(x=fx - (event.x - x0) / max(width, 1) * visible,
+                             y=fy - (event.y - y0) / max(height, 1) * visible)
+
+    def _change_framing(self, **changes) -> None:
+        """Apply locally at once (clamped like the server will), and queue
+        for the server: the newest change goes out, at most every
+        FRAMING_SEND_INTERVAL_S."""
+        if self._framing is None:
+            return
+        from ..phone_camera.framing import Framing
+        f = self._framing
+        caps = {"min": f["min"], "max": f["max"], "pan": f["pan"]}
+        framing = Framing(changes.get("zoom", f["zoom"]), changes.get("x", f["x"]), changes.get("y", f["y"]))
+        framing = framing.clamped(caps)
+        self._show_framing({**f, **framing.to_dict()})
+        self._framing_pending = {"camera": self._program, **framing.to_dict()}
+        if not self._framing_sender_busy:
+            self._framing_sender_busy = True
+            self._send_framing()
+
+    def _send_framing(self) -> None:
+        pending, self._framing_pending = self._framing_pending, None
+        if pending is None:
+            self._framing_sender_busy = False
+            return
+        backend = self._backend
+
+        def done(_result, error) -> None:
+            if not self.winfo_exists():
+                return
+            if error:
+                self.status_var.set(f"Couldn't zoom/pan: {error}")
+            self.after(int(FRAMING_SEND_INTERVAL_S * 1000), self._send_framing)
+        self._run(lambda: backend.set_camera_framing(pending["camera"], pending["zoom"], pending["x"], pending["y"]),
+                  done)
 
     def _choose(self, device: str) -> None:
         if device == self._program:
@@ -221,6 +361,8 @@ class VideoUIFrame(tk.Frame):
         self._program_full = False
         self._pending_full = None
         self._request_full_resolution()
+        self._show_framing(None)
+        self._refresh_framing()
         self.program_view.configure(image="", text="Waiting for the camera…" if device else "No camera")
         self._paint_selection()
         self._update_status()

@@ -42,6 +42,12 @@ final class CameraPipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     private let liveEncoder: H264Encoder
     /// videoQueue: whether frames go to recordEncoder (a recording's on).
     private var recordEncoding = false
+    /// Zoom/pan from the server, and what this camera can do (status).
+    private(set) var framing = Framing()
+    private(set) var zoomCaps: ZoomCaps?
+    /// videoQueue: the crop that framing needs beyond the camera's own zoom.
+    private var crop = CropRect()
+    private let cropper = FrameCropper()
     /// What the live feed is running at, for the status message.
     private(set) var liveBitrate = CameraPipeline.defaultLiveBitrate
     private(set) var liveMaxWidth = CameraPipeline.defaultLiveMaxWidth
@@ -120,7 +126,7 @@ final class CameraPipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         defer { session.commitConfiguration() }
 
         if let videoInput { session.removeInput(videoInput) }
-        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position),
+        guard let device = Self.camera(position: position),
               let input = try? AVCaptureDeviceInput(device: device), session.canAddInput(input) else {
             return "No camera available."
         }
@@ -173,6 +179,8 @@ final class CameraPipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             self?.sessionQueue.async { self?.applyRotation() }
         }
         applyRotation()
+        zoomCaps = ZoomCaps(device: device)
+        applyFraming()
         return nil
     }
 
@@ -197,6 +205,38 @@ final class CameraPipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     /// The live feed's (the server asks, e.g. a decoder joining).
     func requestKeyframe() {
         liveEncoder.requestKeyframe()
+    }
+
+    /// The back camera with the most lenses (iOS switches between them as
+    /// the zoom changes: optical zoom), else the plain wide-angle one.
+    private static func camera(position: AVCaptureDevice.Position) -> AVCaptureDevice? {
+        let types: [AVCaptureDevice.DeviceType] = position == .back
+            ? [.builtInTripleCamera, .builtInDualWideCamera, .builtInDualCamera, .builtInWideAngleCamera]
+            : [.builtInWideAngleCamera]
+        for type in types {
+            if let device = AVCaptureDevice.default(type, for: .video, position: position) { return device }
+        }
+        return nil
+    }
+
+    /// Zoom and pan from the server (framing message).
+    func setFraming(_ framing: Framing) {
+        sessionQueue.async {
+            self.framing = framing
+            self.applyFraming()
+        }
+    }
+
+    /// sessionQueue: the camera's zoom, and the crop for the rest.
+    private func applyFraming() {
+        guard let device = videoInput?.device, let caps = zoomCaps else { return }
+        let plan = caps.plan(framing)
+        if (try? device.lockForConfiguration()) != nil {
+            device.videoZoomFactor = min(max(plan.factor, device.minAvailableVideoZoomFactor),
+                                         device.maxAvailableVideoZoomFactor)
+            device.unlockForConfiguration()
+        }
+        videoQueue.async { self.crop = plan.crop }
     }
 
     /// The server's share of the Wi-Fi for this phone (live_quality). The
@@ -236,7 +276,9 @@ final class CameraPipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             recorder?.appendAudio(sampleBuffer)  // already on writerQueue
             return
         }
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        guard let captured = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        // Panned: the frame's crop, at the frame's own size, for everything.
+        let pixelBuffer = crop.isFull ? captured : (cropper.crop(captured, to: crop) ?? captured)
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         let duration = CMSampleBufferGetDuration(sampleBuffer)
         liveEncoder.encode(pixelBuffer, pts: pts, duration: duration)

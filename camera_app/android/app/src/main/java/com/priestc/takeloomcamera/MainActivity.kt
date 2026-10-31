@@ -152,6 +152,7 @@ class MainActivity : Activity() {
         link.nowNs = { engine.nowNs() }
         link.onNeedKeyframe = { engine.requestKeyframe() }
         link.onLiveQuality = { _, bitrate -> if (bitrate > 0) engine.setLiveQuality(bitrate) }
+        link.onFraming = { framing -> engine.setFraming(framing) }
         link.statusProvider = { statusFields() }
         link.onState = { state -> main.post { showState(state); if (state is LinkState.Connected) uploader.kick() } }
         link.onCommand = { msg -> main.post { handleCommand(msg) } }
@@ -297,6 +298,8 @@ class MainActivity : Activity() {
             "live_adaptive" to engine.liveAdaptive,
             "live_width" to engine.liveWidth, "live_height" to engine.liveHeight,
             "live_bitrate" to engine.liveBitrate,
+            "framing" to engine.framing.json(),
+            "zoom_caps" to engine.zoomCaps?.json(),
         )
     }
 

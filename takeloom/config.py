@@ -247,6 +247,9 @@ class KnownCamera:
     hidden: bool = False     # never shown or recorded (e.g. a screen capture "camera")
     first_seen: str = ""     # ISO dates
     last_seen: str = ""
+    # A Takeloom Camera phone's zoom and pan (phone_camera/framing.py's
+    # Framing.to_dict()), sent to it whenever it connects. {} = never set.
+    framing: dict = field(default_factory=dict)
 
     @property
     def label(self) -> str:
