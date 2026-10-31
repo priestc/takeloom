@@ -47,17 +47,24 @@ def _record_output_args(framerate: int) -> list[str]:
     ]
 
 
-# Preview frames' width: thumbnails in the Record tab and video-ui, and
-# video-ui's large program view (see backend.py's _CameraPreviewManager).
+# Preview frames' width: thumbnails in the Record tab and video-ui (see
+# backend.py's _CameraPreviewManager).
 PREVIEW_WIDTH = 640
+# video-ui's program view gets full-resolution frames instead (see
+# backend.py's PreviewSubscription): sharp but choppy, to keep the bandwidth
+# of a Remote connection down. Wider than 1920 is scaled down to it: more
+# than any window shows.
+FULL_PREVIEW_FPS = 3
+FULL_PREVIEW_MAX_WIDTH = 1920
+FULL_PREVIEW_SCALE = f"fps={FULL_PREVIEW_FPS},scale='min({FULL_PREVIEW_MAX_WIDTH},iw)':-2"
 
 
 def _build_capture_cmd(
     device: str, output_path: Path, framerate: int, stream_preview: bool,
-    stream_frames_fd: int | None = None, stream_width: int = 1280,
+    stream_frames_fd: int | None = None, stream_width: int = 1280, full_frames_fd: int | None = None,
 ) -> list[str]:
     cmd = [CAMERA_FFMPEG, "-y", *_input_args(device, framerate)]
-    if not stream_preview and stream_frames_fd is None:
+    if not stream_preview and stream_frames_fd is None and full_frames_fd is None:
         return cmd + [*_record_output_args(framerate), str(output_path)]
 
     # Split the decoded camera feed into up to three branches: "rec" (always,
@@ -65,19 +72,24 @@ def _build_capture_cmd(
     # down to ~10fps MJPEG on stdout, for the live preview panel while this
     # process holds the camera device exclusively — see on_preview_frame),
     # and "stv" (stream-quality MJPEG on another pipe, for the live stream:
-    # video/stream_switcher.py streams whichever camera is the program).
-    # The stream can't come from a separate ffmpeg process sharing the
-    # camera device, hence tacking it onto this one.
+    # video/stream_switcher.py streams whichever camera is the program),
+    # plus "full" (full-resolution preview frames, FULL_PREVIEW_FPS, on a
+    # third pipe). The stream can't come from a separate ffmpeg process
+    # sharing the camera device, hence tacking it onto this one.
     branches = ["rec"]
     if stream_preview:
         branches.append("prev")
     if stream_frames_fd is not None:
         branches.append("stv")
+    if full_frames_fd is not None:
+        branches.append("full")
     filter_parts = [f"[0:v]split={len(branches)}" + "".join(f"[{b}]" for b in branches)]
     if stream_preview:
         filter_parts.append(f"[prev]fps=10,scale={PREVIEW_WIDTH}:-2[prevout]")
     if stream_frames_fd is not None:
         filter_parts.append(f"[stv]scale={stream_width}:-2[stvout]")
+    if full_frames_fd is not None:
+        filter_parts.append(f"[full]{FULL_PREVIEW_SCALE}[fullout]")
 
     cmd += ["-filter_complex", ";".join(filter_parts)]
     cmd += ["-map", "[rec]", *_record_output_args(framerate), str(output_path)]
@@ -85,6 +97,8 @@ def _build_capture_cmd(
         cmd += ["-map", "[prevout]", "-f", "mjpeg", "-q:v", "5", "pipe:1"]
     if stream_frames_fd is not None:
         cmd += ["-map", "[stvout]", "-f", "mjpeg", "-q:v", "3", f"pipe:{stream_frames_fd}"]
+    if full_frames_fd is not None:
+        cmd += ["-map", "[fullout]", "-f", "mjpeg", "-q:v", "3", f"pipe:{full_frames_fd}"]
     return cmd
 
 
@@ -109,6 +123,9 @@ class VideoRecorder:
     by frame, for the live stream (see video/stream_switcher.py) — for the
     same camera-exclusivity reason, this rides along on this process
     rather than a separate one.
+
+    If on_full_frame is given, the same again with full-resolution preview
+    frames (FULL_PREVIEW_FPS), for video-ui's program view.
     """
 
     def __init__(
@@ -119,12 +136,14 @@ class VideoRecorder:
         on_preview_frame: Callable[[bytes], None] | None = None,
         on_stream_frame: Callable[[bytes], None] | None = None,
         stream_width: int = 1280,
+        on_full_frame: Callable[[bytes], None] | None = None,
     ) -> None:
         self.device = device
         self.output_path = output_path
         self.framerate = framerate
         self._on_preview_frame = on_preview_frame
         self._on_stream_frame = on_stream_frame
+        self._on_full_frame = on_full_frame
         self.stream_width = stream_width
         self._proc: subprocess.Popen | None = None
         self._preview_thread: threading.Thread | None = None
@@ -134,29 +153,33 @@ class VideoRecorder:
         if not ffmpeg_available():
             return False
         stream_preview = self._on_preview_frame is not None
-        stream_read_fd = stream_write_fd = None
-        if self._on_stream_frame is not None:
-            stream_read_fd, stream_write_fd = os.pipe()
+        # (read end, write end, callback) per extra frame pipe.
+        pipes = {
+            name: (*os.pipe(), callback)
+            for name, callback in (("stream", self._on_stream_frame), ("full", self._on_full_frame))
+            if callback is not None
+        }
         cmd = _build_capture_cmd(
-            self.device, self.output_path, self.framerate, stream_preview, stream_write_fd, self.stream_width,
+            self.device, self.output_path, self.framerate, stream_preview,
+            pipes["stream"][1] if "stream" in pipes else None, self.stream_width,
+            pipes["full"][1] if "full" in pipes else None,
         )
         self._proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE if stream_preview else subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            pass_fds=(stream_write_fd,) if stream_write_fd is not None else (),
+            pass_fds=tuple(write_fd for _read_fd, write_fd, _cb in pipes.values()),
         )
         if stream_preview:
             self._preview_thread = threading.Thread(
                 target=read_jpeg_frames, args=(self._proc.stdout, self._on_preview_frame), daemon=True,
             )
             self._preview_thread.start()
-        if stream_write_fd is not None:
-            os.close(stream_write_fd)  # ffmpeg holds its own copy; EOF comes when it exits
+        for read_fd, write_fd, callback in pipes.values():
+            os.close(write_fd)  # ffmpeg holds its own copy; EOF comes when it exits
             threading.Thread(
-                target=read_jpeg_frames, args=(os.fdopen(stream_read_fd, "rb"), self._on_stream_frame),
-                daemon=True,
+                target=read_jpeg_frames, args=(os.fdopen(read_fd, "rb"), callback), daemon=True,
             ).start()
         return True
 

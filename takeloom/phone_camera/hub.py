@@ -121,6 +121,9 @@ class PhoneCameraHub:
         self._cond = threading.Condition(self._lock)
         self._cameras: dict[str, _CameraConnection] = {}
         self._video_sinks: dict[str, VideoSink] = {}
+        # Besides the one sink: everything else watching a phone's live feed
+        # (full_preview.py), per device_id, across reconnects.
+        self._video_taps: dict[str, list[VideoSink]] = {}
         self._pending_ips: set[str] = set()
         # Both keyed by (session_id, device_id): every connected phone
         # records each session (see backend.py's session_cameras).
@@ -197,6 +200,18 @@ class PhoneCameraHub:
                 self._video_sinks.pop(device_id, None)
             else:
                 self._video_sinks[device_id] = sink
+
+    def add_video_tap(self, device_id: str, tap: VideoSink) -> None:
+        with self._lock:
+            self._video_taps.setdefault(device_id, []).append(tap)
+
+    def remove_video_tap(self, device_id: str, tap: VideoSink) -> None:
+        with self._lock:
+            taps = self._video_taps.get(device_id, [])
+            if tap in taps:
+                taps.remove(tap)
+            if not taps:
+                self._video_taps.pop(device_id, None)
 
     def send(self, device_id: str, msg: dict) -> bool:
         with self._lock:
@@ -304,9 +319,10 @@ class PhoneCameraHub:
 
     def _deliver_video(self, device_id: str, pts_ns: int, keyframe: bool, data: bytes) -> None:
         with self._lock:
-            sink = self._video_sinks.get(device_id)
-        if sink is not None:
-            sink(pts_ns, keyframe, data)
+            sinks = [self._video_sinks.get(device_id), *self._video_taps.get(device_id, [])]
+        for sink in sinks:
+            if sink is not None:
+                sink(pts_ns, keyframe, data)
 
     def _upload_target(self, session_id: str, device_id: str) -> _ExpectedUpload | None:
         """The expected upload for session_id, or — for a session whose

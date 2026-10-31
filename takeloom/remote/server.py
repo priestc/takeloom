@@ -190,6 +190,14 @@ class _ClientHandler(socketserver.StreamRequestHandler):
         self._owner = server_owner
         self._write_lock = threading.Lock()
         self._preview_sub = None
+        # Full-resolution preview frames (see backend.py's
+        # PreviewSubscription) wait here for their own sender thread, newest
+        # replacing any not yet sent: a slow link drops them rather than
+        # backing up whoever's producing them.
+        self._full_cond = threading.Condition()
+        self._full_pending: tuple[str, bytes] | None = None
+        self._full_sender: threading.Thread | None = None
+        self._closed = False
         self.token: str | None = None
         self.client_name: str = "?"
         super().__init__(*args, **kwargs)  # runs handle() synchronously
@@ -310,6 +318,9 @@ class _ClientHandler(socketserver.StreamRequestHandler):
                 if self._preview_sub is not None:
                     self._preview_sub.close()
                     self._preview_sub = None
+                with self._full_cond:
+                    self._closed = True
+                    self._full_cond.notify_all()
                 self._owner._unregister(self)
                 self._owner._log(f"[{_timestamp()}] {self.client_name} ({ip}) disconnected")
         except (OSError, ConnectionError):
@@ -325,7 +336,13 @@ class _ClientHandler(socketserver.StreamRequestHandler):
         try:
             if op == "subscribe_preview":
                 if self._preview_sub is None:
-                    self._preview_sub = self._owner.backend.open_camera_preview(self._on_preview_frame)
+                    self._preview_sub = self._owner.backend.open_camera_preview(
+                        self._on_preview_frame, self._on_full_preview_frame,
+                    )
+                result = {}
+            elif op == "set_preview_full_resolution":
+                if self._preview_sub is not None:
+                    self._preview_sub.set_full_resolution(list(args.get("cameras") or []))
                 result = {}
             elif op == "unsubscribe_preview":
                 if self._preview_sub is not None:
@@ -371,6 +388,25 @@ class _ClientHandler(socketserver.StreamRequestHandler):
 
     def _on_preview_frame(self, camera: str, jpeg: bytes) -> None:
         self.send_event("preview_frame", {"camera": camera, "jpeg_b64": base64.b64encode(jpeg).decode("ascii")})
+
+    def _on_full_preview_frame(self, camera: str, jpeg: bytes) -> None:
+        with self._full_cond:
+            self._full_pending = (camera, jpeg)
+            self._full_cond.notify()
+            if self._full_sender is None:
+                self._full_sender = threading.Thread(target=self._send_full_frames, daemon=True)
+                self._full_sender.start()
+
+    def _send_full_frames(self) -> None:
+        while True:
+            with self._full_cond:
+                while self._full_pending is None and not self._closed:
+                    self._full_cond.wait()
+                if self._closed:
+                    return
+                (camera, jpeg), self._full_pending = self._full_pending, None
+            self.send_event("preview_full_frame",
+                            {"camera": camera, "jpeg_b64": base64.b64encode(jpeg).decode("ascii")})
 
     def send_event(self, event: str, data: dict) -> None:
         try:

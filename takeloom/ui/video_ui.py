@@ -2,7 +2,10 @@
 
 A thumbnail of every camera along the top (Backend.session_cameras()) and,
 front and center, the program ("out") camera: the one the live stream
-shows. Click a thumbnail, or press its number key, to make it the program
+shows. The thumbnails run on the small, smooth preview frames; the program
+view asks for its camera at full resolution, a few frames a second (see
+backend.py's PreviewSubscription), so it's sharp, and over Remote only that
+one camera costs full-resolution bandwidth. Click a thumbnail, or press its number key, to make it the program
 camera (Backend.set_program_camera): the stream switches to it, and during a
 session the switch goes into the session log, so the streamed video can be
 rebuilt afterwards from the cameras' recordings.
@@ -54,6 +57,12 @@ class VideoUIFrame(tk.Frame):
         # camera_device -> newest JPEG not yet drawn (written by the preview
         # thread, drawn by _render_tick on the Tk thread).
         self._pending: dict[str, bytes] = {}
+        # The program camera's newest full-resolution JPEG not yet drawn.
+        self._pending_full: tuple[str, bytes] | None = None
+        # Whether the program view has had a full-resolution frame of the
+        # program camera: until then (just switched, or a server too old to
+        # send them) it shows the small frames instead.
+        self._program_full = False
         self._program_imgtk = None
 
         self.strip = tk.Frame(self, background=BG)
@@ -98,8 +107,14 @@ class VideoUIFrame(tk.Frame):
             self._preview_sub.close()
         self._backend = self.app_state.backend
         self._backend.on_event(self._on_backend_event)
-        self._preview_sub = self._backend.open_camera_preview(self._on_preview_frame)
+        self._preview_sub = self._backend.open_camera_preview(self._on_preview_frame, self._on_full_frame)
+        self._request_full_resolution()
         self._refresh()
+
+    def _request_full_resolution(self) -> None:
+        sub, cameras = self._preview_sub, [self._program] if self._program else []
+        if sub is not None:
+            self._run(lambda: sub.set_full_resolution(cameras))
 
     def _on_app_state_changed(self) -> None:
         if self.app_state.backend is not self._backend:
@@ -203,6 +218,9 @@ class VideoUIFrame(tk.Frame):
             return
         self._program = device
         self._program_imgtk = None
+        self._program_full = False
+        self._pending_full = None
+        self._request_full_resolution()
         self.program_view.configure(image="", text="Waiting for the camera…" if device else "No camera")
         self._paint_selection()
         self._update_status()
@@ -219,23 +237,50 @@ class VideoUIFrame(tk.Frame):
     def _on_preview_frame(self, device: str, jpeg: bytes) -> None:
         self._pending[device] = jpeg  # from the preview thread; drawn by _render_tick
 
+    def _on_full_frame(self, device: str, jpeg: bytes) -> None:
+        self._pending_full = (device, jpeg)  # likewise
+
     def _render_tick(self) -> None:
         if not self.winfo_exists():
             return
         pending, self._pending = self._pending, {}
         for device, jpeg in pending.items():
             self._draw(device, jpeg)
+        full, self._pending_full = self._pending_full, None
+        if full is not None and full[0] == self._program:
+            image = self._decode(full[1])
+            if image is not None:
+                self._program_full = True
+                self._draw_program(image)
         self.after(RENDER_INTERVAL_MS, self._render_tick)
 
-    def _draw(self, device: str, jpeg: bytes) -> None:
-        from PIL import Image, ImageTk
-        tile = self._tiles.get(device)
-        if tile is None and device != self._program:
-            return
+    @staticmethod
+    def _decode(jpeg: bytes):
+        from PIL import Image
         try:
             image = Image.open(io.BytesIO(jpeg))
             image.load()
         except Exception:
+            return None
+        return image
+
+    def _draw_program(self, image) -> None:
+        from PIL import ImageTk
+        # A few pixels inside the label, so the picture never asks for
+        # more room than it has (and grows the window).
+        self._program_imgtk = ImageTk.PhotoImage(
+            _fit(image, self.program_view.winfo_width() - 4, self.program_view.winfo_height() - 4)
+        )
+        self.program_view.configure(image=self._program_imgtk, text="")
+
+    def _draw(self, device: str, jpeg: bytes) -> None:
+        from PIL import Image, ImageTk
+        tile = self._tiles.get(device)
+        small_program = device == self._program and not self._program_full
+        if tile is None and not small_program:
+            return
+        image = self._decode(jpeg)
+        if image is None:
             return
         if tile is not None:
             # Letterboxed onto a fixed-size thumbnail, so tiles never change size.
@@ -244,13 +289,8 @@ class VideoUIFrame(tk.Frame):
             thumb.paste(fitted, ((THUMB_W - fitted.width) // 2, (THUMB_H - fitted.height) // 2))
             tile["imgtk"] = ImageTk.PhotoImage(thumb)
             tile["image"].configure(image=tile["imgtk"], text="")
-        if device == self._program:
-            # A few pixels inside the label, so the picture never asks for
-            # more room than it has (and grows the window).
-            self._program_imgtk = ImageTk.PhotoImage(
-                _fit(image, self.program_view.winfo_width() - 4, self.program_view.winfo_height() - 4)
-            )
-            self.program_view.configure(image=self._program_imgtk, text="")
+        if small_program:
+            self._draw_program(image)
 
     def _on_destroy(self, event) -> None:
         if event.widget is not self:

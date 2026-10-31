@@ -37,6 +37,11 @@ class RemoteBackend(Backend):
         self._preview_lock = threading.Lock()
         self._preview_callbacks: list[FrameCallback] = []
         self._preview_subscribed = False
+        # Subscriptions with an on_full_frame; what the server's been told
+        # to send at full resolution: all theirs together.
+        self._full_subscriptions: list[_RemotePreviewSubscription] = []
+        self._full_cameras: set[str] = set()
+        self._full_sync_lock = threading.Lock()
         self._video_check_result_buffer = bytearray()
         self._take_file_buffer = bytearray()
         # Take files already downloaded by _fetch_take_file this connection
@@ -442,16 +447,36 @@ class RemoteBackend(Backend):
 
     # --- camera preview ---
 
-    def open_camera_preview(self, on_frame: FrameCallback) -> PreviewSubscription:
+    def open_camera_preview(
+        self, on_frame: FrameCallback, on_full_frame: FrameCallback | None = None,
+    ) -> PreviewSubscription:
+        subscription = _RemotePreviewSubscription(self, on_frame, on_full_frame)
         with self._preview_lock:
             self._preview_callbacks.append(on_frame)
+            if on_full_frame is not None:
+                self._full_subscriptions.append(subscription)
             if not self._preview_subscribed:
                 self._preview_subscribed = True
                 try:
                     self._client.call("subscribe_preview", {})
                 except BackendError:
                     self._preview_subscribed = False
-        return _RemotePreviewSubscription(self, on_frame)
+        return subscription
+
+    def _sync_full_resolution(self) -> None:
+        # The call goes out without _preview_lock held: the reader thread
+        # that will read its response takes that lock for every frame.
+        with self._full_sync_lock:
+            with self._preview_lock:
+                wanted = set().union(*(s.full_cameras for s in self._full_subscriptions))
+                if wanted == self._full_cameras or not self._preview_subscribed:
+                    return
+                self._full_cameras = wanted
+            try:
+                self._client.call("set_preview_full_resolution", {"cameras": sorted(wanted)})
+            except BackendError:
+                with self._preview_lock:
+                    self._full_cameras = set()  # try again on the next change
 
     # --- camera latency test (not supported over Remote; see LatencyFrame) ---
 
@@ -504,12 +529,15 @@ class RemoteBackend(Backend):
     def end_session(self) -> None:
         raise BackendError("Explicit session control isn't available over Remote — just stop recording.")
 
-    def _unsubscribe_preview(self, on_frame: FrameCallback) -> None:
+    def _unsubscribe_preview(self, subscription: "_RemotePreviewSubscription") -> None:
         with self._preview_lock:
-            if on_frame in self._preview_callbacks:
-                self._preview_callbacks.remove(on_frame)
+            if subscription.on_frame in self._preview_callbacks:
+                self._preview_callbacks.remove(subscription.on_frame)
+            if subscription in self._full_subscriptions:
+                self._full_subscriptions.remove(subscription)
             if not self._preview_callbacks and self._preview_subscribed:
                 self._preview_subscribed = False
+                self._full_cameras = set()
                 try:
                     self._client.call("unsubscribe_preview", {})
                 except BackendError:
@@ -518,6 +546,21 @@ class RemoteBackend(Backend):
     # --- event dispatch from the RemoteClient's reader thread ---
 
     def _on_raw_event(self, event: str, data: dict) -> None:
+        if event == "preview_full_frame":
+            try:
+                jpeg = base64.b64decode(data["jpeg_b64"])
+            except Exception:
+                return
+            camera = data.get("camera", "")
+            with self._preview_lock:
+                callbacks = [s.on_full_frame for s in self._full_subscriptions if camera in s.full_cameras]
+            for cb in callbacks:
+                try:
+                    cb(camera, jpeg)
+                except Exception:
+                    pass
+            return
+
         if event == "preview_frame":
             try:
                 jpeg = base64.b64decode(data["jpeg_b64"])
@@ -596,12 +639,22 @@ class RemoteBackend(Backend):
 
 
 class _RemotePreviewSubscription(PreviewSubscription):
-    def __init__(self, backend: RemoteBackend, callback: FrameCallback) -> None:
+    def __init__(
+        self, backend: RemoteBackend, on_frame: FrameCallback, on_full_frame: FrameCallback | None,
+    ) -> None:
         self._backend = backend
-        self._callback = callback
+        self.on_frame = on_frame
+        self.on_full_frame = on_full_frame
+        self.full_cameras: set[str] = set()
         self._closed = False
 
     def close(self) -> None:
         if not self._closed:
             self._closed = True
-            self._backend._unsubscribe_preview(self._callback)
+            self._backend._unsubscribe_preview(self)
+            self._backend._sync_full_resolution()
+
+    def set_full_resolution(self, cameras: list[str]) -> None:
+        if not self._closed and self.on_full_frame is not None:
+            self.full_cameras = set(cameras)
+            self._backend._sync_full_resolution()

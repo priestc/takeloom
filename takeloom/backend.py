@@ -66,9 +66,18 @@ FrameCallback = Callable[[str, bytes], None]
 
 
 class PreviewSubscription:
-    """Returned by open_camera_preview(); call close() to stop receiving frames."""
+    """Returned by open_camera_preview(); call close() to stop receiving frames.
+
+    Frames come in two kinds. Every camera's small ones (preview width, ~10
+    fps; a phone's ~320px, ~5 fps) go to on_frame, always: thumbnails. Full-
+    resolution ones (FULL_PREVIEW_FPS, choppy but sharp) go to on_full_frame,
+    only for the cameras set_full_resolution() names: video-ui's program view
+    asks for its one camera, so nobody pays for full frames nobody shows."""
 
     def close(self) -> None:  # pragma: no cover - overridden by subclasses
+        raise NotImplementedError
+
+    def set_full_resolution(self, cameras: list[str]) -> None:  # pragma: no cover - overridden by subclasses
         raise NotImplementedError
 
 
@@ -982,7 +991,9 @@ class Backend(ABC):
     # --- camera preview ---
 
     @abstractmethod
-    def open_camera_preview(self, on_frame: FrameCallback) -> PreviewSubscription: ...
+    def open_camera_preview(
+        self, on_frame: FrameCallback, on_full_frame: FrameCallback | None = None,
+    ) -> PreviewSubscription: ...
 
     @abstractmethod
     def session_cameras(self) -> list[tuple[str, str]]:
@@ -1255,37 +1266,70 @@ class _CameraPreviewManager:
     Paused/resumed around exclusive ffmpeg access during recording (mirrors
     RecordFrame's old _stop_preview/_start_preview dance, just headless).
     Takeloom Camera phones never have a loop here: they send their own
-    preview frames, pushed in through push_external_frame."""
+    preview frames, pushed in through push_external_frame.
+
+    Full-resolution frames (see PreviewSubscription) go out through
+    push_full_frame, only to the subscribers that asked for that camera. A
+    capture loop makes them itself; a phone's come from decoding its live
+    feed, started and stopped by on_full_wanted with the set of cameras
+    anyone wants at full resolution."""
 
     def __init__(
         self,
         get_camera_devices: Callable[[], list[str]],
         fps: float = 10.0,
         on_error: Callable[[str, str], None] | None = None,
+        on_full_wanted: Callable[[set[str]], None] | None = None,
     ) -> None:
         self._get_camera_devices = get_camera_devices
         self._fps = fps
         self._on_error = on_error
+        self._on_full_wanted = on_full_wanted
         self._lock = threading.Lock()
-        self._subscribers: list[FrameCallback] = []
+        self._subscribers: list[_ManagerSubscription] = []
+        self._full_wanted: set[str] = set()
+        self._full_lock = threading.Lock()
         # device -> its capture loop's stop event (each loop has its own,
         # so a restart can never revive a loop that hasn't exited yet).
         self._loops: dict[str, threading.Event] = {}
         self._paused = False
 
-    def subscribe(self, on_frame: FrameCallback) -> PreviewSubscription:
+    def subscribe(self, on_frame: FrameCallback, on_full_frame: FrameCallback | None = None) -> PreviewSubscription:
+        subscription = _ManagerSubscription(self, on_frame, on_full_frame)
         with self._lock:
-            self._subscribers.append(on_frame)
+            self._subscribers.append(subscription)
             if not self._loops and not self._paused:
                 self._start_threads_locked()
-        return _ManagerSubscription(self, on_frame)
+        return subscription
 
-    def _unsubscribe(self, on_frame: FrameCallback) -> None:
+    def _unsubscribe(self, subscription: "_ManagerSubscription") -> None:
         with self._lock:
-            if on_frame in self._subscribers:
-                self._subscribers.remove(on_frame)
+            if subscription in self._subscribers:
+                self._subscribers.remove(subscription)
             if not self._subscribers:
                 self._stop_threads_locked()
+        self._full_wanted_changed()
+
+    def _set_full_resolution(self, subscription: "_ManagerSubscription", cameras: list[str]) -> None:
+        subscription.full_cameras = set(cameras)
+        self._full_wanted_changed()
+
+    def _full_wanted_changed(self) -> None:
+        # Its own lock, so two changes can't reach on_full_wanted out of
+        # order (and leave a stale set in force).
+        with self._full_lock:
+            with self._lock:
+                wanted = set().union(*(s.full_cameras for s in self._subscribers if s.on_full_frame))
+                changed = wanted != self._full_wanted
+                self._full_wanted = wanted
+            if changed and self._on_full_wanted is not None:
+                try:
+                    self._on_full_wanted(wanted)
+                except Exception:
+                    pass
+
+    def full_wanted(self, device: str) -> bool:
+        return device in self._full_wanted
 
     def pause(self) -> None:
         with self._lock:
@@ -1319,9 +1363,20 @@ class _CameraPreviewManager:
         access), or a Takeloom Camera phone's own preview frames."""
         with self._lock:
             subscribers = list(self._subscribers)
-        for cb in subscribers:
+        for subscription in subscribers:
             try:
-                cb(device, jpeg)
+                subscription.on_frame(device, jpeg)
+            except Exception:
+                pass
+
+    def push_full_frame(self, device: str, jpeg: bytes) -> None:
+        """A full-resolution frame, to whoever asked for `device` at full
+        resolution."""
+        with self._lock:
+            subscribers = [s for s in self._subscribers if s.on_full_frame and device in s.full_cameras]
+        for subscription in subscribers:
+            try:
+                subscription.on_full_frame(device, jpeg)
             except Exception:
                 pass
 
@@ -1363,8 +1418,9 @@ class _CameraPreviewManager:
             )
             return
         interval = 1.0 / self._fps
-        from .video.capture import PREVIEW_WIDTH
+        from .video.capture import FULL_PREVIEW_FPS, FULL_PREVIEW_MAX_WIDTH, PREVIEW_WIDTH
         target_width = PREVIEW_WIDTH
+        last_full = 0.0
         # Some failure modes (e.g. macOS denying camera permission to this
         # process) leave isOpened() True but every read() failing forever —
         # treat a long unbroken run of failed reads the same as a failed open.
@@ -1378,6 +1434,15 @@ class _CameraPreviewManager:
                     ever_succeeded = True
                     consecutive_failures = 0
                     h, w = frame.shape[:2]
+                    now = time.monotonic()
+                    if self.full_wanted(device) and now - last_full >= 1.0 / FULL_PREVIEW_FPS:
+                        last_full = now
+                        full = frame
+                        if w > FULL_PREVIEW_MAX_WIDTH:
+                            full = cv2.resize(frame, (FULL_PREVIEW_MAX_WIDTH, max(1, int(FULL_PREVIEW_MAX_WIDTH * h / w))))
+                        ok3, full_buf = cv2.imencode(".jpg", full, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                        if ok3:
+                            self.push_full_frame(device, full_buf.tobytes())
                     new_h = max(1, int(target_width * h / w))
                     frame = cv2.resize(frame, (target_width, new_h))
                     # cv2.imencode expects BGR (what cap.read() already returns) — no color
@@ -1400,15 +1465,23 @@ class _CameraPreviewManager:
 
 
 class _ManagerSubscription(PreviewSubscription):
-    def __init__(self, manager: _CameraPreviewManager, callback: FrameCallback) -> None:
+    def __init__(
+        self, manager: _CameraPreviewManager, on_frame: FrameCallback, on_full_frame: FrameCallback | None,
+    ) -> None:
         self._manager = manager
-        self._callback = callback
+        self.on_frame = on_frame
+        self.on_full_frame = on_full_frame
+        self.full_cameras: set[str] = set()
         self._closed = False
 
     def close(self) -> None:
         if not self._closed:
             self._closed = True
-            self._manager._unsubscribe(self._callback)
+            self._manager._unsubscribe(self)
+
+    def set_full_resolution(self, cameras: list[str]) -> None:
+        if not self._closed:
+            self._manager._set_full_resolution(self, cameras)
 
 
 @dataclass
@@ -1840,8 +1913,13 @@ class LocalBackend(Backend):
         self._audio_hardware_absent = False
         self._preview = _CameraPreviewManager(
             lambda: [device for device, _label in self.session_cameras()], on_error=self._on_preview_error,
+            on_full_wanted=self._on_full_preview_wanted,
         )
         self._phone_hub = None  # PhoneCameraHub, when attach_phone_camera_hub() is called
+        # phone camera_device -> PhoneFullPreview decoding its live feed, for
+        # whoever wants it at full resolution (see _on_full_preview_wanted).
+        self._phone_full_previews: dict = {}
+        self._phone_full_previews_lock = threading.Lock()
         # (monotonic time, scan) — see _scan_cameras.
         self._camera_scan: tuple[float, list | None] = (0.0, None)
         self._camera_scan_lock = threading.Lock()
@@ -2062,6 +2140,25 @@ class LocalBackend(Backend):
     def _on_phone_preview(self, device_id: str, jpeg: bytes) -> None:
         # Every connected phone is one of session_cameras().
         self._preview.push_external_frame(DEVICE_PREFIX + device_id, jpeg)
+
+    def _on_full_preview_wanted(self, cameras: set[str]) -> None:
+        """Decode the live feed of each phone someone wants at full
+        resolution, and stop decoding the rest. A local camera's capture
+        loop makes its own full frames (see _CameraPreviewManager._run)."""
+        if self._phone_hub is None:
+            return
+        from .phone_camera.full_preview import PhoneFullPreview
+        with self._phone_full_previews_lock:
+            for device in [d for d in self._phone_full_previews if d not in cameras]:
+                self._phone_full_previews.pop(device).stop()
+            for device in cameras:
+                if is_phone_device(device) and device not in self._phone_full_previews:
+                    decoder = PhoneFullPreview(
+                        self._phone_hub, phone_device_id(device),
+                        lambda jpeg, d=device: self._preview.push_full_frame(d, jpeg),
+                    )
+                    if decoder.start():
+                        self._phone_full_previews[device] = decoder
 
     def _on_preview_error(self, device: str, message: str) -> None:
         self._emit("preview_error", {"camera": device, "message": message})
@@ -4579,6 +4676,7 @@ class LocalBackend(Backend):
         self._preview.pause()
         recorder = VideoRecorder(
             device, output_path, on_preview_frame=lambda jpeg: self._preview.push_external_frame(device, jpeg),
+            on_full_frame=lambda jpeg: self._preview.push_full_frame(device, jpeg),
         )
         if recorder.start():
             return recorder
@@ -4729,8 +4827,10 @@ class LocalBackend(Backend):
 
     # --- camera preview ---
 
-    def open_camera_preview(self, on_frame: FrameCallback) -> PreviewSubscription:
-        return self._preview.subscribe(on_frame)
+    def open_camera_preview(
+        self, on_frame: FrameCallback, on_full_frame: FrameCallback | None = None,
+    ) -> PreviewSubscription:
+        return self._preview.subscribe(on_frame, on_full_frame)
 
     # --- camera latency test ---
 
@@ -6034,6 +6134,7 @@ class LocalBackend(Backend):
                     video_recorder = VideoRecorder(
                         camera_device, session_video_raw,
                         on_preview_frame=lambda jpeg, d=camera_device: self._preview.push_external_frame(d, jpeg),
+                        on_full_frame=lambda jpeg, d=camera_device: self._preview.push_full_frame(d, jpeg),
                         **stream_tee(camera_device),
                     )
                 if video_recorder.start():
@@ -6080,6 +6181,7 @@ class LocalBackend(Backend):
                 recorder = VideoRecorder(
                     device, session_dir / raw_file,
                     on_preview_frame=lambda jpeg, d=device: self._preview.push_external_frame(d, jpeg),
+                    on_full_frame=lambda jpeg, d=device: self._preview.push_full_frame(d, jpeg),
                     **stream_tee(device),
                 )
                 if recorder.start():
