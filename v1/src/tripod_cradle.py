@@ -25,12 +25,14 @@ SCREW_XY = None      # (x, y) in the cradle frame; None = computed from the CG
 T_NUT_AF = 11.4      # 1/4"-20 nut pocket across flats (nut 11.11)
 T_NUT_H = 5.56
 T_NUT_CAV = T_NUT_H + 0.4
-T_FLOOR = 0.6        # plastic between the washer and the tripod plate (squeezed flat, nothing else)
-WASHER_OD = 16.0     # M8 flat washer (DIN 125): 8.4 ID x 16 OD x 1.6 thick; set 0 for no washer
-WASHER_T = 1.6
+T_FLOOR = 0.6        # plastic between the nut (or washer) and the tripod plate (only ever squeezed flat)
+SCREW_REACH = 4.2    # how far the tripod's 1/4" screw sticks up (measured: 3 x 1.39 mm washers)
+WASHER_OD = 0.0      # optional washer under the nut, e.g. 16.0 for an M8; 0 = none.
+                     # Only worth it with a longer tripod screw: it costs its thickness in thread reach.
+WASHER_T = 1.39
 WASHER_CAV_D = WASHER_OD + 0.4
 WASHER_CAV_T = WASHER_T + 0.3
-SOLID_D = WASHER_OD + 4.0   # 100% infill column under the nut (project file)
+SOLID_D = max(WASHER_OD, 16.0) + 4.0   # 100% infill column under the nut (project file)
 T_HOLE_D = 6.7
 TOP_STOP = 4.0       # blind hole stops this far below the phone's floor surface
 DENS = 1.27 * 0.6 / 1000   # g/mm3, rough PETG part density for CG estimates
@@ -141,3 +143,5 @@ if __name__ == "__main__":
         t = w.to_trimesh(w.on_bed(pr)); t.export(f"out/{name}.stl")
         print(f"{name:27s} watertight={t.is_watertight} vol={t.volume/1000:.1f}cm3 bbox={np.round(t.extents, 1)}")
     print("captive: pause before the layer at %.1f mm to drop in the 1/4\"-20 nut" % pause_height())
+    eng = SCREW_REACH - (nut_z0() - Z_BOT)
+    print(f"tripod screw reach {SCREW_REACH} mm -> {eng:.1f} mm of the nut engaged ({eng / 1.27:.1f} threads)")
