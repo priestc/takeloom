@@ -159,11 +159,11 @@ Two ways to put the cradle on a standard **1/4"-20** tripod screw. Neither has a
 
 | File | What it is |
 |---|---|
-| `3mf/tripod_cradle_captive_project.3mf` | Ready to print. **Pause at 87.80 mm**: drop the 1/4"-20 nut into the slot corner-down, then resume |
+| `3mf/tripod_cradle_captive_project.3mf` | Ready to print. **Pause at 87.60 mm**: drop the 1/4"-20 nut into the slot corner-down, then resume |
 | `3mf/tripod_cradle_project.3mf` | No pause: slide the nut into its slot from the base's side face after printing |
 | `stl/tripod_cradle*.stl` | Geometry only |
 
-Measure the nut first: the slot fits up to about 11.3 mm across the flats and 5.8 mm thick. The design assumes a tripod screw that sticks up **4.2 mm** (`SCREW_REACH`), which engages 3.6 mm (about 3 threads) of the nut. If your tripod's screw is longer, you can add a washer under the nut (`WASHER_OD`, `WASHER_T`) and regenerate.
+The nut slot is sized for a measured 10.9 mm (across flats) × 5.48 mm nut, with 0.3 mm of clearance so it can only turn about 3° before it locks. For a different nut, change `T_NUT_AF` and `T_NUT_H` and regenerate. The design assumes a tripod screw that sticks up **4.2 mm** (`SCREW_REACH`), which engages 3.6 mm (about 3 threads) of the nut. If your tripod's screw is longer, you can add a washer under the nut (`WASHER_OD`, `WASHER_T`) and regenerate.
 
 ### Two pieces: adapter + cradle
 

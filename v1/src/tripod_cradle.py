@@ -22,8 +22,8 @@ BASE_H = 15.0        # base depth below the cradle floor
 NECK = True          # True: short tapered neck under the nut; False: full-length solid base
 PAD_L = 40.0         # neck: length of the flat face that sits on the tripod
 SCREW_XY = None      # (x, y) in the cradle frame; None = computed from the CG
-T_NUT_AF = 11.4      # 1/4"-20 nut pocket across flats (nut 11.11)
-T_NUT_H = 5.56
+T_NUT_AF = 11.2      # 1/4"-20 nut pocket across flats (measured nut: 10.9 mm; 0.3 clearance)
+T_NUT_H = 5.48       # measured nut thickness
 T_NUT_CAV = T_NUT_H + 0.4
 T_FLOOR = 0.6        # plastic between the nut (or washer) and the tripod plate (only ever squeezed flat)
 SCREW_REACH = 4.2    # how far the tripod's 1/4" screw sticks up (measured: 3 x 1.39 mm washers)
