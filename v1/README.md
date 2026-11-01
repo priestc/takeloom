@@ -144,25 +144,26 @@ Two ways to put the cradle on a standard **1/4"-20** tripod screw. Neither has a
 |---|---|---|
 | Parts | Cradle and base printed as one part | Adapter block + cradle, joined by one M5 screw |
 | Strength | Strongest: no joint, and every layer crosses the base-to-cradle junction | Strong: cradle floor rests on the block, tongue captured in a slot |
-| Hardware | One 1/4"-20 nut | One 1/4"-20 nut, M5 × 20 screw, M5 nut, washer |
+| Hardware | One 1/4"-20 nut, one M8 washer | One 1/4"-20 nut, M5 × 20 screw, M5 nut, washer |
 | Pauses | One (or none, with the slide-in nut version) | None |
 
 ### One piece
 
 ![One-piece tripod cradle](images/tripod_one_piece.png)
 
-- **Tapered neck.** Instead of a full-length block, a short neck under the nut gives the tripod a 40 × 33 mm flat face. It joins the cradle over 70 mm and tapers at 45° at both ends, which saves about 30 cm³ (~35–40 g) of filament. The cradle's tall front plate already makes it stiff along its length. The 45° tapers mean no flat ceilings when printed on end. The project file prints the neck at 100% infill.
+- **Tapered neck.** Instead of a full-length block, a short neck under the nut gives the tripod a 40 × 33 mm flat face. It joins the cradle over 70 mm and tapers at 45° at both ends, which saves about 30 cm³ (~35–40 g) of filament. The cradle's tall front plate already makes it stiff along its length. The 45° tapers mean no flat ceilings when printed on end. The rest of the neck uses your normal 30% infill.
 - **No weak layer lines.** It prints standing on its closed end, like the cradle, so every layer runs across the joint between base and cradle.
-- **Steel thread.** A 1/4"-20 hex nut is sealed in, centered under the cradle + phone center of gravity (within 4 mm for all three phones). The tripod screw only squeezes the thin floor under the nut against the tripod.
+- **Steel thread on a washer.** A 1/4"-20 hex nut sits on an **M8 flat washer** (8.4 × 16 × 1.6 mm), centered under the cradle + phone center of gravity (within 4 mm for all three phones). Tightening the tripod screw pulls the nut and washer down onto a 0.6 mm floor pressed flat against the tripod plate. The steel spreads the force, and the plastic is only squeezed, so tightening hard won't damage it.
+- **Solid only where it's clamped.** The project files put a 20 mm 100% infill column under the nut, from the tripod face up through the washer and nut.
 - **Blind screw hole.** Even a long tripod screw stops 4 mm short of the phone.
 
 | File | What it is |
 |---|---|
-| `3mf/tripod_cradle_captive_project.3mf` | Ready to print. **Pause at 87.80 mm**: drop the 1/4"-20 nut into the slot corner-down, then resume |
-| `3mf/tripod_cradle_project.3mf` | No pause: slide the nut into its slot from the base's side face after printing |
+| `3mf/tripod_cradle_captive_project.3mf` | Ready to print. **Pause at 89.40 mm**: drop the M8 washer into the round slot and the 1/4"-20 nut into the hex slot (corner down), then resume |
+| `3mf/tripod_cradle_project.3mf` | No pause: slide the washer, then the nut, into their slots from the base's side face after printing |
 | `stl/tripod_cradle*.stl` | Geometry only |
 
-Measure the nut first: the slot fits up to about 11.3 mm across the flats and 5.8 mm thick. All three phones load and unload the usual way with a tripod head under the base.
+Measure first: the nut slot fits up to about 11.3 mm across the flats and 5.8 mm thick, and the washer slot fits up to 16.3 mm across and 1.9 mm thick. The washer uses 1.6 mm of the tripod screw's reach, so a screw sticking up 6 mm engages about 3 threads of the nut. If your tripod's screw is shorter than about 5.5 mm, leave the washer out: set `WASHER_OD = 0` and regenerate. All three phones load and unload the usual way with a tripod head under the base.
 
 ### Two pieces: adapter + cradle
 

@@ -25,7 +25,12 @@ SCREW_XY = None      # (x, y) in the cradle frame; None = computed from the CG
 T_NUT_AF = 11.4      # 1/4"-20 nut pocket across flats (nut 11.11)
 T_NUT_H = 5.56
 T_NUT_CAV = T_NUT_H + 0.4
-T_FLOOR = 1.2
+T_FLOOR = 0.6        # plastic between the washer and the tripod plate (squeezed flat, nothing else)
+WASHER_OD = 16.0     # M8 flat washer (DIN 125): 8.4 ID x 16 OD x 1.6 thick; set 0 for no washer
+WASHER_T = 1.6
+WASHER_CAV_D = WASHER_OD + 0.4
+WASHER_CAV_T = WASHER_T + 0.3
+SOLID_D = WASHER_OD + 4.0   # 100% infill column under the nut (project file)
 T_HOLE_D = 6.7
 TOP_STOP = 4.0       # blind hole stops this far below the phone's floor surface
 DENS = 1.27 * 0.6 / 1000   # g/mm3, rough PETG part density for CG estimates
@@ -77,9 +82,14 @@ def screw_xy():
 
 
 def roof_x(sx):
-    """Nut-slot roof, in the cradle frame, snapped so it lands on a layer boundary in print."""
-    R = T_NUT_AF / np.sqrt(3)
+    """Nut/washer slot roof, in the cradle frame, snapped so it lands on a layer boundary in print."""
+    R = max(T_NUT_AF / np.sqrt(3), WASHER_CAV_D / 2)
     return _snap_up(sx + R + 0.15 + W_) - W_
+
+
+def nut_z0():
+    """Bottom of the nut cavity (the washer sits below it)."""
+    return Z_BOT + T_FLOOR + (WASHER_CAV_T if WASHER_OD else 0.0)
 
 
 def pause_height():
@@ -93,7 +103,9 @@ def tripod_cradle(captive=True):
     base, y1 = _base_block(sy, sx)
     m = cr + base
     R = T_NUT_AF / np.sqrt(3)
-    z0 = Z_BOT + T_FLOOR
+    z0 = nut_z0()
+    zw = Z_BOT + T_FLOOR
+    rw = WASHER_CAV_D / 2
     # screw hole: blind, horizontal in print -> teardrop pointing print-up (+x)
     hole = w.teardrop(T_HOLE_D / 2, (-W_ - TOP_STOP) - (Z_BOT - 1))     # along +z, point +y
     hole = hole.rotate([0, 0, -90]).translate([sx, sy, Z_BOT - 1])      # point -> +x
@@ -104,11 +116,17 @@ def tripod_cradle(captive=True):
         slot = CrossSection.batch_hull([hexcs.translate([sx, sy]),
                                         w.rect2(sx, xr, sy - T_NUT_AF / 2, sy + T_NUT_AF / 2)])
         m = m - slot.extrude(T_NUT_CAV).translate([0, 0, z0])
+        if WASHER_OD:   # washer stands on edge in a round seat under the nut, same pause
+            wslot = CrossSection.batch_hull([w.circ(rw, sx, sy), w.rect2(sx, xr, sy - rw, sy + rw)])
+            m = m - wslot.extrude(WASHER_CAV_T + 0.01).translate([0, 0, zw])
     else:
         # open pocket: the nut slides in from the base's +y side face and the screw pulls it down
         slot = CrossSection.batch_hull([hexcs.rotate(30).translate([sx, sy]),
                                         w.rect2(sx - T_NUT_AF / 2, sx + T_NUT_AF / 2, sy, y1 + 1)])
         m = m - slot.extrude(T_NUT_CAV).translate([0, 0, z0])
+        if WASHER_OD:   # washer slides in the same way, just below the nut
+            wslot = CrossSection.batch_hull([w.circ(rw, sx, sy), w.rect2(sx - rw, sx + rw, sy, y1 + 1)])
+            m = m - wslot.extrude(WASHER_CAV_T + 0.01).translate([0, 0, zw])
     pr = m.translate([W_, 0, 0]).rotate([0, -90, 0])
     pr = pr.translate([0, 0, -pr.bounding_box()[2]])
     return m, pr
