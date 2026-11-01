@@ -151,14 +151,14 @@ Two ways to put the cradle on a standard **1/4"-20** tripod screw. Neither has a
 
 ![One-piece tripod cradle](images/tripod_one_piece.png)
 
-- **Full-length solid base.** A 15 mm base runs under the whole cradle and prints at 100% infill in the project file.
+- **Tapered neck.** Instead of a full-length block, a short neck under the nut gives the tripod a 40 × 33 mm flat face. It joins the cradle over 70 mm and tapers at 45° at both ends, which saves about 30 cm³ (~35–40 g) of filament. The cradle's tall front plate already makes it stiff along its length. The 45° tapers mean no flat ceilings when printed on end. The project file prints the neck at 100% infill.
 - **No weak layer lines.** It prints standing on its closed end, like the cradle, so every layer runs across the joint between base and cradle.
 - **Steel thread.** A 1/4"-20 hex nut is sealed in, centered under the cradle + phone center of gravity (within 4 mm for all three phones). The tripod screw only squeezes the thin floor under the nut against the tripod.
 - **Blind screw hole.** Even a long tripod screw stops 4 mm short of the phone.
 
 | File | What it is |
 |---|---|
-| `3mf/tripod_cradle_captive_project.3mf` | Ready to print. **Pause at 84.40 mm**: drop the 1/4"-20 nut into the slot corner-down, then resume |
+| `3mf/tripod_cradle_captive_project.3mf` | Ready to print. **Pause at 87.80 mm**: drop the 1/4"-20 nut into the slot corner-down, then resume |
 | `3mf/tripod_cradle_project.3mf` | No pause: slide the nut into its slot from the base's side face after printing |
 | `stl/tripod_cradle*.stl` | Geometry only |
 

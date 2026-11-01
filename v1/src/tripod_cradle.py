@@ -19,6 +19,8 @@ from manifold3d import Manifold, CrossSection
 import wall_phone_mount as w
 
 BASE_H = 15.0        # base depth below the cradle floor
+NECK = True          # True: short tapered neck under the nut; False: full-length solid base
+PAD_L = 40.0         # neck: length of the flat face that sits on the tripod
 SCREW_XY = None      # (x, y) in the cradle frame; None = computed from the CG
 T_NUT_AF = 11.4      # 1/4"-20 nut pocket across flats (nut 11.11)
 T_NUT_H = 5.56
@@ -43,18 +45,26 @@ def phones():
             ("iPhone 13 mini", 131.5, 66.0, 9.5, 13.0, 170)]
 
 
-def _base_block(sy):
+def _base_block(sy, sx=None):
     y1 = 2 * sy + W_                        # footprint centred on the screw in y
-    return w.box(-W_, w.CRADLE_LEN, -W_, y1, Z_BOT, -W_ + 0.01), y1
+    if not NECK or sx is None:
+        return w.box(-W_, w.CRADLE_LEN, -W_, y1, Z_BOT, -W_ + 0.01), y1
+    # neck: flat pad under the screw, both ends tapered at 45 deg up to the cradle floor
+    # (45 deg because the part prints standing on its end: no flat ceilings)
+    a, b = sx - PAD_L / 2, sx + PAD_L / 2
+    top = -W_ + 0.01
+    prof = CrossSection([[(max(a - BASE_H, -W_), top), (a, Z_BOT), (b, Z_BOT), (min(b + BASE_H, w.CRADLE_LEN), top)]])
+    neck = prof.extrude(y1 + W_).transform(np.array([[1, 0, 0, 0], [0, 0, -1, y1], [0, 1, 0, 0]]))
+    return neck, y1
 
 
 def screw_xy():
     if SCREW_XY is not None:
         return SCREW_XY
     cr, _, _ = w.cradle(nut_pocket=False, tongue=False)
-    sy = 13.0
-    for _ in range(2):                      # iterate: the base itself shifts the CG a little
-        base, _ = _base_block(sy)
+    sx, sy = 74.0, 13.0
+    for _ in range(3):                      # iterate: the base itself shifts the CG a little
+        base, _ = _base_block(sy, sx)
         body = cr + base
         tb = w.to_trimesh(body); mb = tb.volume * DENS
         G = []
@@ -80,7 +90,7 @@ def pause_height():
 def tripod_cradle(captive=True):
     cr, _, _ = w.cradle(nut_pocket=False, tongue=False)
     sx, sy = screw_xy()
-    base, y1 = _base_block(sy)
+    base, y1 = _base_block(sy, sx)
     m = cr + base
     R = T_NUT_AF / np.sqrt(3)
     z0 = Z_BOT + T_FLOOR
