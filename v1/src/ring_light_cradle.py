@@ -56,22 +56,68 @@ def pause_height():
     return roof_x() + W_
 
 
-def ring_light_cradle(captive=True):
-    cr, _, _ = w.cradle(nut_pocket=False, tongue=False)
+ROUND = 5.0              # edge radius on the arm
+
+
+def _balls(points, r):
+    return Manifold.batch_hull([Manifold.sphere(r, 32).translate(list(p)) for p in points])
+
+
+def _rbox(x0, x1, y0, y1, z0, z1, r=ROUND):
+    """Box with every edge rounded to radius r (outer size unchanged)."""
+    return _balls([(x, y, z) for x in (x0 + r, x1 - r) for y in (y0 + r, y1 - r) for z in (z0 + r, z1 - r)], r)
+
+
+SLAB_T = 12.0            # plate under the cradle floor (below the floor's underside)
+SWEEP_STEPS = 10         # slices along the arm's curved underside
+
+
+def _riser():
+    """The arm. Its underside sweeps in a smooth curve (quadratic Bezier) from horizontal
+    under the cradle down to the post behind the ring, reaching exactly 45 deg at the
+    bottom, so nothing is steeper than 45 deg when printed standing on the closed end.
+    A pad then reaches forward over the light's block. All edges are rounded (ROUND);
+    the pad's bottom is flat and the arm stays flush with the cradle's outer faces."""
+    r = ROUND
     y_back = YS - SCREW_TO_BACK - 1.0               # stays 1 mm behind the ring's back face
-    # pad on the block; its closed-end side is angled 45 deg in plan view so that face
-    # isn't a flat ceiling when the part prints standing on the cradle's closed end
     x0 = XS + PAD_X[0]
     y0, y1 = YS - PAD_D / 2, YS + PAD_D / 2
-    pad = Manifold.batch_hull([w.box(x0 + (y0 - y_back), XS + PAD_X[1], y0, y0 + 0.01, ZS, ZS + PAD_T),
-                               w.box(x0 + (y1 - y_back), XS + PAD_X[1], y1 - 0.01, y1, ZS, ZS + PAD_T)])
-    # plate under the cradle floor; its closed-end tip tapers at 45 deg (prints on that end)
-    slab = Manifold.batch_hull([w.box(SLAB_X[0] + 6, SLAB_X[1], -W_, w.T + W_, -W_ - 6, -W_ + 0.01),
-                                w.box(SLAB_X[0], SLAB_X[0] + 0.01, -W_, w.T + W_, -W_ - 0.01, -W_ + 0.01)])
-    # post: directly behind the ring, from the block's height up to the cradle floor
-    post = w.box(XS + PAD_X[0], SLAB_X[1], -W_, y_back, ZS, -W_ + 0.01)
-    # bridge: post -> pad, passing through the ring's opening only above the mounting block
-    riser = Manifold.batch_hull([slab, post]) + Manifold.batch_hull([post, pad])
+    x_end = SLAB_X[1]
+    # --- curved underside: Bezier from T (slab bottom, horizontal) to B (post bottom, 45 deg)
+    zT = -W_ - SLAB_T
+    xT = SLAB_X[0] + SLAB_T - W_ + 3.0              # where the 45 deg tip meets the slab bottom
+    B = np.array([x0, ZS])
+    C = np.array([B[0] - (zT - ZS), zT])            # on the 45 deg line through B, at the slab-bottom height
+    T = np.array([xT, zT])
+    slices = []
+    for t in np.linspace(0, 1, SWEEP_STEPS + 1):
+        px, pz = (1 - t) ** 2 * T + 2 * (1 - t) * t * C + t ** 2 * B
+        ymax = (w.T + W_) + (y_back - (w.T + W_)) * t ** 2       # front edge eases out to the post
+        slices.append(_rbox(px, x_end, -W_, ymax, pz, 0.0, r))
+    # 45 deg tip at the closed-end side, tangent to the plane x + z = SLAB_X0 - WALL
+    xt = lambda zc: SLAB_X[0] - W_ + r * np.sqrt(2) - zc
+    tip = _balls([(xt(zc), y, zc) for y in (-W_ + r, w.T + W_ - r) for zc in (zT + r, -r)] +
+                 [(x_end - r, y, zc) for y in (-W_ + r, w.T + W_ - r) for zc in (zT + r, -r)], r)
+    chain = [tip] + slices
+    arm = Manifold()
+    for a_, b_ in zip(chain[:-1], chain[1:]):
+        arm = arm + Manifold.batch_hull([a_, b_])
+    post = slices[-1]
+    # pad over the block: closed-end side angled 45 deg in plan, lined up with the post's corner
+    xc = lambda yc: (x0 + r) + (yc - (y_back - r))
+    pad = _balls([(x, y, z) for y in (y0 + r, y1 - r) for x in (xc(y), XS + PAD_X[1] - r)
+                  for z in (ZS + r, ZS + PAD_T - r)], r)
+    arm = arm + Manifold.batch_hull([post, pad])
+    # collar: flush with the cradle's lip and front faces right under the floor, tip at 45 deg
+    collar = Manifold.batch_hull([w.box(SLAB_X[0] + r, x_end, -W_, w.T + W_, -W_ - r, -W_ + 0.01),
+                                  w.box(SLAB_X[0], SLAB_X[0] + 0.01, -W_, w.T + W_, -W_ - 0.01, -W_ + 0.01)])
+    floor_zone = w.box(-50, 250, -50, 100, -W_, 1.0)                # nothing pokes into the phone channel
+    return (arm - floor_zone) + collar
+
+
+def ring_light_cradle(captive=True):
+    cr, _, _ = w.cradle(nut_pocket=False, tongue=False)
+    riser = _riser()
     m = cr + riser
     # 1/4"-20 nut: corner along x (print up), on a 0.6 mm floor; blind hole for the light's screw
     R = T_NUT_AF / np.sqrt(3)
