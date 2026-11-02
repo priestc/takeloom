@@ -72,61 +72,62 @@ SLAB_T = 12.0            # plate under the cradle floor (below the floor's under
 SWEEP_STEPS = 10         # slices along the arm's curved underside
 
 
+def _shoulder_geometry():
+    r = ROUND
+    pr_ = PAD_D / 2
+    end_c = (XS + PAD_X[1] - pr_, YS)
+    return (SLAB_X[1] - r, -W_ + r, r), (end_c[0], end_c[1], pr_)
+
+
 def _riser():
-    """The arm. Its underside sweeps in a smooth curve (quadratic Bezier) from horizontal
-    under the cradle down to the post behind the ring, reaching exactly 45 deg at the
-    bottom, so nothing is steeper than 45 deg when printed standing on the closed end.
-    A pad then reaches forward over the light's block. All edges are rounded (ROUND);
-    the pad's bottom is flat and the arm stays flush with the cradle's outer faces."""
+    """The arm. Its underside leaves the cradle's underside tangentially (no step, no tip)
+    and sweeps down in a smooth curve (quadratic Bezier) to the post behind the ring,
+    reaching exactly 45 deg at the bottom -- nothing steeper than 45 deg when printed
+    standing on the closed end. Its sides continue the cradle's screen-side and front faces
+    straight down; the front then flares out smoothly toward the post. A rounded puck reaches
+    forward over the light's block. Bottom edges are rounded (ROUND); the pad's bottom is flat."""
     r = ROUND
     y_back = YS - SCREW_TO_BACK - 1.0               # stays 1 mm behind the ring's back face
     x0 = XS + PAD_X[0]
-    y0, y1 = YS - PAD_D / 2, YS + PAD_D / 2
     x_end = SLAB_X[1]
-    # --- curved underside: Bezier from T (slab bottom, horizontal) to B (post bottom, 45 deg)
-    zT = -W_ - SLAB_T
-    xT = SLAB_X[0] + SLAB_T - W_ + 3.0              # where the 45 deg tip meets the slab bottom
-    B = np.array([x0, ZS])
-    C = np.array([B[0] - (zT - ZS), zT])            # on the 45 deg line through B, at the slab-bottom height
-    T = np.array([xT, zT])
+    y_front = w.T + W_                              # the cradle's front face
+    T = np.array([SLAB_X[0], -W_])                  # starts ON the cradle's underside, horizontal
+    B = np.array([x0, ZS])                          # post bottom, 45 deg
+    C = np.array([B[0] - (T[1] - ZS), T[1]])        # 45 deg line through B, at the underside height
     slices = []
     for t in np.linspace(0, 1, SWEEP_STEPS + 1):
         px, pz = (1 - t) ** 2 * T + 2 * (1 - t) * t * C + t ** 2 * B
-        ymax = (w.T + W_) + (y_back - (w.T + W_)) * t ** 2       # front edge eases out to the post
-        slices.append(_rbox(px, x_end, -W_, ymax, pz, 0.0, r))
-    # 45 deg tip at the closed-end side, tangent to the plane x + z = SLAB_X0 - WALL
-    xt = lambda zc: SLAB_X[0] - W_ + r * np.sqrt(2) - zc
-    tip = _balls([(xt(zc), y, zc) for y in (-W_ + r, w.T + W_ - r) for zc in (zT + r, -r)] +
-                 [(x_end - r, y, zc) for y in (-W_ + r, w.T + W_ - r) for zc in (zT + r, -r)], r)
-    chain = [tip] + slices
+        ymax = y_front + (y_back - y_front) * t ** 2           # front flares out toward the post
+        zc = pz + r                                            # bottom-ball centres
+        top = w.box(px + r, x_end, -W_, y_front, min(zc, -W_), 0.0)      # flush with the cradle's faces
+        balls = [(x, y, zc) for x in (px + r, x_end - r) for y in (-W_ + r, ymax - r)]
+        slices.append(Manifold.batch_hull([top] + [Manifold.sphere(r, 32).translate(list(p)) for p in balls]))
     arm = Manifold()
-    for a_, b_ in zip(chain[:-1], chain[1:]):
+    for a_, b_ in zip(slices[:-1], slices[1:]):
         arm = arm + Manifold.batch_hull([a_, b_])
     post = slices[-1]
-    # pad over the block: a rounded puck. Far end is a semicircle; closed-end side stays
-    # angled 45 deg in plan (lined up with the post's corner) so it prints on end.
-    pr_ = PAD_D / 2
-    end_c = (XS + PAD_X[1] - pr_, YS)                       # semicircle centre
+    # pad over the block: a rounded puck. Far end is a semicircle on the screw; the closed-end
+    # side stays angled 45 deg in plan (lined up with the post) so it prints on end.
+    (_, _, _), (ex, ey, pr_) = _shoulder_geometry()
     y0, y1 = YS - PAD_D / 2, YS + PAD_D / 2
-    cham = lambda yy: x0 + (yy - y_back)                     # 45 deg chamfer line
-    plan = CrossSection.batch_hull([w.circ(pr_, *end_c, n=96),
+    cham = lambda yy: x0 + (yy - y_back)
+    plan = CrossSection.batch_hull([w.circ(pr_, ex, ey, n=96),
                                     CrossSection([[(cham(y0), y0), (cham(y1), y1), (cham(y1) + 0.01, y1), (cham(y0) + 0.01, y0)]])])
-    core = plan.offset(-r, CrossSection.JoinType.Round if hasattr(CrossSection, "JoinType") else 0, circular_segments=96) \
-        if False else plan.offset(-r, __import__("manifold3d").JoinType.Round, circular_segments=96)
+    core = plan.offset(-r, __import__("manifold3d").JoinType.Round, circular_segments=96)
     pad = core.extrude(PAD_T - 2 * r).translate([0, 0, ZS + r]).minkowski_sum(Manifold.sphere(r, 32))
     arm = arm + Manifold.batch_hull([post, pad])
-    # collar: flush with the cradle's lip and front faces right under the floor, tip at 45 deg
-    collar = Manifold.batch_hull([w.box(SLAB_X[0] + r, x_end, -W_, w.T + W_, -W_ - r, -W_ + 0.01),
-                                  w.box(SLAB_X[0], SLAB_X[0] + 0.01, -W_, w.T + W_, -W_ - 0.01, -W_ + 0.01)])
-    floor_zone = w.box(-50, 250, -50, 100, -W_, 1.0)                # nothing pokes into the phone channel
-    arm = (arm - floor_zone) + collar
-    return arm - _shoulder_trim(post_corner=(x_end - r, -W_ + r, r), pad_circle=(end_c[0], end_c[1], pr_))
+    # keep it below the phone channel (it merges into the cradle floor between -WALL and -1),
+    # and flush with the cradle's front face down to the floor's underside
+    arm = arm ^ w.box(-50, 250, -50, 100, -100, -1.0)
+    return arm - w.box(-50, 250, y_front, 100, -W_, 1.0)
 
 
+LIP_TAPER = (76.0, 92.0)  # x range where the bottom lip ramps from full height down to the floor
+LIP_TRIM_TOP = w.LIP_BOT + 0.01   # the shoulder arc also trims the cradle's bottom lip up to its top
 SHOULDER_R = 55.0        # plan-view radius where the arm's diagonal meets the screen-side face
 
 
-def _shoulder_trim(post_corner, pad_circle):
+def _shoulder_trim(post_corner, pad_circle, z_top=-W_):
     """Prism (all heights below the cradle floor) that rounds the plan-view corner between
     the screen-side face (y = -WALL) and the diagonal from the post to the pad."""
     (ax, ay_, ar), (bx, by, br) = post_corner, pad_circle
@@ -148,13 +149,21 @@ def _shoulder_trim(post_corner, pad_circle):
     out = 30.0
     tri = CrossSection([[tuple(P1), tuple(P1 + [0, -out]), tuple(Q + [out, -out]), tuple(P2 + n_t * out), tuple(P2)]])
     cut = tri - w.circ(R, xc, yc, n=128)
-    return cut.extrude(200).translate([0, 0, -200 - W_ + 0.0])
+    return cut.extrude(200 + z_top + W_).translate([0, 0, -200 - W_])
 
 
 def ring_light_cradle(captive=True):
     cr, _, _ = w.cradle(nut_pocket=False, tongue=False)
     riser = _riser()
     m = cr + riser
+    # one continuous curve at the open end's screen-side corner: the same arc trims the arm
+    # and the cradle's floor and bottom lip above it
+    m = m - _shoulder_trim(*_shoulder_geometry(), z_top=LIP_TRIM_TOP)
+    # taper the bottom lip's top down to the floor as it reaches that arc, so it fades out
+    # instead of ending in a step (the ramp faces up when printed on end)
+    xa, xb = LIP_TAPER
+    ramp = CrossSection([[(xa, w.LIP_BOT + 0.01), (xb, -0.01), (300, -0.01), (300, 50), (xa, 50)]])   # in x-z
+    m = m - ramp.extrude(W_ + 1.01).transform(np.array([[1, 0, 0, 0], [0, 0, -1, 0.01], [0, 1, 0, 0]]))  # y: lip only
     # 1/4"-20 nut: corner along x (print up), on a 0.6 mm floor; blind hole for the light's screw
     R = T_NUT_AF / np.sqrt(3)
     z0 = ZS + T_FLOOR
@@ -167,6 +176,7 @@ def ring_light_cradle(captive=True):
         slot = CrossSection.batch_hull([hexcs.rotate(30).translate([XS, YS]),
                                         w.rect2(XS - T_NUT_AF / 2, XS + T_NUT_AF / 2, YS, YS + PAD_D / 2 + 1)])
     m = m - slot.extrude(T_NUT_CAV).translate([0, 0, z0])
+    m = m.simplify(1e-4)        # drop zero-area slivers where the arm's faces meet the cradle's
     pr = m.translate([W_, 0, 0]).rotate([0, -90, 0])
     pr = pr.translate([0, 0, -pr.bounding_box()[2]])
     # mirror for the camera-at-top orientation (a mirror about a vertical plane keeps it printable)
