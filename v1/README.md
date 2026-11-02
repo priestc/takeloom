@@ -196,7 +196,7 @@ The cradle on a riser that screws onto a ring light's 1/4"-20 phone screw, the o
 
 ![Ring light cradle](images/ring_light.png)
 
-- **Phone orientation:** camera end on the subject's right, lens near the top, as in the reference photo. That orientation needs the shortest riser, about 35 mm above the light's block.
+- **Phone orientation:** camera end on the subject's right, lens near the top, as in the reference photo. That orientation needs the shortest riser, about 47 mm above the light's block.
 - **Riser:** a pad sits on the light's block with a 1/4"-20 nut inside it, the same nut and 0.6 mm floor as the tripod version. A post rises behind the ring to the cradle floor. The bridge between them passes through the ring's opening only above the block, so it never touches the ring.
 - **Camera position:** within about 7 mm of the ring's center for all three phones. Their cameras sit in slightly different places.
 - **Printing:** standing on the cradle's closed end, no supports. Every surface is within 45°, except the small bridge over the nut.
@@ -207,10 +207,10 @@ The cradle on a riser that screws onto a ring light's 1/4"-20 phone screw, the o
 | `3mf/ring_light_cradle_project.3mf` | No pause: slide the nut in from the pad's front face after printing |
 | `stl/ring_light_cradle*.stl` | Geometry only |
 
-**Measure your light before printing.** These values set the camera height and the gap behind the ring. They're at the top of `src/ring_light_cradle.py`:
+**Measure your light before printing.** These values set the camera height and the gap behind the ring. Only `SCREW_TO_BACK` is still an estimate. They're at the top of `src/ring_light_cradle.py`:
 
 | Parameter | Current value | What to measure |
 |---|---|---|
-| `SCREW_TO_CENTER` | 90 mm (estimated from a photo) | From the top surface of the mounting block, where the screw comes out, up to the ring's center. Easiest: measure up to the ring's inner top edge and subtract 101.6 mm. |
+| `SCREW_TO_CENTER` | 101.6 mm (measured) | From the top surface of the mounting block, where the screw comes out, up to the ring's center: 8" to the inner top edge, minus the 4" radius |
 | `SCREW_TO_BACK` | 15 mm (estimated) | From the center of the screw back to the back face of the ring or block, whichever sticks out further, on the side you stand |
 | `SCREW_REACH` | 5.3 mm (measured) | How far the light's screw sticks up. At 5.3 mm it engages 4.7 mm of the nut, about 3.7 threads, and stops 4 mm short of the end of its hole |

@@ -18,9 +18,10 @@ import wall_phone_mount as w
 
 # ---------------- measure these on your ring light ----------------
 RING_ID = 203.2          # ring inner diameter (8")
-SCREW_TO_CENTER = 90.0   # block top surface (where the screw comes out) -> ring centre. ESTIMATED from the photo
+SCREW_TO_CENTER = 101.6  # block top (where the screw comes out) -> ring centre. MEASURED: 8" from the block top to the inner top of the ring, minus the 4" radius
 SCREW_TO_BACK = 15.0     # screw axis -> back face of the ring / block (the side you stand on). ESTIMATED
-PAD_X = (-36.0, 22.0)    # pad extent along the ring's bottom, relative to the screw (asymmetric: keeps the riser's underside within 45 deg)
+PAD_X = (-32.0, 22.0)    # pad extent along the block, relative to the screw. The block top is ~70 mm wide (from the photo); keep within +-34
+BLOCK_HALF_W = 34.5       # half the width of the light's mounting block top (photo estimate)
 PAD_D = 24.0             # pad depth front-to-back on the block top
 SCREW_REACH = 5.3        # how far the light's screw sticks up (measured: just under 4 x 1.39 mm washers)
 # -------------------------------------------------------------------
