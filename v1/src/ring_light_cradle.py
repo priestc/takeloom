@@ -20,7 +20,6 @@ import wall_phone_mount as w
 RING_ID = 203.2          # ring inner diameter (8")
 SCREW_TO_CENTER = 101.6  # block top (where the screw comes out) -> ring centre. MEASURED: 8" from the block top to the inner top of the ring, minus the 4" radius
 SCREW_TO_BACK = 10.5     # screw axis -> back face of the ring (the side you stand on). MEASURED
-PAD_X = (-32.0, 12.0)    # pad extent along the block, relative to the screw; the far end is a semicircle centred on the screw (radius PAD_D/2)
 BLOCK_HALF_W = 34.5       # half the width of the light's mounting block top (photo estimate)
 PAD_D = 24.0             # pad depth front-to-back on the block top
 SCREW_REACH = 5.3        # how far the light's screw sticks up (measured: just under 4 x 1.39 mm washers)
@@ -30,7 +29,6 @@ CLR_BACK = 10.0          # gap between the ring's back face and the cradle's fro
 #   13 mini 112+1.5+17.0 = 130.5, 16 Pro Max 112+1.5+21.3 = 134.8, S20 FE 112+1.5+24.7 = 138.2  -> centre of the range
 LENS_X = {"iPhone 13 mini": 130.5, "iPhone 16 Pro Max": 134.8, "Galaxy S20 FE": 138.2}
 CAM_X, CAM_Z = 134.5, 52.0   # ring centre in the cradle frame (CAM_Z: camera near the top edge, estimated)
-SLAB_X = (30.0, w.CRADLE_LEN)  # riser meets the cradle floor over this x range (cradle frame)
 T_NUT_AF, T_NUT_H = 11.2, 5.48
 T_NUT_CAV = T_NUT_H + 0.4
 T_FLOOR = 0.6
@@ -55,15 +53,20 @@ def pause_height():
     return roof_x() + W_
 
 
-ROUND = 5.0              # corner radius used by the cradle's shoulder trim
-
 # ---- the arm: one lofted shape from the screw pad up to a footprint on the cradle's underside ----
 ARM_TOP = (82.0, 9.5)    # centre of the arm's axis where it reaches the cradle's underside (x, y)
 ARM_RX, ARM_RY = 9.5, 9.0   # half-widths of the body's horizontal section (about 12.5 mm thick at its thinnest)
 FOOT = dict(xr=3.0, y=3.0, hold=6.0, blend=30.0)        # pad: extra width toward +x and +-y, held over the nut, then blended away
-FLARE = dict(xl=18.0, xr=10.0, yl=3.5, yr=3.5, h=14.0)  # top: flares out to the footprint, tangent to the cradle's underside
+FLARE = dict(xl=18.0, yl=3.5, yr=3.5, h=14.0)   # top: flares out to the footprint, tangent to the cradle's underside
+END_X = w.CRADLE_LEN - 0.6   # the arm's far side reaches right out to the cradle's open end
+END_K = 6.0                  # softness of the blend between the open end and the arm's far side
 LOFT_N = 128             # points around each section
 LOFT_STEPS = 120         # sections from the pad to the cradle
+
+
+def _smax(a, b, k):
+    """Smooth maximum (no corner where the two curves cross)."""
+    return 0.5 * (a + b + np.sqrt((a - b) ** 2 + k * k))
 
 
 def _arm_section(h):
@@ -82,7 +85,7 @@ def _arm_section(h):
     fl = 1 - np.sqrt(np.maximum(0.0, 1 - q * q))
     hh = h   # cancels the axis drift, so the pad's far sides stand straight over the nut (and blend smoothly after)
     return (cx - ARM_RX - FLARE["xl"] * fl,
-            cx + ARM_RX + (FOOT["xr"] + k * hh) * foot + FLARE["xr"] * fl,
+            _smax(cx + ARM_RX + (FOOT["xr"] + k * hh) * foot, END_X, END_K),
             cy - ARM_RY - FOOT["y"] * foot - FLARE["yl"] * fl,
             cy + ARM_RY + (FOOT["y"] + m * hh) * foot + FLARE["yr"] * fl)
 
@@ -116,59 +119,13 @@ def _riser():
     return Manifold(Mesh(vert_properties=np.ascontiguousarray(v, np.float32), tri_verts=np.array(f, np.uint32)))
 
 
-def _shoulder_geometry():
-    r = ROUND
-    pr_ = PAD_D / 2
-    end_c = (XS + PAD_X[1] - pr_, YS)
-    return (SLAB_X[1] - r, -W_ + r, r), (end_c[0], end_c[1], pr_)
-
-
-LIP_TAPER = (76.0, 92.0)  # x range where the bottom lip ramps from full height down to the floor
-LIP_TRIM_TOP = w.LIP_BOT + 0.01   # the shoulder arc also trims the cradle's bottom lip up to its top
-SHOULDER_R = 55.0        # plan-view radius where the arm's diagonal meets the screen-side face
-
-
-def _shoulder_trim(post_corner, pad_circle, z_top=-W_):
-    """Prism (all heights below the cradle floor) that rounds the plan-view corner between
-    the screen-side face (y = -WALL) and the diagonal from the post to the pad."""
-    (ax, ay_, ar), (bx, by, br) = post_corner, pad_circle
-    # outer common tangent of the two plan circles (the diagonal edge), on the +x / -y side
-    d = np.array([bx - ax, by - ay_]); L = np.linalg.norm(d); u = d / L
-    nrm = np.array([u[1], -u[0]])                            # points to +x/-y
-    cos_t = (ar - br) / L
-    sin_t = np.sqrt(1 - cos_t ** 2)
-    n_t = cos_t * u + sin_t * nrm                            # unit normal of the tangent line
-    pA = np.array([ax, ay_]) + ar * n_t                      # tangent point on the post corner
-    c0 = n_t @ pA                                            # line: n_t . p = c0
-    # circle of radius R tangent to y = -WALL (from above) and to the tangent line (from inside)
-    R = SHOULDER_R
-    yc = -W_ + R
-    xc = (c0 - R - n_t[1] * yc) / n_t[0]
-    P1 = np.array([xc, -W_])                                 # tangent point on the screen-side face
-    P2 = np.array([xc, yc]) + R * n_t                        # tangent point on the diagonal
-    Q = np.array([(c0 - n_t[1] * (-W_)) / n_t[0], -W_])      # sharp corner being removed
-    out = 30.0
-    tri = CrossSection([[tuple(P1), tuple(P1 + [0, -out]), tuple(Q + [out, -out]), tuple(P2 + n_t * out), tuple(P2)]])
-    cut = tri - w.circ(R, xc, yc, n=128)
-    return cut.extrude(200 + z_top + W_).translate([0, 0, -200 - W_])
-
-
 def arm():
     return _riser()
 
 
 def ring_light_cradle(captive=True):
     cr, _, _ = w.cradle(nut_pocket=False, tongue=False)
-    # one continuous curve at the open end's screen-side corner: the same arc trims the arm
-    # and the cradle's floor and bottom lip above it
-    trim = _shoulder_trim(*_shoulder_geometry(), z_top=LIP_TRIM_TOP)
-    m = cr - trim
-    m = m + arm()
-    # taper the bottom lip's top down to the floor as it reaches that arc, so it fades out
-    # instead of ending in a step (the ramp faces up when printed on end)
-    xa, xb = LIP_TAPER
-    ramp = CrossSection([[(xa, w.LIP_BOT + 0.01), (xb, -0.01), (300, -0.01), (300, 50), (xa, 50)]])   # in x-z
-    m = m - ramp.extrude(W_ + 1.01).transform(np.array([[1, 0, 0, 0], [0, 0, -1, 0.01], [0, 1, 0, 0]]))  # y: lip only
+    m = cr + arm()
     # 1/4"-20 nut: corner along x (print up), on a 0.6 mm floor; blind hole for the light's screw
     R = T_NUT_AF / np.sqrt(3)
     z0 = ZS + T_FLOOR
