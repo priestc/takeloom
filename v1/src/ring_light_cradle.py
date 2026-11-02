@@ -20,7 +20,7 @@ import wall_phone_mount as w
 RING_ID = 203.2          # ring inner diameter (8")
 SCREW_TO_CENTER = 101.6  # block top (where the screw comes out) -> ring centre. MEASURED: 8" from the block top to the inner top of the ring, minus the 4" radius
 SCREW_TO_BACK = 10.5     # screw axis -> back face of the ring (the side you stand on). MEASURED
-PAD_X = (-32.0, 22.0)    # pad extent along the block, relative to the screw. The block top is ~70 mm wide (from the photo); keep within +-34
+PAD_X = (-32.0, 12.0)    # pad extent along the block, relative to the screw; the far end is a semicircle centred on the screw (radius PAD_D/2)
 BLOCK_HALF_W = 34.5       # half the width of the light's mounting block top (photo estimate)
 PAD_D = 24.0             # pad depth front-to-back on the block top
 SCREW_REACH = 5.3        # how far the light's screw sticks up (measured: just under 4 x 1.39 mm washers)
@@ -103,16 +103,52 @@ def _riser():
     for a_, b_ in zip(chain[:-1], chain[1:]):
         arm = arm + Manifold.batch_hull([a_, b_])
     post = slices[-1]
-    # pad over the block: closed-end side angled 45 deg in plan, lined up with the post's corner
-    xc = lambda yc: (x0 + r) + (yc - (y_back - r))
-    pad = _balls([(x, y, z) for y in (y0 + r, y1 - r) for x in (xc(y), XS + PAD_X[1] - r)
-                  for z in (ZS + r, ZS + PAD_T - r)], r)
+    # pad over the block: a rounded puck. Far end is a semicircle; closed-end side stays
+    # angled 45 deg in plan (lined up with the post's corner) so it prints on end.
+    pr_ = PAD_D / 2
+    end_c = (XS + PAD_X[1] - pr_, YS)                       # semicircle centre
+    y0, y1 = YS - PAD_D / 2, YS + PAD_D / 2
+    cham = lambda yy: x0 + (yy - y_back)                     # 45 deg chamfer line
+    plan = CrossSection.batch_hull([w.circ(pr_, *end_c, n=96),
+                                    CrossSection([[(cham(y0), y0), (cham(y1), y1), (cham(y1) + 0.01, y1), (cham(y0) + 0.01, y0)]])])
+    core = plan.offset(-r, CrossSection.JoinType.Round if hasattr(CrossSection, "JoinType") else 0, circular_segments=96) \
+        if False else plan.offset(-r, __import__("manifold3d").JoinType.Round, circular_segments=96)
+    pad = core.extrude(PAD_T - 2 * r).translate([0, 0, ZS + r]).minkowski_sum(Manifold.sphere(r, 32))
     arm = arm + Manifold.batch_hull([post, pad])
     # collar: flush with the cradle's lip and front faces right under the floor, tip at 45 deg
     collar = Manifold.batch_hull([w.box(SLAB_X[0] + r, x_end, -W_, w.T + W_, -W_ - r, -W_ + 0.01),
                                   w.box(SLAB_X[0], SLAB_X[0] + 0.01, -W_, w.T + W_, -W_ - 0.01, -W_ + 0.01)])
     floor_zone = w.box(-50, 250, -50, 100, -W_, 1.0)                # nothing pokes into the phone channel
-    return (arm - floor_zone) + collar
+    arm = (arm - floor_zone) + collar
+    return arm - _shoulder_trim(post_corner=(x_end - r, -W_ + r, r), pad_circle=(end_c[0], end_c[1], pr_))
+
+
+SHOULDER_R = 55.0        # plan-view radius where the arm's diagonal meets the screen-side face
+
+
+def _shoulder_trim(post_corner, pad_circle):
+    """Prism (all heights below the cradle floor) that rounds the plan-view corner between
+    the screen-side face (y = -WALL) and the diagonal from the post to the pad."""
+    (ax, ay_, ar), (bx, by, br) = post_corner, pad_circle
+    # outer common tangent of the two plan circles (the diagonal edge), on the +x / -y side
+    d = np.array([bx - ax, by - ay_]); L = np.linalg.norm(d); u = d / L
+    nrm = np.array([u[1], -u[0]])                            # points to +x/-y
+    cos_t = (ar - br) / L
+    sin_t = np.sqrt(1 - cos_t ** 2)
+    n_t = cos_t * u + sin_t * nrm                            # unit normal of the tangent line
+    pA = np.array([ax, ay_]) + ar * n_t                      # tangent point on the post corner
+    c0 = n_t @ pA                                            # line: n_t . p = c0
+    # circle of radius R tangent to y = -WALL (from above) and to the tangent line (from inside)
+    R = SHOULDER_R
+    yc = -W_ + R
+    xc = (c0 - R - n_t[1] * yc) / n_t[0]
+    P1 = np.array([xc, -W_])                                 # tangent point on the screen-side face
+    P2 = np.array([xc, yc]) + R * n_t                        # tangent point on the diagonal
+    Q = np.array([(c0 - n_t[1] * (-W_)) / n_t[0], -W_])      # sharp corner being removed
+    out = 30.0
+    tri = CrossSection([[tuple(P1), tuple(P1 + [0, -out]), tuple(Q + [out, -out]), tuple(P2 + n_t * out), tuple(P2)]])
+    cut = tri - w.circ(R, xc, yc, n=128)
+    return cut.extrude(200).translate([0, 0, -200 - W_ + 0.0])
 
 
 def ring_light_cradle(captive=True):
