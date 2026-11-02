@@ -58,10 +58,10 @@ def pause_height():
 ROUND = 5.0              # corner radius used by the cradle's shoulder trim
 
 # ---- the arm: one lofted shape from the screw pad up to a footprint on the cradle's underside ----
-ARM_TOP = (66.0, 9.5)    # centre of the arm's axis where it reaches the cradle's underside (x, y)
+ARM_TOP = (82.0, 9.5)    # centre of the arm's axis where it reaches the cradle's underside (x, y)
 ARM_RX, ARM_RY = 9.5, 9.0   # half-widths of the body's horizontal section (about 12.5 mm thick at its thinnest)
 FOOT = dict(xr=3.0, y=3.0, hold=6.0, blend=30.0)        # pad: extra width toward +x and +-y, held over the nut, then blended away
-FLARE = dict(xl=18.0, xr=17.0, yl=3.5, yr=3.5, h=14.0)  # top: flares out to the footprint, tangent to the cradle's underside
+FLARE = dict(xl=18.0, xr=10.0, yl=3.5, yr=3.5, h=14.0)  # top: flares out to the footprint, tangent to the cradle's underside
 LOFT_N = 128             # points around each section
 LOFT_STEPS = 120         # sections from the pad to the cradle
 
