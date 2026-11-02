@@ -151,7 +151,7 @@ Two ways to put the cradle on a standard **1/4"-20** tripod screw. Neither has a
 
 ![One-piece tripod cradle](images/tripod_one_piece.png)
 
-- **Tapered neck.** Instead of a full-length block, a short neck under the nut gives the tripod a 40 × 33 mm flat face. It joins the cradle over 70 mm and tapers at 45° at both ends, which saves about 30 cm³ (~35–40 g) of filament. The cradle's tall front plate already makes it stiff along its length. The 45° tapers mean no flat ceilings when printed on end. The rest of the neck uses your normal 30% infill.
+- **Tapered neck.** Instead of a full-length block, a short neck under the nut gives the tripod a 40 × 25 mm flat face, flush with the cradle on both sides. It joins the cradle over 70 mm and tapers at 45° at both ends, which saves about 30 cm³ (~35–40 g) of filament. The cradle's tall front plate already makes it stiff along its length. The 45° tapers mean no flat ceilings when printed on end. The rest of the neck uses your normal 30% infill.
 - **No weak layer lines.** It prints standing on its closed end, like the cradle, so every layer runs across the joint between base and cradle.
 - **Steel thread.** A 1/4"-20 hex nut sits on a 0.6 mm floor, centered under the cradle + phone center of gravity (within 4 mm for all three phones). Tightening the tripod screw pulls the nut down and squeezes that floor flat against the tripod plate. It can't bend or pull through, and the pressure stays under about 7 MPa even at 500 N, far below what crushes PETG. So tightening hard won't damage it, and no washer is needed.
 - **Solid only where it's clamped.** The project files put a 20 mm 100% infill column under the nut, from the tripod face up through the nut.

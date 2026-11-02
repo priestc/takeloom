@@ -53,7 +53,7 @@ def phones():
 
 
 def _base_block(sy, sx=None):
-    y1 = 2 * sy + W_                        # footprint centred on the screw in y
+    y1 = min(2 * sy + W_, w.T + W_)         # flush with the cradle's front face: no ledge
     if not NECK or sx is None:
         return w.box(-W_, w.CRADLE_LEN, -W_, y1, Z_BOT, -W_ + 0.01), y1
     # neck: flat pad under the screw, both ends tapered at 45 deg up to the cradle floor
