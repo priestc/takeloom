@@ -19,13 +19,13 @@ import wall_phone_mount as w
 # ---------------- measure these on your ring light ----------------
 RING_ID = 203.2          # ring inner diameter (8")
 SCREW_TO_CENTER = 101.6  # block top (where the screw comes out) -> ring centre. MEASURED: 8" from the block top to the inner top of the ring, minus the 4" radius
-SCREW_TO_BACK = 15.0     # screw axis -> back face of the ring / block (the side you stand on). ESTIMATED
+SCREW_TO_BACK = 10.5     # screw axis -> back face of the ring (the side you stand on). MEASURED
 PAD_X = (-32.0, 22.0)    # pad extent along the block, relative to the screw. The block top is ~70 mm wide (from the photo); keep within +-34
 BLOCK_HALF_W = 34.5       # half the width of the light's mounting block top (photo estimate)
 PAD_D = 24.0             # pad depth front-to-back on the block top
 SCREW_REACH = 5.3        # how far the light's screw sticks up (measured: just under 4 x 1.39 mm washers)
 # -------------------------------------------------------------------
-CLR_BACK = 3.0           # gap between the ring's back face and the cradle's front plate
+CLR_BACK = 10.0          # gap between the ring's back face and the cradle's front plate (about a centimetre is fine)
 CAM_X, CAM_Z = 132.0, 52.0   # camera centre in the cradle frame (average of the three phones, camera at top)
 PAD_T = 12.0             # pad thickness
 SLAB_X = (30.0, w.CRADLE_LEN)  # riser meets the cradle floor over this x range (cradle frame)

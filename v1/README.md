@@ -207,10 +207,11 @@ The cradle on a riser that screws onto a ring light's 1/4"-20 phone screw, the o
 | `3mf/ring_light_cradle_project.3mf` | No pause: slide the nut in from the pad's front face after printing |
 | `stl/ring_light_cradle*.stl` | Geometry only |
 
-**Measure your light before printing.** These values set the camera height and the gap behind the ring. Only `SCREW_TO_BACK` is still an estimate. They're at the top of `src/ring_light_cradle.py`:
+**Light dimensions.** These values set the camera height and the gap behind the ring. All of them are measured on the reference light. They're at the top of `src/ring_light_cradle.py`:
 
 | Parameter | Current value | What to measure |
 |---|---|---|
 | `SCREW_TO_CENTER` | 101.6 mm (measured) | From the top surface of the mounting block, where the screw comes out, up to the ring's center: 8" to the inner top edge, minus the 4" radius |
-| `SCREW_TO_BACK` | 15 mm (estimated) | From the center of the screw back to the back face of the ring or block, whichever sticks out further, on the side you stand |
+| `SCREW_TO_BACK` | 10.5 mm (measured) | From the center of the screw back to the back face of the ring, on the side you stand |
+| `CLR_BACK` | 10 mm | Gap between the ring's back face and the cradle's front plate |
 | `SCREW_REACH` | 5.3 mm (measured) | How far the light's screw sticks up. At 5.3 mm it engages 4.7 mm of the nut, about 3.7 threads, and stops 4 mm short of the end of its hole |
