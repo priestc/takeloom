@@ -213,4 +213,4 @@ The cradle on a riser that screws onto a ring light's 1/4"-20 phone screw, the o
 |---|---|---|
 | `SCREW_TO_CENTER` | 90 mm (estimated from a photo) | From the top surface of the mounting block, where the screw comes out, up to the ring's center. Easiest: measure up to the ring's inner top edge and subtract 101.6 mm. |
 | `SCREW_TO_BACK` | 15 mm (estimated) | From the center of the screw back to the back face of the ring or block, whichever sticks out further, on the side you stand |
-| `SCREW_REACH` | 4.2 mm | How far the light's screw sticks up |
+| `SCREW_REACH` | 5.3 mm (measured) | How far the light's screw sticks up. At 5.3 mm it engages 4.7 mm of the nut, about 3.7 threads, and stops 4 mm short of the end of its hole |

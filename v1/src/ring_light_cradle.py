@@ -22,7 +22,7 @@ SCREW_TO_CENTER = 90.0   # block top surface (where the screw comes out) -> ring
 SCREW_TO_BACK = 15.0     # screw axis -> back face of the ring / block (the side you stand on). ESTIMATED
 PAD_X = (-36.0, 22.0)    # pad extent along the ring's bottom, relative to the screw (asymmetric: keeps the riser's underside within 45 deg)
 PAD_D = 24.0             # pad depth front-to-back on the block top
-SCREW_REACH = 4.2        # how far the light's screw sticks up
+SCREW_REACH = 5.3        # how far the light's screw sticks up (measured: just under 4 x 1.39 mm washers)
 # -------------------------------------------------------------------
 CLR_BACK = 3.0           # gap between the ring's back face and the cradle's front plate
 CAM_X, CAM_Z = 132.0, 52.0   # camera centre in the cradle frame (average of the three phones, camera at top)
