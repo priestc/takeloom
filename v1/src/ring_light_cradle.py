@@ -30,7 +30,6 @@ CLR_BACK = 10.0          # gap between the ring's back face and the cradle's fro
 #   13 mini 112+1.5+17.0 = 130.5, 16 Pro Max 112+1.5+21.3 = 134.8, S20 FE 112+1.5+24.7 = 138.2  -> centre of the range
 LENS_X = {"iPhone 13 mini": 130.5, "iPhone 16 Pro Max": 134.8, "Galaxy S20 FE": 138.2}
 CAM_X, CAM_Z = 134.5, 52.0   # ring centre in the cradle frame (CAM_Z: camera near the top edge, estimated)
-PAD_T = 12.0             # pad thickness
 SLAB_X = (30.0, w.CRADLE_LEN)  # riser meets the cradle floor over this x range (cradle frame)
 T_NUT_AF, T_NUT_H = 11.2, 5.48
 T_NUT_CAV = T_NUT_H + 0.4
@@ -56,20 +55,65 @@ def pause_height():
     return roof_x() + W_
 
 
-ROUND = 5.0              # edge radius on the arm
+ROUND = 5.0              # corner radius used by the cradle's shoulder trim
+
+# ---- the arm: one lofted shape from the screw pad up to a footprint on the cradle's underside ----
+ARM_TOP = (66.0, 9.5)    # centre of the arm's axis where it reaches the cradle's underside (x, y)
+ARM_RX, ARM_RY = 9.5, 9.0   # half-widths of the body's horizontal section (about 12.5 mm thick at its thinnest)
+FOOT = dict(xr=3.0, y=3.0, hold=6.0, blend=30.0)        # pad: extra width toward +x and +-y, held over the nut, then blended away
+FLARE = dict(xl=18.0, xr=17.0, yl=3.5, yr=3.5, h=14.0)  # top: flares out to the footprint, tangent to the cradle's underside
+LOFT_N = 128             # points around each section
+LOFT_STEPS = 120         # sections from the pad to the cradle
 
 
-def _balls(points, r):
-    return Manifold.batch_hull([Manifold.sphere(r, 32).translate(list(p)) for p in points])
+def _arm_section(h):
+    """(x_left, x_right, y_left, y_right) of the arm's horizontal section at height h above
+    the pad's bottom. The axis is a straight line from the screw up to ARM_TOP; it rises less
+    than 45 deg off print-vertical (print up = +x), so the body never overhangs."""
+    H = -W_ - ZS
+    k = (XS - ARM_TOP[0]) / H
+    m = (YS - ARM_TOP[1]) / H
+    cx, cy = XS - k * h, YS - m * h
+    # pad: wider (except toward -x, which must keep rising at the body's slope) up to above the nut
+    s = np.clip((h - FOOT["hold"]) / FOOT["blend"], 0, 1)
+    foot = 0.5 * (1 + np.cos(np.pi * s))                 # 1 -> 0, smooth at both ends
+    # flare at the top: a quarter-ellipse profile, tangent to the cradle's underside
+    q = np.clip((h - (H - FLARE["h"])) / FLARE["h"], 0, 1)
+    fl = 1 - np.sqrt(np.maximum(0.0, 1 - q * q))
+    hh = h   # cancels the axis drift, so the pad's far sides stand straight over the nut (and blend smoothly after)
+    return (cx - ARM_RX - FLARE["xl"] * fl,
+            cx + ARM_RX + (FOOT["xr"] + k * hh) * foot + FLARE["xr"] * fl,
+            cy - ARM_RY - FOOT["y"] * foot - FLARE["yl"] * fl,
+            cy + ARM_RY + (FOOT["y"] + m * hh) * foot + FLARE["yr"] * fl)
 
 
-def _rbox(x0, x1, y0, y1, z0, z1, r=ROUND):
-    """Box with every edge rounded to radius r (outer size unchanged)."""
-    return _balls([(x, y, z) for x in (x0 + r, x1 - r) for y in (y0 + r, y1 - r) for z in (z0 + r, z1 - r)], r)
-
-
-SLAB_T = 12.0            # plate under the cradle floor (below the floor's underside)
-SWEEP_STEPS = 10         # slices along the arm's curved underside
+def _riser():
+    """The arm as a single lofted surface (no hulls, no seams): elliptical horizontal sections
+    from a flat pad on the light's block to a footprint on the cradle's underside."""
+    from manifold3d import Mesh
+    H = -W_ - ZS
+    # sections bunch up toward the top so the tangent flare stays smooth
+    u = np.linspace(0, 1, LOFT_STEPS + 1)
+    hs = H * np.sin(u * np.pi / 2) ** 0.7
+    hs = np.unique(np.concatenate([hs, np.linspace(0, FOOT["hold"] + FOOT["blend"], 30)]))
+    th = np.linspace(0, 2 * np.pi, LOFT_N, endpoint=False)
+    rings = []
+    for h in hs:
+        xl, xr, yl, yr = _arm_section(h)
+        rings.append(np.c_[(xl + xr) / 2 + (xr - xl) / 2 * np.cos(th), (yl + yr) / 2 + (yr - yl) / 2 * np.sin(th),
+                           np.full(LOFT_N, ZS + h)])
+    rings.append(rings[-1] + [0, 0, W_ - 1.0])           # straight up into the cradle floor (to z = -1)
+    v = np.vstack(rings + [[rings[0][:, 0].mean(), rings[0][:, 1].mean(), ZS], [rings[-1][:, 0].mean(), rings[-1][:, 1].mean(), -1.0]])
+    nR, N = len(rings), LOFT_N
+    f = []
+    for i in range(nR - 1):
+        for j in range(N):
+            a, b_, c_, d_ = i * N + j, i * N + (j + 1) % N, (i + 1) * N + (j + 1) % N, (i + 1) * N + j
+            f += [(a, b_, c_), (a, c_, d_)]
+    bot, top = nR * N, nR * N + 1
+    f += [(bot, (j + 1) % N, j) for j in range(N)]
+    f += [(top, (nR - 1) * N + j, (nR - 1) * N + (j + 1) % N) for j in range(N)]
+    return Manifold(Mesh(vert_properties=np.ascontiguousarray(v, np.float32), tri_verts=np.array(f, np.uint32)))
 
 
 def _shoulder_geometry():
@@ -77,49 +121,6 @@ def _shoulder_geometry():
     pr_ = PAD_D / 2
     end_c = (XS + PAD_X[1] - pr_, YS)
     return (SLAB_X[1] - r, -W_ + r, r), (end_c[0], end_c[1], pr_)
-
-
-def _riser():
-    """The arm. Its underside leaves the cradle's underside tangentially (no step, no tip)
-    and sweeps down in a smooth curve (quadratic Bezier) to the post behind the ring,
-    reaching exactly 45 deg at the bottom -- nothing steeper than 45 deg when printed
-    standing on the closed end. Its sides continue the cradle's screen-side and front faces
-    straight down; the front then flares out smoothly toward the post. A rounded puck reaches
-    forward over the light's block. Bottom edges are rounded (ROUND); the pad's bottom is flat."""
-    r = ROUND
-    y_back = YS - SCREW_TO_BACK - 1.0               # stays 1 mm behind the ring's back face
-    x0 = XS + PAD_X[0]
-    x_end = SLAB_X[1]
-    y_front = w.T + W_                              # the cradle's front face
-    T = np.array([SLAB_X[0], -W_])                  # starts ON the cradle's underside, horizontal
-    B = np.array([x0, ZS])                          # post bottom, 45 deg
-    C = np.array([B[0] - (T[1] - ZS), T[1]])        # 45 deg line through B, at the underside height
-    slices = []
-    for t in np.linspace(0, 1, SWEEP_STEPS + 1):
-        px, pz = (1 - t) ** 2 * T + 2 * (1 - t) * t * C + t ** 2 * B
-        ymax = y_front + (y_back - y_front) * t ** 2           # front flares out toward the post
-        zc = pz + r                                            # bottom-ball centres
-        top = w.box(px + r, x_end, -W_, y_front, min(zc, -W_), 0.0)      # flush with the cradle's faces
-        balls = [(x, y, zc) for x in (px + r, x_end - r) for y in (-W_ + r, ymax - r)]
-        slices.append(Manifold.batch_hull([top] + [Manifold.sphere(r, 32).translate(list(p)) for p in balls]))
-    arm = Manifold()
-    for a_, b_ in zip(slices[:-1], slices[1:]):
-        arm = arm + Manifold.batch_hull([a_, b_])
-    post = slices[-1]
-    # pad over the block: a rounded puck. Far end is a semicircle on the screw; the closed-end
-    # side stays angled 45 deg in plan (lined up with the post) so it prints on end.
-    (_, _, _), (ex, ey, pr_) = _shoulder_geometry()
-    y0, y1 = YS - PAD_D / 2, YS + PAD_D / 2
-    cham = lambda yy: x0 + (yy - y_back)
-    plan = CrossSection.batch_hull([w.circ(pr_, ex, ey, n=96),
-                                    CrossSection([[(cham(y0), y0), (cham(y1), y1), (cham(y1) + 0.01, y1), (cham(y0) + 0.01, y0)]])])
-    core = plan.offset(-r, __import__("manifold3d").JoinType.Round, circular_segments=96)
-    pad = core.extrude(PAD_T - 2 * r).translate([0, 0, ZS + r]).minkowski_sum(Manifold.sphere(r, 32))
-    arm = arm + Manifold.batch_hull([post, pad])
-    # keep it below the phone channel (it merges into the cradle floor between -WALL and -1),
-    # and flush with the cradle's front face down to the floor's underside
-    arm = arm ^ w.box(-50, 250, -50, 100, -100, -1.0)
-    return arm - w.box(-50, 250, y_front, 100, -W_, 1.0)
 
 
 LIP_TAPER = (76.0, 92.0)  # x range where the bottom lip ramps from full height down to the floor
@@ -152,13 +153,17 @@ def _shoulder_trim(post_corner, pad_circle, z_top=-W_):
     return cut.extrude(200 + z_top + W_).translate([0, 0, -200 - W_])
 
 
+def arm():
+    return _riser()
+
+
 def ring_light_cradle(captive=True):
     cr, _, _ = w.cradle(nut_pocket=False, tongue=False)
-    riser = _riser()
-    m = cr + riser
     # one continuous curve at the open end's screen-side corner: the same arc trims the arm
     # and the cradle's floor and bottom lip above it
-    m = m - _shoulder_trim(*_shoulder_geometry(), z_top=LIP_TRIM_TOP)
+    trim = _shoulder_trim(*_shoulder_geometry(), z_top=LIP_TRIM_TOP)
+    m = cr - trim
+    m = m + arm()
     # taper the bottom lip's top down to the floor as it reaches that arc, so it fades out
     # instead of ending in a step (the ramp faces up when printed on end)
     xa, xb = LIP_TAPER
