@@ -543,8 +543,9 @@ class RecordingDeckDriver:
             if self.video_check_phase == "idle" and "result_path" in data and self._on_video_check_result:
                 self._on_video_check_result(Path(data["result_path"]), bool(data.get("has_video")))
         elif event == "backing_pitch_changed":
-            # The QX25's K2 knob tuning the backing track — show where it
-            # is, since turning a knob blind is no way to tune. Throttled:
+            # The QX25's K2 knob tuning the keyboard to the backing track
+            # (backend.py's set_backing_pitch) — show where it is, since
+            # turning a knob blind is no way to tune. Throttled:
             # a knob streams far more messages than the touchscreen needs
             # repainting for, and the last value always lands since the
             # message stays up for a moment after the knob stops.
@@ -552,7 +553,7 @@ class RecordingDeckDriver:
             if now - self._last_pitch_notify >= 0.1:
                 self._last_pitch_notify = now
                 cents = int(data.get("cents", 0))
-                text = "Backing tuning: in tune" if cents == 0 else f"Backing tuning: {cents:+d}¢"
+                text = "Keyboard tuning: concert" if cents == 0 else f"Keyboard tuning: {cents:+d}¢"
                 self.streamdeck.notify(text, revert_after=1.5)
         elif event == "synth_voice_changed":
             # From this deck's own Voice key, the Record page's "Sound"

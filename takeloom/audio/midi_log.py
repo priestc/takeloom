@@ -8,8 +8,10 @@ alongside its .flac/.mp4, the same way it slices the audio itself.
 The point: a rendered take is one specific synth voice baked into
 audio. Keeping the actual MIDI performance too means a take can later
 be "revoiced" — re-rendered through a different voice (piano vs organ)
-— without re-recording. Nothing in this module renders audio or does
-the revoicing itself; it only captures/persists/slices the MIDI data.
+— without re-recording. render_midi_file plays a take's file back
+through the Synth (used to re-render a take at concert pitch after the
+keyboard's tuning knob was moved onto its backing track — see
+processing/splicer.py's CompletedTake.retuned).
 
 Timing: a standard MIDI file's ticks_per_beat is a 16-bit field (max
 32767), too small to let one tick equal one audio sample at a real
@@ -201,3 +203,35 @@ def slice_midi_file(src_path: Path, start_frame: int, end_frame: int, sample_rat
         out_events.append((end_rel, "note_off", {"note": note}))
 
     write_midi_file(out_events, sample_rate, out_path)
+
+
+def render_midi_file(path: Path, voice: str, sample_rate: int, frames: int, out_path: Path) -> None:
+    """`path` (a take's .mid) played through a fresh Synth in `voice`,
+    `frames` long, written as a mono FLAC at out_path — the same audio the
+    session recorded (AudioEngine records Synth.render()'s raw output),
+    with every event landing on its own frame (to the file's 1 ms)."""
+    import numpy as np
+    import soundfile as sf
+    from .synth import Synth
+    synth = Synth(sample_rate, voice=voice)
+    apply = {
+        "note_on": lambda f: synth.note_on(f["note"], f["velocity"]),
+        "note_off": lambda f: synth.note_off(f["note"]),
+        "sustain": lambda f: synth.set_sustain(f["down"]),
+        "volume": lambda f: synth.set_channel_volume(f["value"]),
+        "expression": lambda f: synth.set_expression(f["value"]),
+    }
+    block = 512
+    pos = 0
+    events = _read_midi_events(path, sample_rate)
+    with sf.SoundFile(str(out_path), mode="w", samplerate=sample_rate, channels=1,
+                      format="FLAC", subtype="PCM_16") as out:
+        i = 0
+        while pos < frames:
+            while i < len(events) and events[i][0] <= pos:
+                apply[events[i][1]](events[i][2])
+                i += 1
+            nxt = events[i][0] if i < len(events) else frames
+            n = max(1, min(block, nxt - pos, frames - pos))
+            out.write(synth.render(n))
+            pos += n

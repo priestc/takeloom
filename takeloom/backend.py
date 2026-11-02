@@ -1918,8 +1918,13 @@ class LocalBackend(Backend):
         self._control_inputs: dict = {}
         self._control_config: StudioConfig | None = None
         self._voice_knob_zone: dict[str, int] = {}
-        self._tuning_save_timer: threading.Timer | None = None
         self._last_emitted_pitch: int | None = None
+        # The tuning knob's position (in cents, knob_to_cents) that means
+        # "instrument untransposed": moved to wherever the knob is each
+        # time an adjustment is committed to the backing track, since the
+        # knob itself stays put — see set_backing_pitch.
+        self._pitch_knob_origin = 0.0
+        self._pitch_knob_last = 0.0
         # Set by set_audio_hardware_present(False) — the always-running
         # server's hardware watcher (rig_watcher.py) saw the audio interface
         # get powered off. Keeps _start_monitoring_locked() — which every
@@ -3750,42 +3755,77 @@ class LocalBackend(Backend):
                         pass
             threading.Thread(target=apply, daemon=True).start()
 
-    def set_backing_pitch(self, cents: float) -> bool:
-        """Shift the backing track of the session's currently loaded song by
-        `cents` (clamped to ±MAX_PITCH_CENTS), live — see audio/pitch_
-        shift.py — and remember it for that backing track file (vault.py's
-        save_backing_tuning, written half a second after the knob stops
-        moving rather than on every message). Returns False, doing
-        nothing, if no session has a song loaded — there's no backing
-        playing to tune. Safe to call from rtmidi's callback thread: only
-        attribute reads and live-safe Mixer calls happen inline."""
+    def set_backing_pitch(self, knob_cents: float) -> bool:
+        """The keyboard's tuning knob (the QX25's K2), for a backing track
+        that's a little sharp or flat. Turning it fine-tunes the session's
+        MIDI instrument (audio/synth.py's set_pitch) to match the backing,
+        live; the backing itself plays untouched. When the song ends —
+        played out, skipped, or the session stopped — the adjustment moves
+        onto the backing track instead, reversed (_commit_instrument_pitch_
+        locked): from then on that backing plays retuned and the
+        instrument is back at concert pitch. The MIDI log never sees any
+        of this, so a take's .mid is the notes as played.
+
+        `knob_cents` is where the knob is (knob_to_cents); the shift is
+        relative to where it was at the last commit, since the knob stays
+        put. Returns False, doing nothing, unless a session with a MIDI
+        instrument has a song loaded. Safe on rtmidi's callback thread:
+        attribute reads and the synth's own lock only."""
         from .audio.pitch_shift import MAX_PITCH_CENTS
+        self._pitch_knob_last = float(knob_cents)
         session = self._active_session
         track = session.current_track if session is not None else None
-        if track is None or not track.backing_track:
+        synth = getattr(session.engine, "synth", None) if session is not None else None
+        if track is None or not track.backing_track or synth is None:
             return False
-        cents = max(-MAX_PITCH_CENTS, min(MAX_PITCH_CENTS, float(cents)))
-        session.engine.mixer.set_pitch("backing", cents)
-        backing_track = track.backing_track
-        config = self._control_config or self.get_config()
-        root = Path(config.session_vault_path)
-
-        def save() -> None:
-            from .vault import save_backing_tuning
-            try:
-                save_backing_tuning(root, backing_track, cents)
-            except OSError as e:
-                print(f"takeloom: couldn't save backing tuning for '{backing_track}': {e}")
-        if self._tuning_save_timer is not None:
-            self._tuning_save_timer.cancel()
-        self._tuning_save_timer = threading.Timer(0.5, save)
-        self._tuning_save_timer.daemon = True
-        self._tuning_save_timer.start()
-        shown = round(cents)
+        cents = max(-MAX_PITCH_CENTS, min(MAX_PITCH_CENTS, knob_cents - self._pitch_knob_origin))
+        synth.set_pitch(0.0 if abs(cents) < 1.0 else cents)
+        shown = round(synth.pitch_cents)
         if shown != self._last_emitted_pitch:
             self._last_emitted_pitch = shown
             self._emit("backing_pitch_changed", {"cents": shown, "track_name": track.name})
         return True
+
+    def _commit_instrument_pitch_locked(self, session: "_ActiveSession", config: StudioConfig) -> None:
+        """The song is over (or being swapped out): move the instrument's
+        tuning-knob adjustment (set_backing_pitch) onto the backing track,
+        reversed — an instrument tuned up 20 cents to match means the
+        backing is 20 cents sharp, so it's saved 20 cents lower (vault.py's
+        save_backing_tuning, on top of whatever it had) and the instrument
+        goes back to concert pitch. The next time this backing loads it's
+        rendered retuned (Mixer.add_source's pitch_cents). Logged as
+        "instrument_pitch" so processing re-renders this song's takes from
+        their MIDI at concert pitch (processing/splicer.py), in tune with
+        the retuned backing. Called with self._record_lock held."""
+        synth = getattr(session.engine, "synth", None)
+        track = session.current_track
+        if synth is None or track is None or not synth.pitch_cents:
+            return
+        cents = synth.pitch_cents
+        synth.set_pitch(0.0)
+        self._pitch_knob_origin = self._pitch_knob_last
+        self._last_emitted_pitch = 0
+        self._log_session_event(
+            "instrument_pitch", f"cents={cents:.2f}", frame=session.engine.session_frames,
+            track_index=session.current_track_index, track_name=track.name,
+        )
+        if not track.backing_track:
+            return
+        from .audio.pitch_shift import MAX_PITCH_CENTS
+        from .vault import load_backing_tuning, save_backing_tuning
+        root = Path(config.session_vault_path)
+        tuning = load_backing_tuning(root, track.backing_track) - cents
+        tuning = max(-MAX_PITCH_CENTS, min(MAX_PITCH_CENTS, tuning))
+        try:
+            save_backing_tuning(root, track.backing_track, tuning)
+        except OSError as e:
+            print(f"takeloom: couldn't save backing tuning for '{track.backing_track}': {e}")
+            return
+        self._emit("backing_pitch_changed", {"cents": 0, "track_name": track.name})
+        self._emit("recording_status", {
+            "status": f"Retuned the backing track of '{track.name}' by {-cents:+.0f}¢ "
+                      f"(now {tuning:+.0f}¢ overall); the keyboard is back at concert pitch.",
+        })
 
     def benchmark_audio_modifiers(self) -> dict:
         from .audio.benchmark import run_audio_modifier_benchmark
@@ -4362,6 +4402,7 @@ class LocalBackend(Backend):
         engine = session.engine
         engine.mixer.set_playing(False)
         session.playing = False
+        self._commit_instrument_pitch_locked(session, config)
         engine.mixer.clear()
 
         # The remembered mixer level (this run's, or carried over from the
@@ -4383,15 +4424,13 @@ class LocalBackend(Backend):
         song_trim_end = round(track.trim_end_seconds * config.sample_rate)
 
         if backing_path.exists():
-            engine.mixer.add_source(
-                "backing", backing_path, volume=track.volume / 100.0,
-                trim_frames=song_trim_start, trim_end_frames=song_trim_end,
-            )
             # This recording's own pitch correction, if it's ever been
             # tuned (set_backing_pitch) — so it loads already in tune.
             from .vault import load_backing_tuning
-            engine.mixer.set_pitch(
-                "backing", load_backing_tuning(Path(config.session_vault_path), track.backing_track),
+            engine.mixer.add_source(
+                "backing", backing_path, volume=track.volume / 100.0,
+                trim_frames=song_trim_start, trim_end_frames=song_trim_end,
+                pitch_cents=load_backing_tuning(Path(config.session_vault_path), track.backing_track),
             )
             self._last_emitted_pitch = None
 
@@ -4723,6 +4762,7 @@ class LocalBackend(Backend):
                 index = i
                 break
         if index is None:
+            self._commit_instrument_pitch_locked(session, config)
             session.current_track = None
             session.current_track_index = None
             session.engine.mixer.clear()
@@ -5829,13 +5869,11 @@ class LocalBackend(Backend):
             song_trim_end = round(track.trim_end_seconds * config.sample_rate)
 
             if backing_path.exists():
+                from .vault import load_backing_tuning
                 engine.mixer.add_source(
                     "backing", backing_path, volume=self._backing_volume / 100.0,
                     trim_frames=song_trim_start, trim_end_frames=song_trim_end,
-                )
-                from .vault import load_backing_tuning
-                engine.mixer.set_pitch(
-                    "backing", load_backing_tuning(Path(config.session_vault_path), track.backing_track),
+                    pitch_cents=load_backing_tuning(Path(config.session_vault_path), track.backing_track),
                 )
 
             trim = int(config.latency_compensation_ms / 1000.0 * config.sample_rate)
@@ -6377,6 +6415,7 @@ class LocalBackend(Backend):
                 )
                 session.engine.mixer.set_playing(False)
                 session.playing = False
+            self._commit_instrument_pitch_locked(session, self.get_config())
             self._log_session_event("session_end", frame=session.engine.session_frames)
             self._active_session = None
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -10,7 +9,6 @@ import numpy as np
 
 from .filters import CompressorSettings, apply_compressor
 from .formats import read_audio
-from .pitch_shift import SplicePitchShifter
 
 
 @dataclass
@@ -21,10 +19,6 @@ class MixSource:
     volume: float = 1.0
     active: bool = True
     original_data: np.ndarray | None = None  # full array before trim
-    # Live pitch correction (see set_pitch / audio/pitch_shift.py) — only
-    # ever set on the backing track. 0.0 plays `data` untouched.
-    pitch_cents: float = 0.0
-    shifter: SplicePitchShifter | None = None
 
 
 class Mixer:
@@ -42,7 +36,7 @@ class Mixer:
 
     def add_source(
         self, name: str, path: Path, volume: float = 1.0, trim_frames: int = 0, trim_end_frames: int = 0,
-        compressor_settings: CompressorSettings | None = None,
+        compressor_settings: CompressorSettings | None = None, pitch_cents: float = 0.0,
     ) -> None:
         """Load an audio file and add it as a mix source.
 
@@ -67,7 +61,12 @@ class Mixer:
         as backend.py's get_take_playback_path, without touching the file itself.
         Never used for "backing"/"metronome" sources (see backend.py's
         callers) — only an actual take has an instrument label to look
-        settings up by."""
+        settings up by.
+
+        pitch_cents (only for "backing"): the backing track's saved tuning
+        (vault.py's load_backing_tuning), rendered here once, offline,
+        over the whole file (audio/pitch_shift.py's render) — about half
+        a second for a song, and nothing extra in the audio callback."""
         data, sr = read_audio(path, self.sample_rate)
         # Ensure stereo
         if data.ndim == 1:
@@ -76,6 +75,9 @@ class Mixer:
             data = np.column_stack([data[:, 0], data[:, 0]])
         if compressor_settings is not None:
             data = apply_compressor(data, sr, compressor_settings)
+        if pitch_cents:
+            from .pitch_shift import render
+            data = render(data, sr, pitch_cents)
         original = data
         if trim_frames > 0 and trim_frames < len(data):
             data = data[trim_frames:]
@@ -169,10 +171,6 @@ class Mixer:
                 continue
             actual_end = min(end, src_len)
             n = actual_end - start
-            if source.shifter is not None:
-                shifted = source.shifter.process(source.data, start, n, source.pitch_cents)
-                output[:n] += shifted * source.volume
-                continue
             output[:n] += source.data[start:actual_end] * source.volume
         # Clip to prevent clipping distortion
         np.clip(output, -1.0, 1.0, out=output)
@@ -184,36 +182,6 @@ class Mixer:
                 source.volume = volume
                 break
 
-    def set_pitch(self, name: str, cents: float) -> None:
-        """Live-safe: shift source `name` by `cents` (see audio/pitch_shift.
-        py — timing stays locked to the unshifted track). Takes effect on
-        the very next block, and can be changed every block (a knob being
-        turned). The shifter stays attached once created, so returning to
-        0 fades back onto the untouched audio rather than cutting over."""
-        for source in self.sources:
-            if source.name == name:
-                if source.shifter is None and cents != 0.0:
-                    source.shifter = SplicePitchShifter(self.sample_rate)
-                    self._prepare_shifter(source)
-                source.pitch_cents = cents
-                break
-
-    @staticmethod
-    def _prepare_shifter(source: MixSource) -> None:
-        """Give the shifter its onset map of source.data (see SplicePitch-
-        Shifter.prepare) on a background thread — a whole-file pass that
-        mustn't run on the audio callback or hold up the caller (rtmidi's
-        thread, for a knob)."""
-        shifter, data = source.shifter, source.data
-        if shifter is not None:
-            threading.Thread(target=shifter.prepare, args=(data,), daemon=True).start()
-
-    def get_pitch(self, name: str) -> float:
-        for source in self.sources:
-            if source.name == name:
-                return source.pitch_cents
-        return 0.0
-
     def set_trim(self, name: str, trim_frames: int) -> None:
         """Re-slice a source from its original_data with a new trim offset."""
         for source in self.sources:
@@ -222,5 +190,4 @@ class Mixer:
                     source.data = source.original_data[trim_frames:]
                 else:
                     source.data = source.original_data
-                self._prepare_shifter(source)
                 break

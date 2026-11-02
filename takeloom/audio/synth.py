@@ -124,7 +124,14 @@ class _AdditiveSynth:
         # everything else until the slider is actually touched."
         self._channel_volume = 1.0
         self._expression = 1.0
+        # set_pitch's fine tuning, as a frequency ratio on every voice
+        # (held notes included — applied at render time).
+        self._pitch_ratio = 1.0
         self._lock = threading.Lock()
+
+    def set_pitch(self, cents: float) -> None:
+        with self._lock:
+            self._pitch_ratio = 2.0 ** (cents / 1200.0)
 
     def set_channel_volume(self, value: int) -> None:
         """MIDI Control Change 7 ("Channel Volume") — applied to the
@@ -265,7 +272,7 @@ class _AdditiveSynth:
         self, v: _Voice, block_t: np.ndarray, harmonics: np.ndarray, amps: np.ndarray, dt: float,
     ) -> tuple[np.ndarray, bool]:
         n = len(block_t)
-        omega = 2.0 * np.pi * v.freq * harmonics * dt  # per-harmonic phase increment per sample, shape (H,)
+        omega = 2.0 * np.pi * v.freq * self._pitch_ratio * harmonics * dt  # per-harmonic phase increment per sample, shape (H,)
         idx = np.arange(1, n + 1, dtype=np.float64)
         phases = v.phase[:, None] + np.outer(omega, idx)  # shape (H, n)
 
@@ -372,6 +379,14 @@ class _FluidSynthVoice:
         with self._lock:
             self._fs.cc(self._channel, 64, 127 if down else 0)  # CC64 = sustain pedal
 
+    # FluidSynth's default pitch-wheel range: ±8192 is ±2 semitones.
+    _BEND_PER_CENT = 8192 / 200.0
+
+    def set_pitch(self, cents: float) -> None:
+        """A pitch bend, held notes included."""
+        with self._lock:
+            self._fs.pitch_bend(self._channel, round(cents * self._BEND_PER_CENT))
+
     def set_channel_volume(self, value: int) -> None:
         """Forwarded straight to FluidSynth's own native CC7 handling —
         unlike _AdditiveSynth, which has to implement the gain scaling
@@ -428,6 +443,7 @@ class Synth:
         self.voice = voice if voice in SYNTH_VOICES else DEFAULT_SYNTH_VOICE
         impl = _FluidSynthVoice.try_create(sample_rate, self.voice)
         self._impl = impl if impl is not None else _AdditiveSynth(sample_rate, self.voice)
+        self.pitch_cents = 0.0
 
     def set_voice(self, voice: str) -> None:
         if voice in SYNTH_VOICES:
@@ -448,6 +464,14 @@ class Synth:
 
     def set_expression(self, value: int) -> None:
         self._impl.set_expression(value)
+
+    def set_pitch(self, cents: float) -> None:
+        """Fine-tune everything this synth plays by `cents` — the
+        keyboard's tuning knob (backend.py's set_backing_pitch), so the
+        instrument matches a backing track that's a little sharp or flat.
+        Never written into the MIDI log: the notes stay the notes."""
+        self.pitch_cents = cents
+        self._impl.set_pitch(cents)
 
     def all_notes_off(self) -> None:
         self._impl.all_notes_off()

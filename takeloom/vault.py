@@ -179,8 +179,9 @@ def save_song_mix(root: Path, track_name: str, volumes: dict[str, float], muted:
 
 # --- backing track tuning ---
 #
-# Per backing-track-file pitch correction in cents (the QX25's K2 knob —
-# see backend.py's set_backing_pitch), keyed by the backing track's
+# Per backing-track-file pitch correction in cents (the QX25's K2 knob,
+# committed at each song's end — see backend.py's set_backing_pitch and
+# _commit_instrument_pitch_locked), keyed by the backing track's
 # filename so it follows that exact recording wherever it's used: every
 # session that loads it, and Completed Takes playback. One small JSON map
 # in the local vault, written by the server only — same as the song mixes

@@ -1,5 +1,6 @@
-"""Small, timing-locked pitch shifting for backing tracks — the QX25's K2
-knob "tune the backing track" control (see backend.py's set_backing_pitch).
+"""Small, timing-locked pitch shifting for backing tracks — a backing
+track's saved tuning (vault.py's backing tuning, set by the keyboard's
+tuning knob — see backend.py's set_backing_pitch).
 
 Only ever asked for tiny shifts — MAX_PITCH_CENTS either way, a quarter-
 tone — to correct a backing track that's slightly sharp or flat. That
@@ -22,8 +23,10 @@ short crossfade. At most ±50 cents that's one splice every ~1.4 s, far
 less often for a gentler correction; the timeline never drifts more than
 MAX_OFFSET_SECONDS from the original, and never accumulates.
 
-Runs per audio block from AudioEngine's callback (through Mixer), and
-offline over a whole file for Completed Takes playback (render())."""
+Only ever run offline over a whole file (render()): when a session loads
+a backing track (Mixer.add_source) and for Completed Takes playback. It
+used to run live, per audio block, while the knob turned — that crackled,
+so the knob now tunes the MIDI instrument instead."""
 
 from __future__ import annotations
 

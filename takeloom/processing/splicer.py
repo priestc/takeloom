@@ -117,6 +117,12 @@ class CompletedTake:
     # When set, process_session below files the take under this instead
     # of instrument_label ("midi-keyboard") — see that assignment for why.
     synth_voice: str = ""
+    # Played with the keyboard's tuning knob turned (backend.py's
+    # set_backing_pitch), which the session then moved onto the backing
+    # track at the song's end ("instrument_pitch" event) — so the recorded
+    # audio is off from the retuned backing by that much, and process_
+    # session re-renders it from the take's MIDI at concert pitch.
+    retuned: bool = False
 
 
 def parse_session_log(data: dict, total_frames: int | None = None) -> list[CompletedTake]:
@@ -149,6 +155,9 @@ def parse_session_log(data: dict, total_frames: int | None = None) -> list[Compl
     instrument_label = ""
     input_label = ""
     synth_voice = ""
+    # Takes before this index were already covered by an earlier
+    # instrument_pitch event.
+    retune_from = 0
 
     def close_segment(end_frame: int | None, natural_end: bool, min_seconds: float = MIN_KEPT_TAKE_SECONDS) -> None:
         nonlocal start_frame
@@ -186,6 +195,11 @@ def parse_session_log(data: dict, total_frames: int | None = None) -> list[Compl
             close_segment(frame, natural_end=True)
         elif etype in ("track_skipped", "song_stopped", "track_loaded", "session_end"):
             close_segment(frame, natural_end=False)
+        elif etype == "instrument_pitch":
+            for take in completed[retune_from:]:
+                if take.track_name == event.get("track_name", "") and take.synth_voice:
+                    take.retuned = True
+            retune_from = len(completed)
 
     # See total_frames' own docstring above — nothing but an abrupt
     # process death leaves a segment open with no closing event at all.
@@ -441,7 +455,9 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
 
                 take_num = next_take_number(completed_dir, track_name, take_label)
                 flac_name = take_filename(track_name, take_label, take_num, take_source, take_backing_track, "flac")
-                _copy_flac_segment(src, start, end, completed_dir / flac_name)
+                mid_path = completed_dir / take_filename(
+                    track_name, take_label, take_num, take_source, take_backing_track, "mid",
+                )
 
                 video_ref = None
                 if session_video_ok:
@@ -464,13 +480,15 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                 has_midi = False
                 if take.synth_voice and have_midi:
                     from ..audio.midi_log import slice_midi_file
-                    slice_midi_file(
-                        session_midi, start, end, sample_rate,
-                        completed_dir / take_filename(
-                            track_name, take_label, take_num, take_source, take_backing_track, "mid",
-                        ),
-                    )
+                    slice_midi_file(session_midi, start, end, sample_rate, mid_path)
                     has_midi = True
+                if take.retuned and has_midi:
+                    # See CompletedTake.retuned: the audio, played again
+                    # from the notes at concert pitch, same voice.
+                    from ..audio.midi_log import render_midi_file
+                    render_midi_file(mid_path, take.synth_voice, sample_rate, end - start, completed_dir / flac_name)
+                else:
+                    _copy_flac_segment(src, start, end, completed_dir / flac_name)
 
                 take_info = TakeInfo(
                     instrument=take_label, take_number=take_num, filename=flac_name, has_video=has_video,

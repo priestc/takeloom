@@ -31,7 +31,7 @@ from dataclasses import dataclass
 # the hardware), it just isn't acted on.
 ROLE_VOLUME = "volume"                # the synth's volume (see Synth.set_channel_volume)
 ROLE_VOICE = "voice"                  # picks the synth voice by knob position
-ROLE_BACKING_PITCH = "backing_pitch"  # tunes the session's backing track (backend.set_backing_pitch)
+ROLE_BACKING_PITCH = "backing_pitch"  # tunes the keyboard to the backing track, then the backing at song end (backend.set_backing_pitch)
 
 
 @dataclass(frozen=True)
