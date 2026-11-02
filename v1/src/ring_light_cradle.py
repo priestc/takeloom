@@ -26,7 +26,10 @@ PAD_D = 24.0             # pad depth front-to-back on the block top
 SCREW_REACH = 5.3        # how far the light's screw sticks up (measured: just under 4 x 1.39 mm washers)
 # -------------------------------------------------------------------
 CLR_BACK = 10.0          # gap between the ring's back face and the cradle's front plate (about a centimetre is fine)
-CAM_X, CAM_Z = 132.0, 52.0   # camera centre in the cradle frame (average of the three phones, camera at top)
+# lens centres along the cradle (bump edge sits ~1.5 mm past the open end, + measured bump-edge-to-lens):
+#   13 mini 112+1.5+17.0 = 130.5, 16 Pro Max 112+1.5+21.3 = 134.8, S20 FE 112+1.5+24.7 = 138.2  -> centre of the range
+LENS_X = {"iPhone 13 mini": 130.5, "iPhone 16 Pro Max": 134.8, "Galaxy S20 FE": 138.2}
+CAM_X, CAM_Z = 134.5, 52.0   # ring centre in the cradle frame (CAM_Z: camera near the top edge, estimated)
 PAD_T = 12.0             # pad thickness
 SLAB_X = (30.0, w.CRADLE_LEN)  # riser meets the cradle floor over this x range (cradle frame)
 T_NUT_AF, T_NUT_H = 11.2, 5.48
