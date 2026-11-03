@@ -17,6 +17,10 @@ A printed v1 on the studio wall, empty and holding a phone:
 
 <img src="photos/v1_mounted_empty.jpg" alt="Printed v1 mount on the wall, empty" width="360"> <img src="photos/v1_with_phone.jpg" alt="Printed v1 mount holding a phone in landscape" width="360">
 
+The v1 ring light cradle, printed, holding an iPhone 13 mini:
+
+<img src="photos/v1_ring_light.jpg" alt="Printed ring light cradle holding an iPhone 13 mini inside a ring light" width="360">
+
 ## Compatible phones
 
 One cradle fits all of these, bare or in a case:

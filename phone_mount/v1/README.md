@@ -196,6 +196,10 @@ The cradle on a riser that screws onto a ring light's 1/4"-20 phone screw, the o
 
 ![Ring light cradle](images/ring_light.png)
 
+<img src="../photos/v1_ring_light.jpg" alt="Printed ring light cradle holding an iPhone 13 mini inside a ring light" width="360">
+
+Printed, on the reference ring light, holding an iPhone 13 mini.
+
 - **Phone orientation:** camera end on the subject's right, lens near the top, as in the reference photo. That orientation needs the shortest riser, about 47 mm above the light's block.
 - **Arm:** one continuous shape with no seams. It starts as a flat pad on the light's block, with the 1/4"-20 nut sealed inside (same nut and 0.6 mm floor as the tripod version). It narrows to a slim body, about 12.5 mm thick at its thinnest, and runs in a straight line up behind the ring. At the top it flares out into a footprint on the cradle's underside, meeting it tangentially like a fillet. Its far side reaches right out to the cradle's open end, so the arm meets the cradle at the very end. Every horizontal slice is an ellipse, and their size and position change smoothly from the pad to the cradle. The arm only reaches forward through the ring's opening above the block, so it never touches the ring. The cradle itself is the original shape, with the bottom lip running all the way to the open end.
 - **Camera position:** side to side, the ring's center sits in the middle of the three phones' measured lens positions: 13 mini 4.0 mm one way, S20 FE 3.7 mm the other, 16 Pro Max on center. Up and down, they're within about 7 mm, using estimated lens heights.
