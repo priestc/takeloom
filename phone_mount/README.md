@@ -29,4 +29,4 @@ Anything between about 64 and 81 mm wide (short side, case included) and up to ~
 
 ## License
 
-Not yet chosen.
+MIT, like the rest of Takeloom. See [LICENSE](../LICENSE). This covers the generator scripts and the printable files (STL, 3MF).
