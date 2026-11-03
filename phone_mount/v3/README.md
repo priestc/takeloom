@@ -44,12 +44,26 @@ The arm and knobs are the same for either cradle side: print `arm_right` with th
 
 ## Hardware
 
-- 2× **M5 × 20 hex-head bolts**, full thread (ISO 4017 / DIN 933, 8 mm across flats). They must be **hex head**: a round pan head would spin in its pocket. Socket-head cap screws don't fit the pocket.
-- 2× **M5 hex nuts**, standard 8 mm across flats, 4 mm thick (ISO 4032). Nylon-insert lock nuts are too thick.
-- 2× **M5 flat washers**, 10 mm OD × 1 mm (DIN 125)
-- 1–2× **Command Large** strips (the plate is 46 × 80 mm, the same as v1)
+### Shopping list (one mount)
 
-If your bolts are a different length, change `BOLT_L` and regenerate. The arm puck and cradle tongue resize so the tip still ends inside the knob.
+| Qty | Item | Search for | Must be |
+|---|---|---|---|
+| 2 | Hex-head bolt | "M5 x 20 hex head bolt fully threaded ISO 4017" (or DIN 933) | **Hex head**, 8 mm across flats, 3.5 mm tall. **20 mm** long under the head. Fully threaded |
+| 2 | Hex nut | "M5 hex nut ISO 4032" (or DIN 934) | Standard 8 mm across flats, 4 mm thick |
+| 2 | Flat washer | "M5 flat washer DIN 125" | 10 mm outside diameter, 1 mm thick |
+| 1–2 | Adhesive strip | "Command Large picture hanging strips" | Large size. The plate is 46 × 80 mm, so two fit side by side |
+| — | Filament | PETG | About 100 g for the whole plate (wall plate, arm, cradle, two knobs) |
+
+Plain steel (zinc-plated, class 8.8) or stainless steel (A2) both work. Bolts, nuts and washers are cheapest in small assorted packs, and one pack of each covers several mounts.
+
+**Don't substitute:**
+
+- **Pan-head, button-head or socket-head (Allen) screws:** a round head would spin in its sealed pocket, and socket-head cap screws (ISO 4762 / DIN 912) don't fit it.
+- **Nylon-insert lock nuts (nyloc):** too thick for the knob's nut pocket.
+- **Fender or large-OD washers:** too wide for the washer pocket.
+- **A different bolt length:** the joints are sized for 20 mm, and 20–23 mm fits. For another length, change `BOLT_L` and regenerate. The arm puck and cradle tongue resize so the tip still ends inside the knob.
+
+No tools are needed to assemble or aim the mount.
 
 ## Printing
 
