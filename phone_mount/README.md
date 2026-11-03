@@ -1,4 +1,6 @@
-# Phone Wall Mount
+# Takeloom Phone Mount
+
+The official phone holder for [Takeloom Camera](../docs/takeloom-camera.md). Takeloom assumes every phone recording a session is held in one of these.
 
 A 3D-printable wall mount that holds a phone in landscape for filming. It sticks to the wall with Command strips — no screws in the wall.
 
@@ -8,6 +10,12 @@ A 3D-printable wall mount that holds a phone in landscape for filming. It sticks
 | [v2](v2/) | Pan + tilt, magnetic toothed joints (12× 5×2 mm magnets), no bolts | Designed, not yet printed |
 
 ![v1 with an iPhone 16 Pro Max](v1/images/phones.png)
+
+## Photos
+
+A printed v1 on the studio wall, empty and holding a phone:
+
+<img src="photos/v1_mounted_empty.jpg" alt="Printed v1 mount on the wall, empty" width="360"> <img src="photos/v1_with_phone.jpg" alt="Printed v1 mount holding a phone in landscape" width="360">
 
 ## Compatible phones
 

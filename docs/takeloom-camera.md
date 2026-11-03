@@ -74,7 +74,9 @@ sync offset (below); a local camera's uses the hand-tuned camera offset.
 These are whole-session videos only: per-take videos still come from the
 main camera.
 
-Mount the phone in landscape and keep it on a charger. The app keeps the
+Hold the phone in the official [Takeloom phone mount](../phone_mount/), a
+3D-printable wall mount that keeps it in landscape. The software assumes
+every recording phone is in one. Keep the phone on a charger. The app keeps the
 screen awake. Camera and quality (720p / 1080p / 4K) are in ⚙ and can't
 change mid-session.
 
