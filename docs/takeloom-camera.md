@@ -117,7 +117,14 @@ after a relaunch.
     xcodegen generate
     open TakeloomCamera.xcodeproj   # set your signing team, run on a device
 
-**Android**:
+**Android**: with the phone plugged in (USB debugging on), run
+
+    takeloom camera-android
+
+from a takeloom checkout (an editable install). It builds the app from
+camera_app/android and installs it over the existing one, keeping its data,
+using Android Studio's bundled Java and SDK so neither needs to be on PATH.
+By hand, that's:
 
     cd camera_app/android
     ./gradlew assembleDebug         # app/build/outputs/apk/debug/app-debug.apk

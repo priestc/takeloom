@@ -295,6 +295,20 @@ def camera_testflight_command() -> None:
         raise SystemExit(1)
 
 
+@main.command(name="camera-android")
+def camera_android_command() -> None:
+    """Build the Android Takeloom Camera from this checkout and install it on
+    the phone connected over adb (USB debugging on). Updates in place, keeping
+    the app's data. Uses Android Studio's bundled Java if JAVA_HOME isn't set."""
+    from .android_install import AndroidInstallError, install
+    from .camera_release import CameraReleaseError, checkout_root
+    try:
+        install(checkout_root(), log=click.echo)
+    except (CameraReleaseError, AndroidInstallError) as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+
+
 @main.command(name="make-release")
 @click.argument("bump", type=click.Choice(["patch", "minor", "major"]))
 @click.option("--watch", is_flag=True, help="Follow the release until it finishes.")

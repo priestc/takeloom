@@ -16,7 +16,7 @@ built locally with Xcode and Android Studio:
 4. make a GitHub release for the tag, never marked "latest" (that's
    takeloom's own);
 5. upload the iOS app to TestFlight (testflight.py), unless told not to.
-   Android is still installed from Android Studio.
+   Android is installed with `takeloom camera-android`.
 
 Camera tags never affect takeloom's version, which only counts v* tags.
 takeloom ships camera_app/VERSION (see phone_camera/app_version.py), so a
