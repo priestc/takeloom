@@ -98,6 +98,20 @@ class AudioEngine:
         self._stream: sd.Stream | None = None
         self._running = False
         self._dropouts = 0  # see _report_dropouts
+        # Callback timing, measured here because PortAudio's CoreAudio
+        # backend often doesn't raise output_underflow when the callback
+        # misses its deadline — an audible click with nothing counted in
+        # _dropouts. Per report window (see _report_dropouts): blocks that
+        # arrived late (gap since the previous callback well over one
+        # block period — the thread was starved, e.g. waiting on the GIL)
+        # or ran slow (the callback's own work ate most of the budget),
+        # plus the worst of each. Single writer (the callback); the
+        # reporter just reads and resets, a lost update is harmless.
+        self._last_cb_start = 0.0
+        self._late_blocks = 0
+        self._slow_blocks = 0
+        self._worst_gap = 0.0
+        self._worst_dur = 0.0
         self._peak_level: float = 0.0
         self._backing_peak_level: float = 0.0
         self._on_song_end: Callable[[], None] | None = None
@@ -219,6 +233,33 @@ class AudioEngine:
         status: sd.CallbackFlags,
     ) -> None:
         """Audio stream callback — runs in real-time audio thread."""
+        cb_start = time.perf_counter()
+        try:
+            self._process_block(indata, outdata, frames, time_info, status)
+        finally:
+            budget = frames / self.sample_rate
+            cb_end = time.perf_counter()
+            dur = cb_end - cb_start
+            if self._last_cb_start:
+                gap = cb_start - self._last_cb_start
+                if gap > self._worst_gap:
+                    self._worst_gap = gap
+                if gap > 1.6 * budget:
+                    self._late_blocks += 1
+            self._last_cb_start = cb_start
+            if dur > self._worst_dur:
+                self._worst_dur = dur
+            if dur > 0.7 * budget:
+                self._slow_blocks += 1
+
+    def _process_block(
+        self,
+        indata: np.ndarray,
+        outdata: np.ndarray,
+        frames: int,
+        time_info: object,
+        status: sd.CallbackFlags,
+    ) -> None:
         if status.output_underflow or status.input_overflow:
             self._dropouts += 1
         for sink in self._input_sinks:
@@ -356,8 +397,20 @@ class AudioEngine:
         seconds — so "it sounded glitchy" can be told apart from a
         dropout vs. something in the audio itself."""
         reported = self._dropouts
+        budget_ms = self.buffer_size / self.sample_rate * 1000
         while self._running:
             time.sleep(_DROPOUT_REPORT_SECONDS)
+            late, slow = self._late_blocks, self._slow_blocks
+            if late or slow:
+                print(
+                    f"[{time.strftime('%H:%M:%S')}] Audio callback timing over the last "
+                    f"{_DROPOUT_REPORT_SECONDS:.0f}s: {late} late block(s) (worst gap "
+                    f"{self._worst_gap * 1000:.1f} ms), {slow} slow block(s) (worst "
+                    f"{self._worst_dur * 1000:.1f} ms), budget {budget_ms:.1f} ms per block.",
+                    flush=True,
+                )
+            self._late_blocks = self._slow_blocks = 0
+            self._worst_gap = self._worst_dur = 0.0
             count = self._dropouts
             if count != reported:
                 print(
