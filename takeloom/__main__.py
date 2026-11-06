@@ -1223,6 +1223,7 @@ def listen(project_name: str | None) -> None:
 
     # Import audio modules
     import sounddevice as sd
+    from .audio.devices import match_device_rate_settings
     from .audio.mixer import Mixer
 
     # Load all preferred takes into mixer with latency compensation
@@ -1268,6 +1269,7 @@ def listen(project_name: str | None) -> None:
             channels=max(1, out_channels),
             dtype="float32",
             callback=callback,
+            extra_settings=match_device_rate_settings(sd),
         ):
             while mixer.is_playing and not mixer.is_finished:
                 sd.sleep(100)

@@ -5436,7 +5436,7 @@ class LocalBackend(Backend):
             import sounddevice as sd
         except Exception as e:
             raise BackendError(f"sounddevice unavailable: {e}") from e
-        from .audio.devices import resolve_device
+        from .audio.devices import match_device_rate_settings, resolve_device
 
         midi_instruments = [inst for inst in config.instruments if inst.is_midi]
 
@@ -5549,6 +5549,7 @@ class LocalBackend(Backend):
                     device=in_dev, channels=channel_count,
                     samplerate=config.sample_rate, blocksize=config.buffer_size,
                     dtype="float32", callback=make_callback(entries),
+                    extra_settings=match_device_rate_settings(sd),
                 )
                 stream.start()
                 streams.append(stream)

@@ -14,6 +14,7 @@ from .recorder import Recorder
 from .mixer import Mixer
 from .filters import Compressor, CompressorSettings
 from .synth import Synth
+from .devices import match_device_rate_settings
 
 _DROPOUT_REPORT_SECONDS = 5.0
 
@@ -343,6 +344,7 @@ class AudioEngine:
             dtype="float32",
             latency=latency,
             callback=self._callback,
+            extra_settings=match_device_rate_settings(sd),
         )
         self._stream.start()
         self._running = True
