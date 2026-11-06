@@ -189,6 +189,13 @@ class RigWatcher:
             return
         if self._camera_present:
             return
+        if not any(c.key.startswith("local:") and not c.hidden for c in config.known_cameras):
+            # Every webcam this machine has ever seen is hidden in Settings
+            # (phones come in over the network, not through this scan), so
+            # there's nothing to watch for: don't start an ffmpeg at all.
+            # A brand-new webcam still shows up in Settings' own scan, and
+            # this resumes on the next poll once one is unhidden.
+            return
         self._camera_misses += 1
         if self._camera_misses > _CAMERA_FAST_POLLS and self._camera_misses % _CAMERA_SLOW_POLLS:
             return
