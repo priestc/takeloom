@@ -33,9 +33,17 @@ def list_cameras() -> list[tuple[str, str]]:
 def _list_cameras_avfoundation() -> list[tuple[str, str]]:
     if not ffmpeg_available():
         return []
+    # close_fds=False (with CAMERA_FFMPEG's absolute path) lets Python
+    # start ffmpeg with posix_spawn instead of fork(). The rig watcher runs
+    # this every few seconds while the webcam is missing, inside the
+    # server process that's also running the realtime audio callback, and
+    # a fork() of that big multi-threaded process holds the GIL for
+    # 20-35 ms: a late audio block, heard as a crackle every couple of
+    # seconds in the live monitor. Safe: every fd Python opens is already
+    # close-on-exec (PEP 446), so nothing extra leaks into ffmpeg.
     result = subprocess.run(
         [CAMERA_FFMPEG, "-f", "avfoundation", "-list_devices", "true", "-i", ""],
-        capture_output=True, text=True,
+        capture_output=True, text=True, close_fds=False,
     )
     devices = []
     in_video_section = False

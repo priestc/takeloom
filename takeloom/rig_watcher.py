@@ -41,6 +41,13 @@ _AUDIO_SETTLE_POLLS = 2
 # Polls to keep retrying ambient monitoring after the interface appeared,
 # if the first attempt didn't open (device still settling).
 _MONITOR_RETRY_POLLS = 5
+# The webcam shares the interface's power, so it normally shows up within
+# a few polls of the rig turning on. Past that, it's probably just not
+# plugged in today: keep looking, but only every _CAMERA_SLOW_POLLS polls
+# (~30 s). Each look starts an ffmpeg, which is not something to do every
+# 2 s next to the realtime audio callback.
+_CAMERA_FAST_POLLS = 15
+_CAMERA_SLOW_POLLS = 15
 
 
 class RigWatcher:
@@ -61,6 +68,7 @@ class RigWatcher:
         self._audio_seen_polls = 0
         self._monitor_retries_left = 0
         self._camera_present = False
+        self._camera_misses = 0  # polls since the rig came on with no webcam found
         self._deck_error_logged: str | None = None
 
     def start(self) -> None:
@@ -177,8 +185,12 @@ class RigWatcher:
             # ffmpeg, not something to do every 2s forever on an idle server.
             # Camera and interface share the hub's power switch.
             self._camera_present = False
+            self._camera_misses = 0
             return
         if self._camera_present:
+            return
+        self._camera_misses += 1
+        if self._camera_misses > _CAMERA_FAST_POLLS and self._camera_misses % _CAMERA_SLOW_POLLS:
             return
         from .phone_camera.protocol import is_phone_device
         local = [label for device, label in self._backend.rescan_cameras() if not is_phone_device(device)]
