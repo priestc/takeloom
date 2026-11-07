@@ -651,6 +651,12 @@ def server_command(disable_color: bool) -> None:
     # down when it's switched off, for as long as the server runs. Its
     # first poll runs inline, so the startup state is logged right here.
     driver.listen()
+    # The vault publishes edited videos to YouTube with this machine's
+    # account: make sure it has the current one (vault.py).
+    import threading
+
+    from .vault import push_youtube_to_vault
+    threading.Thread(target=push_youtube_to_vault, args=(backend.get_config(), log), daemon=True).start()
     watcher = RigWatcher(backend, driver, log=log)
     watcher.start()
 

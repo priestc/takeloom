@@ -236,6 +236,28 @@ def remote_vault(config: StudioConfig, log: LogFn | None = None) -> "VaultClient
     return VaultClient(config.vault_server, config.vault_server_token)
 
 
+def push_youtube_to_vault(config: StudioConfig, log: LogFn | None = None) -> None:
+    """Best-effort: give the remote vault the YouTube account connected here
+    (video-ui › Settings › Streaming), so its session pages can publish an
+    edited video straight from there. A disconnected account ("" refresh
+    token) tells it to forget it. Never raises: an older vault (no
+    /api/youtube) or an unreachable one just doesn't get it."""
+    client = remote_vault(config)
+    if client is None:
+        return
+    try:
+        client.set_youtube({
+            "client_id": config.youtube_oauth_client_id, "client_secret": config.youtube_oauth_client_secret,
+            "refresh_token": config.youtube_oauth_refresh_token,
+            "title_template": config.youtube_title_template,
+            "description_template": config.youtube_description_template,
+            "visibility": config.youtube_broadcast_visibility,
+        })
+    except Exception as e:  # noqa: BLE001
+        if log:
+            log(f"Couldn't give the vault at {client.url} the YouTube account: {e}")
+
+
 def vault_encodes_videos(config: StudioConfig, log: LogFn | None = None) -> bool:
     """Whether a just-ended session's videos should be left for the vault
     server to encode (StudioConfig.video_encoding; video/render_jobs.py):

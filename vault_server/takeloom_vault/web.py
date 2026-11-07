@@ -282,7 +282,8 @@ def _stage_player(rel: str, videos: list[tuple[str, str, str]], shifts: list[flo
     )
 
 
-def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor) -> str:
+def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor, publisher=None,
+                 data: dict | None = None) -> str:
     """The timeline editor (edit.py renders its plan): a camera priority
     (the first is the main camera and the sound; the lower, the less it's
     cut to), automatic cuts from it (edit.auto_cuts, on the server), a
@@ -298,9 +299,22 @@ def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor
     urls = [_media_url(f"{rel}/{file}") for _title, file, _label in videos]
     final = (f"<p id='ed-final'>Final video: <a href='{_media_url(rel + '/edit.mp4')}'>edit.mp4</a></p>"
              if status.get("state") == "done" else "<p id='ed-final'></p>")
+    # Publishing the edit to YouTube (youtube.py): its title from takeloom's
+    # title template, or what it was last published as.
+    from . import youtube
+    creds = youtube.credentials()
+    published = publisher.status(name) if publisher is not None else {"state": "none"}
+    pub = {
+        "connected": creds is not None,
+        "title": published.get("title") or youtube.render_template((creds or {}).get("title_template") or
+                                                                   "{date} * {musician} * {project}", data or {}),
+        "description": youtube.render_template((creds or {}).get("description_template") or "", data or {}),
+        "privacy": published.get("asked_privacy") or (creds or {}).get("visibility") or "unlisted",
+        "status": published,
+    }
     config = _json.dumps({
         "session": name, "titles": titles, "urls": urls, "colors": _EDIT_COLORS, "plan": plan,
-        "status": status, "available": editor.available, "final": _media_url(rel + "/edit.mp4"),
+        "status": status, "available": editor.available, "final": _media_url(rel + "/edit.mp4"), "pub": pub,
     }).replace("</", "<\\/")
     return (
         "<h2>Edit</h2>"
@@ -317,6 +331,11 @@ def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor
         "<p><button class='ok' id='ed-render' onclick='edRender()'>Render final video</button> "
         "<span id='ed-status' class='muted'></span></p>"
         + final +
+        "<p>YouTube title <input id='yt-title' style='width:28em' maxlength='100'> "
+        "<select id='yt-privacy'><option value='public'>Public</option><option value='unlisted'>Unlisted</option>"
+        "<option value='private'>Private</option></select> "
+        "<button id='yt-publish' onclick='ytPublish()'>Publish to YouTube</button> "
+        "<span id='yt-status' class='muted'></span></p>"
         f"<script>var ED={config};</script>"
         "<script>"
         "var edCuts=[],edPri=[];"
@@ -348,13 +367,31 @@ def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor
         "el.textContent=!ED.available?'This vault can\\'t render (it needs ffmpeg with libx264).':"
         "s.state=='queued'?'Waiting to render…':s.state=='rendering'?'Rendering… '+Math.round(100*(s.progress||0))+'%':"
         "s.state=='failed'?'Render failed: '+(s.error||''):s.state=='done'?'Rendered.':'';"
-        "if(s.state=='done')document.getElementById('ed-final').innerHTML='Final video: <a href=\"'+ED.final+'?'+Date.now()+'\">edit.mp4</a>';"
+        "if(s.state=='done'){document.getElementById('ed-final').innerHTML='Final video: <a href=\"'+ED.final+'?'+Date.now()+'\">edit.mp4</a>';ytState({state:'none'});}"
         "if(s.state=='queued'||s.state=='rendering')setTimeout(edPoll,2000);}"
         "function edPoll(){fetch('/sessions/'+encodeURIComponent(ED.session)+'/edit-status').then(function(r){return r.json();}).then(edState);}"
         "function edRender(){fetch('/sessions/'+encodeURIComponent(ED.session)+'/edit',{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({priority:edPri,cuts:edCuts})})"
         ".then(function(r){return r.json();}).then(edState);}"
+        "function ytState(s){var el=document.getElementById('yt-status'),b=document.getElementById('yt-publish'),P=ED.pub;"
+        "var rendered=document.getElementById('ed-final').textContent.length>0;"
+        "b.disabled=!P.connected||!rendered||s.state=='uploading';"
+        "if(!P.connected)el.textContent='Connect YouTube in takeloom first (video-ui › Settings › Streaming).';"
+        "else if(!rendered)el.textContent='Render the final video first.';"
+        "else if(s.state=='uploading'){el.textContent='Uploading… '+Math.round(100*(s.progress||0))+'%';setTimeout(ytPoll,3000);}"
+        "else if(s.state=='failed')el.textContent='Publishing failed: '+(s.error||'');"
+        "else if(s.state=='done'){el.innerHTML='Published: <a target=_blank href=\"'+s.url+'\">'+s.url+'</a> ('+s.privacy+"
+        "(s.asked_privacy&&s.asked_privacy!=s.privacy?'; YouTube made it '+s.privacy+', not '+s.asked_privacy+"
+        "': unverified API projects can only upload private videos':'')+')';b.textContent='Publish again';}"
+        "else el.textContent='';}"
+        "function ytPoll(){fetch('/sessions/'+encodeURIComponent(ED.session)+'/publish-status').then(function(r){return r.json();}).then(ytState);}"
+        "function ytPublish(){var t=document.getElementById('yt-title').value;"
+        "fetch('/sessions/'+encodeURIComponent(ED.session)+'/publish',{method:'POST',headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify({title:t,description:ED.pub.description,privacy:document.getElementById('yt-privacy').value})})"
+        ".then(function(r){return r.json();}).then(ytState);}"
         "(function(){STAGE.setCamAt(edCamAt);"
+        "document.getElementById('yt-title').value=ED.pub.title;document.getElementById('yt-privacy').value=ED.pub.privacy;"
+        "ytState(ED.pub.status);"
         "var p=ED.plan&&(ED.plan.priority||(ED.plan.primary!=null?[ED.plan.primary]:null));"
         "edPri=ED.titles.map(function(_,i){return i;});"
         "if(p){edPri=p.concat(edPri.filter(function(i){return p.indexOf(i)<0;}));}"
@@ -365,7 +402,7 @@ def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor
     )
 
 
-def session_page(vault: Vault, name: str, data: dict, editor=None) -> str:
+def session_page(vault: Vault, name: str, data: dict, editor=None, publisher=None) -> str:
     directory = vault.session_dir(name)
     rel = f"sessions/{name}"
     events = data.get("events") or []
@@ -394,7 +431,7 @@ def session_page(vault: Vault, name: str, data: dict, editor=None) -> str:
             parts.append(_stage_player(rel, videos, shifts,
                                        footer.schedule(data) if footer.wanted(data) else None))
             if len(videos) > 1:
-                parts.append(_edit_editor(name, rel, videos, editor))
+                parts.append(_edit_editor(name, rel, videos, editor, publisher, data))
         else:
             parts.append(f"<video id='v' controls preload='metadata' src='{_media_url(rel + '/' + videos[0][1])}'></video>")
     elif (directory / "render_jobs.json").exists():

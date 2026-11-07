@@ -2340,10 +2340,18 @@ class LocalBackend(Backend):
         if errors:
             raise BackendError("\n".join(errors))
         before = self.session_cameras()
+        previous = StudioConfig.load(self._config_path) if self._config_path.exists() else None
         config.save(self._config_path)
         if self.session_cameras() != before:
             self._preview.restart()
             self._emit("session_cameras_changed", {})
+        youtube_fields = ("youtube_oauth_client_id", "youtube_oauth_client_secret", "youtube_oauth_refresh_token",
+                          "youtube_title_template", "youtube_description_template", "youtube_broadcast_visibility",
+                          "vault_server", "vault_server_token", "session_vault_mode")
+        if previous is None or any(getattr(previous, f) != getattr(config, f) for f in youtube_fields):
+            # The vault publishes edited videos with this account (vault.py).
+            from .vault import push_youtube_to_vault
+            threading.Thread(target=push_youtube_to_vault, args=(config,), daemon=True).start()
 
     def begin_vault_pairing(self, address: str) -> dict:
         from .vault_client import VaultClient, VaultError, normalize_vault_url

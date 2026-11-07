@@ -19,6 +19,10 @@ API — every route except /api/pair* needs `Authorization: Bearer <token>`:
                                            camera on the program feed when it started)
     PUT    /api/files/<vault path>      <- raw bytes, X-Content-SHA256 header required
     POST   /api/delete                  {"paths": [...]} -> {}
+    PUT    /api/youtube                 {"client_id", "client_secret", "refresh_token",
+                                           "title_template", "description_template", "visibility"}
+                                           -> {}: takeloom's YouTube account, for publishing
+                                           edits from here (youtube.py); "" refresh_token forgets it
 
 Browser UI:
 
@@ -48,6 +52,7 @@ from . import web
 from .auth import Auth
 from .edit import EditRenderer
 from .render import Renderer
+from .youtube import Publisher
 from .store import Vault, VaultPathError
 from .takes import TakeVideoCache, TakeVideoError
 
@@ -96,12 +101,13 @@ class VaultHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, address, vault: Vault, auth: Auth, take_videos: TakeVideoCache, renderer: Renderer,
-                 editor: EditRenderer) -> None:
+                 editor: EditRenderer, publisher: Publisher | None = None) -> None:
         self.vault = vault
         self.auth = auth
         self.take_videos = take_videos
         self.renderer = renderer
         self.editor = editor
+        self.publisher = publisher
         super().__init__(address, _Handler)
 
 
@@ -246,6 +252,18 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._json({"state": "failed", "error": str(e)}, HTTPStatus.BAD_REQUEST)
                 log(f"Edit of {m.group(1)} saved from {self.ip}; rendering")
                 return self._json(status)
+            if m := re.fullmatch(r"/sessions/([^/]+)/publish", path):
+                # Publish the rendered edit to YouTube (youtube.py).
+                if vault.read_session_log(m.group(1)) is None:
+                    raise _HTTPError(HTTPStatus.NOT_FOUND, f"No session named {m.group(1)!r}")
+                body = self._read_json()
+                try:
+                    status = self.server.publisher.publish(
+                        m.group(1), str(body.get("title") or ""), str(body.get("description") or ""),
+                        str(body.get("privacy") or ""))
+                except ValueError as e:
+                    return self._json({"state": "failed", "error": str(e)}, HTTPStatus.BAD_REQUEST)
+                return self._json(status)
             if m := re.fullmatch(r"/clients/(\w+)/revoke", path):
                 if auth.revoke(m.group(1)):
                     log(f"Paired client {m.group(1)} revoked via web UI from {self.ip}")
@@ -259,6 +277,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._html(web.clients_page(list(auth.clients), auth.pending_requests()))
         if m := re.fullmatch(r"/sessions/([^/]+)/edit-status", path):
             return self._json(self.server.editor.status(m.group(1)))
+        if m := re.fullmatch(r"/sessions/([^/]+)/publish-status", path):
+            return self._json(self.server.publisher.status(m.group(1)))
         if m := re.fullmatch(r"/sessions/([^/]+)/edit-fill", path):
             # The timeline editor's automatic cuts (edit.auto_cuts), from a
             # camera priority: decided here, where a check that the
@@ -268,7 +288,7 @@ class _Handler(BaseHTTPRequestHandler):
             data = vault.read_session_log(m.group(1))
             if data is None:
                 raise _HTTPError(HTTPStatus.NOT_FOUND, f"No session named {m.group(1)!r}")
-            return self._html(web.session_page(vault, m.group(1), data, self.server.editor))
+            return self._html(web.session_page(vault, m.group(1), data, self.server.editor, self.server.publisher))
         if path.startswith("/media/"):
             return self._send_file(vault.resolve(path[len("/media/"):]))
         if m := re.fullmatch(r"/takes/([^/]+)/video", path):
@@ -308,6 +328,11 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send_file(vault.resolve(relative))
             if method == "PUT":
                 return self._receive_file(relative, label)
+        if path == "/youtube" and method == "PUT":
+            from . import youtube
+            youtube.save_credentials(self._read_json())
+            log(f"{label} ({self.ip}) {'set' if youtube.credentials() else 'cleared'} the YouTube account")
+            return self._json({})
         if path == "/delete" and method == "POST":
             paths = self._read_json().get("paths") or []
             if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
@@ -413,7 +438,7 @@ def serve(vault: Vault, auth: Auth, take_videos: TakeVideoCache, host: str, port
     renderer = Renderer(vault, log)
     renderer.start()
     editor = EditRenderer(vault, log, renderer.available)
-    httpd = VaultHTTPServer((host, port), vault, auth, take_videos, renderer, editor)
+    httpd = VaultHTTPServer((host, port), vault, auth, take_videos, renderer, editor, Publisher(vault, log))
     log(f"takeloom-vault serving {vault.root} on http://{socket.gethostname()}:{port} (pid {os.getpid()})")
     try:
         httpd.serve_forever()

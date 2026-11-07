@@ -95,6 +95,18 @@ frame-accurately, and the sound unbroken from the main camera from start to fini
 never breaks the audio. Rendering needs the same ffmpeg (with `libx264`) as encoding below; it
 takes about as long as encoding one camera's session video. See `takeloom_vault/edit.py`.
 
+## Publishing to YouTube
+
+Beside **Render final video**, **Publish to YouTube** uploads the session's `edit.mp4` straight
+from the vault, with the title shown (prefilled from takeloom's YouTube title template) and the
+chosen visibility, then links to the video. It uses the YouTube account connected in takeloom
+(video-ui › Settings › Streaming): takeloom gives it to the vault when it's connected and when
+`takeloom server` starts (`PUT /api/youtube`), and the vault keeps it in
+`~/.config/takeloom-vault/youtube.json`, readable only by its user. Uploads resume after a failed
+chunk. YouTube makes every upload from an unverified Google API project private whatever
+visibility was asked for; the page says when that happened. Each upload costs 1,600 of the
+project's 10,000 daily API quota units, so about six a day.
+
 ## Encoding session videos here
 
 Encoding a session's videos (every camera's whole-session video, re-encoded to burn in its

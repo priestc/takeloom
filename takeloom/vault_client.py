@@ -147,6 +147,12 @@ class VaultClient:
         except VaultError:
             return None
 
+    def set_youtube(self, data: dict) -> None:
+        """Give the vault this machine's YouTube account (or "" refresh_token
+        to forget it), for publishing edits from there (the vault's
+        youtube.py). Raises VaultError."""
+        self._json("PUT", "/api/youtube", data)
+
     def write_session_log(self, session_dir_name: str, data: dict) -> bool:
         try:
             self._json("PUT", f"/api/sessions/{quote(session_dir_name, safe='')}/log", data)
