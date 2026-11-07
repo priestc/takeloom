@@ -7,6 +7,7 @@ dependencies, same as the rest of this package."""
 from __future__ import annotations
 
 import datetime
+import re
 import time
 from html import escape
 from pathlib import Path
@@ -113,18 +114,57 @@ def _pairing_banner(pending: list[PairingRequest]) -> str:
     return "<div class='banner'>" + "".join(rows) + "</div>"
 
 
-def session_videos(directory: Path, data: dict) -> list[tuple[str, str]]:
-    """(camera label, file) of each finished camera video in a session:
-    one per camera ("extra_cameras" lists every camera since cameras became
-    a set), or session_video.mp4 for a session from before that."""
+_GENERIC_PHONE_NAMES = {"", "iphone", "ipad", "ipod touch"}
+
+
+def camera_model(phone: dict, data: dict) -> str:
+    """The phone's model ("iPhone 16 Pro Max"): logged since takeloom
+    started recording it; for an older session, from a program-camera
+    event naming it ("Takeloom Camera: iPhone 13 mini"), else its own name
+    if that says more than "iPhone". "" for a local camera / unknown."""
+    if phone.get("model"):
+        return phone["model"]
+    device = f"takeloom-camera:{phone['device_id']}" if phone.get("device_id") else ""
+    for e in data.get("events") or []:
+        if device and e.get("event_type") == "program_camera" and e.get("camera") == device:
+            label = (e.get("details") or "").split(";")[0].removeprefix("label=").strip()
+            if label.startswith("Takeloom Camera: "):
+                return label[len("Takeloom Camera: "):]
+    name = (phone.get("client_name") or "").strip()
+    if name.lower() in _GENERIC_PHONE_NAMES:
+        return ""
+    # "Chris's Galaxy S20 FE 5G" -> "Galaxy S20 FE 5G" (as takeloom's
+    # phone_camera/models.py strip_owner).
+    m = re.fullmatch(r"\S.*?['’]s (.+)", name)
+    return m.group(1) if m else name
+
+
+def camera_title(label: str, phone: dict, data: dict) -> str:
+    """How a camera is named on these pages: always with the phone's model
+    ("Iphone 16 · iPhone 16 Pro Max"; just the model when there's no name
+    or the name already says it)."""
+    model = camera_model(phone, data)
+    label = (label or "").strip() or model or "Camera"
+    if model and model.lower() not in label.lower():
+        return f"{label} · {model}"
+    return label
+
+
+def session_videos(directory: Path, data: dict) -> list[tuple[str, str, str]]:
+    """(title, file, camera label) of each finished camera video in a
+    session: one per camera ("extra_cameras" lists every camera since
+    cameras became a set), or session_video.mp4 for a session from before
+    that. The label is what take refs name the camera by."""
     videos = []
     if (directory / "session_video.mp4").exists():
         phone = data.get("phone_camera") or {}
-        videos.append((phone.get("label") or data.get("camera_label") or "Camera", "session_video.mp4"))
+        label = phone.get("label") or data.get("camera_label") or ""
+        videos.append((camera_title(label, phone, data), "session_video.mp4", label))
     for cam in data.get("extra_cameras") or []:
         file = cam.get("final_file") or ""
         if file and "/" not in file and (directory / file).exists():
-            videos.append((cam.get("label") or file, file))
+            label = cam.get("label") or ""
+            videos.append((camera_title(label, cam.get("phone_camera") or {}, data), file, label or file))
     return videos
 
 
@@ -185,8 +225,8 @@ def session_page(vault: Vault, name: str, data: dict) -> str:
             # keeps the place, so switching angles doesn't lose your spot.
             buttons = "".join(
                 f"<button class='cam{' on' if i == 0 else ''}' onclick=\"cam(this,'{_media_url(rel + '/' + file)}')\">"
-                f"{escape(label)}</button>"
-                for i, (label, file) in enumerate(videos)
+                f"{escape(title)}</button>"
+                for i, (title, file, _label) in enumerate(videos)
             )
             parts.append(f"<p>{buttons}</p>")
         parts.append(f"<video id='v' controls preload='metadata' src='{_media_url(rel + '/' + videos[0][1])}'></video>")
@@ -226,11 +266,13 @@ def session_page(vault: Vault, name: str, data: dict) -> str:
             # program feed when the take started) first.
             video_url = f"/takes/{quote(filename, safe='')}/video"
             refs = camera_refs(take.get("video") or {})
+            titles = {label: title for title, _file, label in videos}
             if len(refs) > 1:
                 default = (take.get("video") or {}).get("default")
                 refs.sort(key=lambda r: r.get("camera") != default)
                 links.append("video: " + " ".join(
-                    f"<a href='{video_url}?camera={quote(r.get('camera', ''), safe='')}'>{escape(r.get('camera', ''))}</a>"
+                    f"<a href='{video_url}?camera={quote(r.get('camera', ''), safe='')}'>"
+                    f"{escape(titles.get(r.get('camera', ''), r.get('camera', '')))}</a>"
                     for r in refs
                 ))
             elif refs or (vault.root / "completed_takes" / f"{stem}.mp4").exists():

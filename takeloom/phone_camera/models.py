@@ -69,11 +69,20 @@ _GENERIC_NAMES = {"", "iphone", "ipad", "ipod touch"}
 
 def model_name(platform: str, device_model: str) -> str:
     """The phone's marketing name from the hello's device_model ("" if the
-    app didn't send one: an older build)."""
+    app didn't send one: an older build). An Android phone's device_name
+    can be personalised ("Chris's Galaxy S20 FE 5G"): the owner's part is
+    dropped, leaving the model."""
     device_model = device_model.strip()
     if platform == "ios":
         return _APPLE_MODELS.get(device_model, device_model)
-    return device_model
+    return strip_owner(device_model)
+
+
+def strip_owner(name: str) -> str:
+    """"Chris's Galaxy S20 FE 5G" -> "Galaxy S20 FE 5G" (any name)."""
+    import re
+    m = re.fullmatch(r"\S.*?['’]s (.+)", name.strip())
+    return m.group(1) if m else name.strip()
 
 
 def display_name(client_name: str, platform: str, device_model: str) -> str:

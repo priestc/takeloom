@@ -204,10 +204,14 @@ class PhoneVideoRecorder:
     def session_log_info(self, mix_start_server_ns: int) -> dict:
         """What sync.py needs later, saved into session_log.json's
         "phone_camera" (see backend.py's _save_session_log)."""
+        from .models import model_name
         info = self.hub.camera(self.device_id)
         return {
             "device_id": self.device_id,
             "client_name": info.client_name if info else "",
+            # The phone's marketing name ("iPhone 16 Pro Max"), so anything
+            # showing this session can always say which phone it was.
+            "model": model_name(info.platform, info.device_model) if info else "",
             "session_id": self.session_id,
             "mix_start_server_ns": mix_start_server_ns,
             "phone_video_start_pts_ns": self.hub.recording_start_pts(self.session_id, self.device_id),
