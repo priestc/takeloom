@@ -7,14 +7,12 @@ view asks for its camera at full resolution, a few frames a second (see
 backend.py's PreviewSubscription), so it's sharp, and over Remote only that
 one camera costs full-resolution bandwidth.
 
-A Takeloom Camera phone in the program view can be zoomed and panned
-(Backend.set_camera_framing; phone_camera/framing.py): scroll to zoom, the
-lens buttons and +/- below it, the pan pad (click or hold an arrow; the
-middle re-centers), or +/-, 0 (reset) and the arrow keys. Panning moves in
-steps rather than following a mouse drag, which lagged behind over the
-network.
-The phone zooms optically where it can and crops for the rest, and the
-server remembers each camera's framing for the next time it connects. Click a thumbnail, or press its number key, to make it the program
+A Takeloom Camera phone in the program view can be zoomed, optically only
+(Backend.set_camera_framing; phone_camera/framing.py): its lens buttons
+below it, or scroll, the −/+ buttons or keys to step from one lens to the
+next, and 0 for 1x. No digital zoom and no panning: framing beyond the lens
+is done by aiming the phone in its mount. The server remembers each
+camera's lens for the next time it connects. Click a thumbnail, or press its number key, to make it the program
 camera (Backend.set_program_camera): the stream switches to it, and during a
 session the switch goes into the session log, so the streamed video can be
 rebuilt afterwards from the cameras' recordings.
@@ -39,10 +37,6 @@ from .app_state import AppState
 THUMB_W, THUMB_H = 224, 126
 RENDER_INTERVAL_MS = 50  # at most ~20 redraws a second, whatever the cameras send
 FRAMING_SEND_INTERVAL_S = 0.1  # while dragging/scrolling: at most 10 framing updates a second
-ZOOM_STEP = 1.15  # per scroll notch / +/- press
-PAN_STEP = 0.1  # per arrow press: this fraction of what's in view
-PAN_REPEAT_DELAY_MS = 400  # holding a pan arrow: first repeat after this,
-PAN_REPEAT_MS = 250        # then one step every this long
 PROGRAM_COLOR = "#d32f2f"
 IDLE_COLOR = "#3a3a3a"
 BG = "#111111"
@@ -98,8 +92,8 @@ class VideoUIFrame(tk.Frame):
                                      text="No camera", font=("TkDefaultFont", 16))
         self.program_view.pack(side="top", fill="both", expand=True, padx=12)
         self.program_view.bind("<MouseWheel>", self._on_wheel)
-        self.program_view.bind("<Button-4>", lambda _e: self._zoom_by(ZOOM_STEP))  # X11 scroll
-        self.program_view.bind("<Button-5>", lambda _e: self._zoom_by(1 / ZOOM_STEP))
+        self.program_view.bind("<Button-4>", lambda _e: self._step_lens(1))  # X11 scroll
+        self.program_view.bind("<Button-5>", lambda _e: self._step_lens(-1))
 
         self.app_state.add_listener(self._on_app_state_changed)
         self.bind("<Destroy>", self._on_destroy)
@@ -231,13 +225,11 @@ class VideoUIFrame(tk.Frame):
             if index < len(self._cameras):
                 self._choose(self._cameras[index][0])
         elif event.char in ("+", "="):
-            self._zoom_by(ZOOM_STEP)
+            self._step_lens(1)
         elif event.char in ("-", "_"):
-            self._zoom_by(1 / ZOOM_STEP)
+            self._step_lens(-1)
         elif event.char == "0":
-            self._change_framing(zoom=1.0, x=0.5, y=0.5)
-        elif event.keysym in ("Left", "Right", "Up", "Down"):
-            self._pan({"Left": -1, "Right": 1}.get(event.keysym, 0), {"Up": -1, "Down": 1}.get(event.keysym, 0))
+            self._change_framing(zoom=1.0)
 
     # --- framing (zoom/pan) ---
 
@@ -258,8 +250,7 @@ class VideoUIFrame(tk.Frame):
         zoom readout and lens highlight in place, so a held pan arrow
         (a repeating button) isn't destroyed under the mouse."""
         self._framing = framing
-        layout = None if framing is None else (
-            tuple(framing.get("lenses") or []), framing.get("min"), framing.get("max"), bool(framing.get("pan")))
+        layout = None if framing is None else tuple(framing.get("lenses") or [])
         if layout != getattr(self, "_framing_layout", None):
             self._framing_layout = layout
             self._build_framing_bar(framing)
@@ -286,47 +277,25 @@ class VideoUIFrame(tk.Frame):
 
         for lens in framing.get("lenses") or []:
             self._lens_buttons.append((lens, button(f"{lens:g}×", lambda z=lens: self._change_framing(zoom=z))))
-        button("−", lambda: self._zoom_by(1 / ZOOM_STEP))
+        button("−", lambda: self._step_lens(-1))
         self._zoom_label = tk.Label(self.framing_bar, width=6, background=BG, foreground="white")
         self._zoom_label.pack(side="left")
-        button("+", lambda: self._zoom_by(ZOOM_STEP))
-        if framing.get("pan"):
-            self._pan_pad()
-        hint = "Scroll to zoom" + (", arrows to pan" if framing.get("pan") else "") + "; remembered for this camera"
+        button("+", lambda: self._step_lens(1))
+        hint = "Optical zoom only: scroll or −/+ to change lens; remembered for this camera"
         tk.Label(self.framing_bar, text=hint, background=BG, foreground="#888888").pack(side="left", padx=12)
 
-    def _visible_fraction(self) -> float:
-        """How much of the camera's widest view the program view shows."""
-        f = self._framing or {}
-        return float(f.get("min", 1.0)) / max(float(f.get("zoom", 1.0)), 1e-6)
-
-    def _zoom_by(self, factor: float) -> None:
-        if self._framing is not None:
-            self._change_framing(zoom=self._framing["zoom"] * factor)
+    def _step_lens(self, direction: int) -> None:
+        """To the next lens up (1) or down (-1) from the current zoom."""
+        if self._framing is None:
+            return
+        from ..phone_camera.framing import lenses, nearest_lens
+        steps = lenses(self._framing)
+        i = steps.index(nearest_lens(self._framing["zoom"], steps))
+        self._change_framing(zoom=steps[min(max(i + direction, 0), len(steps) - 1)])
 
     def _on_wheel(self, event) -> None:
         if event.delta:
-            self._zoom_by(ZOOM_STEP if event.delta > 0 else 1 / ZOOM_STEP)
-
-    def _pan_pad(self) -> None:
-        """A joystick-style pad in the framing bar: ▲ ◀ ▶ ▼ step the view
-        (held, they keep stepping), ● re-centers."""
-        pad = tk.Frame(self.framing_bar, background=BG)
-        pad.pack(side="left", padx=(8, 0))
-        for text, row, col, dx, dy in (("▲", 0, 1, 0, -1), ("◀", 1, 0, -1, 0), ("▶", 1, 2, 1, 0), ("▼", 2, 1, 0, 1)):
-            tk.Button(pad, text=text, width=2, takefocus=False, highlightbackground=BG,
-                      repeatdelay=PAN_REPEAT_DELAY_MS, repeatinterval=PAN_REPEAT_MS,
-                      command=lambda dx=dx, dy=dy: self._pan(dx, dy)).grid(row=row, column=col)
-        tk.Button(pad, text="●", width=2, takefocus=False, highlightbackground=BG,
-                  command=lambda: self._change_framing(x=0.5, y=0.5)).grid(row=1, column=1)
-
-    def _pan(self, dx: int, dy: int) -> None:
-        """One step: PAN_STEP of what's in view, so it's the same feel at
-        any zoom. Moves the view, so ▶ shows what's to the right."""
-        if self._framing is None or not self._framing.get("pan"):
-            return
-        step = self._visible_fraction() * PAN_STEP
-        self._change_framing(x=self._framing["x"] + dx * step, y=self._framing["y"] + dy * step)
+            self._step_lens(1 if event.delta > 0 else -1)
 
     def _change_framing(self, **changes) -> None:
         """Apply locally at once (clamped like the server will), and queue
@@ -336,7 +305,7 @@ class VideoUIFrame(tk.Frame):
             return
         from ..phone_camera.framing import Framing
         f = self._framing
-        caps = {"min": f["min"], "max": f["max"], "pan": f["pan"]}
+        caps = {"min": f["min"], "max": f["max"], "lenses": f.get("lenses") or [1.0]}
         framing = Framing(changes.get("zoom", f["zoom"]), changes.get("x", f["x"]), changes.get("y", f["y"]))
         framing = framing.clamped(caps)
         self._show_framing({**f, **framing.to_dict()})

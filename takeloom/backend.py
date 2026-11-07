@@ -2031,7 +2031,8 @@ class LocalBackend(Backend):
         return {
             "camera": camera_device, "supported": caps is not None, **framing.to_dict(),
             "min": (caps or {}).get("min", 1.0), "max": (caps or {}).get("max", 1.0),
-            "lenses": (caps or {}).get("lenses", [1.0]), "pan": bool((caps or {}).get("pan")),
+            # Optical only (phone_camera/framing.py): no panning, whatever the phone can do.
+            "lenses": (caps or {}).get("lenses", [1.0]), "pan": False,
         }
 
     def get_camera_framing(self, camera_device: str) -> dict:
@@ -2045,7 +2046,7 @@ class LocalBackend(Backend):
         from .phone_camera.framing import Framing
         caps = self._phone_zoom_caps(camera_device)
         if caps is None:
-            raise BackendError("Only a connected Takeloom Camera phone (app 1.2 or later) can be zoomed and panned.")
+            raise BackendError("Only a connected Takeloom Camera phone (app 1.2 or later) can be zoomed.")
         framing = Framing(zoom, x, y).clamped(caps)
         self._phone_hub.send(phone_device_id(camera_device), framing.message())
         with self._framing_lock:

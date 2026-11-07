@@ -9,16 +9,18 @@ connects.
     x, y   the middle of the picture, as fractions (0..1) of the widest
            view the phone has (its zoom_min).
 
-The phone does as much as it can optically: it zooms with its lenses (and
-the camera's own zoom) as far as it can while keeping the requested region
-in view, and digitally crops the rest — so a centered shot is all optical,
-and panning costs resolution the further it is from the middle. The crop
-applies to the live feed and the recording alike. See protocol.py's
+Zoom is optical only: the server snaps every framing to one of the
+phone's real lenses (its status's zoom_caps "lenses") and keeps it
+centered, so the phones never digitally zoom or crop, and the picture is
+always the lens's full resolution. Framing beyond that is done by aiming
+the phone in its mount. (The phones can still crop to pan, and older apps
+digitally zoom; the server just never asks them to.) See protocol.py's
 "framing" message.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 DEFAULT_ZOOM = 1.0
@@ -45,13 +47,22 @@ class Framing:
         return {"kind": "framing", **self.to_dict()}
 
     def clamped(self, caps: dict | None) -> "Framing":
-        """Within what the phone reported it can do (caps: its status's
-        "zoom_caps"; None: not known yet, so only the basic limits)."""
-        zoom_min = float((caps or {}).get("min") or 0.5)
-        zoom_max = float((caps or {}).get("max") or 15.0)
-        zoom = min(max(self.zoom, zoom_min), zoom_max)
-        if caps is not None and not caps.get("pan", False):
-            return Framing(zoom, 0.5, 0.5)
-        # The visible region (zoom_min / zoom of the widest view) stays inside it.
-        half = zoom_min / zoom / 2 if caps is not None else 0.0
-        return Framing(zoom, min(max(self.x, half), 1 - half), min(max(self.y, half), 1 - half))
+        """Optical only: the phone's nearest real lens (caps: its status's
+        "zoom_caps"; None: not known yet, so the zoom's left as it is),
+        centered."""
+        return Framing(nearest_lens(self.zoom, lenses(caps)) if caps is not None else self.zoom, 0.5, 0.5)
+
+
+def lenses(caps: dict | None) -> list[float]:
+    """The phone's optical zoom steps, smallest first (1x if it says none)."""
+    try:
+        found = sorted({float(z) for z in (caps or {}).get("lenses") or [] if float(z) > 0})
+    except (TypeError, ValueError):
+        found = []
+    return found or [1.0]
+
+
+def nearest_lens(zoom: float, steps: list[float]) -> float:
+    """Closest by ratio, not difference: 2x is nearer 1x than 5x is to 3x."""
+    zoom = max(float(zoom), 1e-6)
+    return min(steps, key=lambda lens: abs(math.log(zoom / lens)))
