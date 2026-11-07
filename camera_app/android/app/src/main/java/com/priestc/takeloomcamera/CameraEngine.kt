@@ -29,9 +29,16 @@ import android.view.Surface
 import java.io.File
 import java.nio.ByteBuffer
 
-/** One of the phone's cameras as a zoom step: [zoom] its field of view
- *  against the main camera's (0.6 = ultra-wide), [id] its Camera2 id. */
-data class Lens(val zoom: Double, val id: String)
+/**
+ * One optical zoom step: [zoom] its field of view against the main
+ * camera's (0.6 = ultra-wide, 3 = a 3x telephoto), reached by opening
+ * camera [id] and setting its zoom ratio to [ratio]. On phones whose main
+ * camera is a "logical" camera over several lenses (Pixels, many others)
+ * every step is the main camera at a different ratio, and the camera
+ * switches lens itself; on others (Samsungs) some lenses are cameras of
+ * their own, at ratio 1.
+ */
+data class Lens(val zoom: Double, val id: String, val ratio: Double = 1.0)
 
 data class FinishedRecording(
     val sessionId: String,
@@ -245,27 +252,52 @@ class CameraEngine(context: Context) {
     }
 
     /**
-     * The main camera plus every other camera on the same side that apps
-     * may open, as zoom steps by field of view (focal length over sensor
-     * width), keeping only ones that can capture at the recording's size
-     * and differ from the main camera by more than a few percent.
+     * Every optical step on this side: the main camera at 1x; the steps its
+     * own zoom ratio reaches with a different lens (an ultra-wide below 1x,
+     * the physical lenses of a logical camera); then any other camera apps
+     * may open, by field of view (focal length over sensor width), if it
+     * can capture at the recording's size and isn't a step already found.
      */
     private fun findLenses(mainId: String, front: Boolean): List<Lens> {
-        val main = manager.getCameraCharacteristics(mainId)
-        val mainFov = fovOf(main) ?: return listOf(Lens(1.0, mainId))
-        val facing = main.get(CameraCharacteristics.LENS_FACING)
         val found = mutableListOf(Lens(1.0, mainId))
         if (front) return found
+        val main = manager.getCameraCharacteristics(mainId)
+        fun add(lens: Lens) {
+            if (found.none { Math.abs(Math.log(it.zoom / lens.zoom)) < 0.08 }) found += lens
+        }
+        fun round(zoom: Double) = Math.round(zoom * 10) / 10.0
+
+        // The main camera's own zoom ratio range (Android 11+).
+        val range = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
+            main.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) else null
+        val rMin = range?.lower?.toDouble() ?: 1.0
+        val rMax = range?.upper?.toDouble() ?: 1.0
+        if (rMin < 0.95) add(Lens(round(rMin), mainId, rMin))
+        // The 1x field of view everything else is measured against. With an
+        // ultra-wide in the ratio range, the widest physical lens sits at
+        // rMin; otherwise the main camera's own optics are 1x.
+        val physical = main.physicalCameraIds.mapNotNull { id ->
+            runCatching { fovOf(manager.getCameraCharacteristics(id)) }.getOrNull()
+        }
+        val refFov = if (rMin < 0.95 && physical.isNotEmpty()) physical.max() * rMin else fovOf(main)
+            ?: return found.sortedBy { it.zoom }
+        // A logical camera's other lenses, reached by ratio.
+        if (range != null) {
+            for (fov in physical) {
+                val zoom = refFov / fov
+                if (zoom > 1.05 && zoom <= rMax) add(Lens(round(zoom), mainId, zoom))
+            }
+        }
+        // Separate cameras (a Samsung's ultra-wide, for one).
+        val facing = main.get(CameraCharacteristics.LENS_FACING)
         for (id in manager.cameraIdList) {
             if (id == mainId) continue
             val chars = runCatching { manager.getCameraCharacteristics(id) }.getOrNull() ?: continue
             if (chars.get(CameraCharacteristics.LENS_FACING) != facing) continue
             val fov = fovOf(chars) ?: continue
-            val zoom = Math.round(mainFov / fov * 10) / 10.0
-            if (Math.abs(zoom - 1.0) < 0.05 || found.any { Math.abs(it.zoom - zoom) < 0.05 }) continue
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: continue
             if (map.getOutputSizes(SurfaceTexture::class.java)?.any { it.width == width && it.height == height } != true) continue
-            found += Lens(zoom, id)
+            add(Lens(round(refFov / fov), id))
         }
         return found.sortedBy { it.zoom }
     }
@@ -430,8 +462,8 @@ class CameraEngine(context: Context) {
         val caps = zoomCaps ?: return
         // The server's x/y are in the picture as it sees it; with the
         // frames turned 180°, that's the opposite side of the sensor.
-        // The lens does its own share of the zoom; this camera the rest.
-        val zoom = maxOf(caps.min, framing.zoom / (lens?.zoom ?: 1.0) * caps.min)
+        // The lens's own ratio on its camera: optical, no crop.
+        val zoom = (lens?.ratio ?: 1.0).coerceIn(caps.min, caps.max)
         val f0 = framing.copy(zoom = zoom)
         val f = if (upsideDown) f0.copy(x = 1 - f0.x, y = 1 - f0.y) else f0
         val plan = caps.plan(f, framingPlan)
