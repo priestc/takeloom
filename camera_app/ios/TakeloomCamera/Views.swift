@@ -31,6 +31,9 @@ struct ContentView: View {
         ZStack {
             Color.black.ignoresSafeArea()
             PreviewView(layer: model.pipeline.previewLayer).ignoresSafeArea()
+            if model.guide {
+                FramingGuide(lenses: model.lenses, selected: model.currentLens).ignoresSafeArea()
+            }
             VStack {
                 HStack(alignment: .top) {
                     ConnectionPill(state: model.linkState)
@@ -55,6 +58,11 @@ struct ContentView: View {
                     }
                     Spacer()
                     if model.lenses.count > 1 {
+                        Button { model.toggleGuide() } label: {
+                            Text("Guide").font(.subheadline.bold()).padding(.horizontal, 14).frame(minHeight: 36)
+                                .foregroundStyle(model.guide ? .black : .white)
+                                .background(model.guide ? Color.white : Color.black.opacity(0.5), in: Capsule())
+                        }
                         LensButtons(lenses: model.lenses, current: model.currentLens) { model.chooseLens($0) }
                         Spacer()
                     }
@@ -129,6 +137,47 @@ struct PreviewView: UIViewRepresentable {
     func updateUIView(_ uiView: HostView, context: Context) {}
 }
 
+/// The framing guide over the preview while it shows the widest lens: a
+/// labelled rectangle for the frame each other lens would record, so a phone
+/// can be aimed in its mount knowing what every zoom will catch. Centered:
+/// the lenses sit a centimetre or so apart, which doesn't show at room
+/// distances. Same as the Android app's FramingGuide.kt.
+struct FramingGuide: View {
+    let lenses: [Double]
+    let selected: Double
+    private let aspect: CGFloat = 16.0 / 9.0  // landscape video; the preview is letterboxed (.resizeAspect)
+
+    var body: some View {
+        GeometryReader { geo in
+            let scale = min(geo.size.width / aspect, geo.size.height)
+            let picture = CGSize(width: scale * aspect, height: scale)
+            let center = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
+            if let widest = lenses.first, lenses.count > 1 {
+                ForEach(lenses.dropFirst(), id: \.self) { zoom in
+                    let f = widest / zoom
+                    let size = CGSize(width: picture.width * f, height: picture.height * f)
+                    let color: Color = zoom == selected ? .yellow : .white
+                    Rectangle().stroke(color, lineWidth: zoom == selected ? 3 : 2)
+                        .frame(width: size.width, height: size.height)
+                        .overlay(alignment: .topLeading) {
+                            Text(lensLabel(zoom)).font(.headline).foregroundStyle(color)
+                                .shadow(color: .black, radius: 2).padding(6)
+                        }
+                        .position(center)
+                }
+                Text(lensLabel(widest)).font(.headline)
+                    .foregroundStyle(widest == selected ? .yellow : .white).shadow(color: .black, radius: 2)
+                    .position(x: center.x + picture.width / 2 - 30, y: center.y - picture.height / 2 + 20)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+func lensLabel(_ lens: Double) -> String {
+    lens == lens.rounded() ? "\(Int(lens))×" : String(format: "%g×", lens)
+}
+
 /// One button per optical zoom step ("0.5×", "1×", "5×"), the current one highlighted.
 struct LensButtons: View {
     let lenses: [Double]
@@ -141,7 +190,7 @@ struct LensButtons: View {
                 Button {
                     choose(lens)
                 } label: {
-                    Text(lens == lens.rounded() ? "\(Int(lens))×" : String(format: "%g×", lens))
+                    Text(lensLabel(lens))
                         .font(.subheadline.bold())
                         .frame(minWidth: 36, minHeight: 36)
                         .foregroundStyle(lens == current ? .black : .white)

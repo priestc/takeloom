@@ -60,7 +60,8 @@ class MainActivity : Activity() {
     private lateinit var sleepCover: View
     /** The lens buttons along the bottom (one per [CameraEngine.lenses]). */
     private lateinit var lensBar: LinearLayout
-    private var lensBarShows: Pair<List<Double>, Double>? = null
+    private var lensBarShows: Triple<List<Double>, Double, Boolean>? = null
+    private lateinit var framingGuide: FramingGuide
 
     /** A turn from one landscape to the other is a 180° display change with
      *  no configuration change, so it's only seen here. */
@@ -312,6 +313,7 @@ class MainActivity : Activity() {
     }
 
     private fun startRecording(sessionId: String) {
+        engine.setGuide(false)  // a recording is always through the chosen lens
         val current = recordingSession
         if (current != null) {
             if (current != sessionId) {
@@ -414,14 +416,28 @@ class MainActivity : Activity() {
     private fun refreshLensBar() {
         val zooms = engine.lenses.map { it.zoom }
         val current = zooms.minByOrNull { Math.abs(Math.log(maxOf(engine.framing.zoom, 1e-6) / it)) } ?: 1.0
-        val shows = zooms to current
+        val guideOn = engine.guide
+        val shows = Triple(zooms, current, guideOn)
         if (shows == lensBarShows) return
         lensBarShows = shows
+        framingGuide.lenses = zooms
+        framingGuide.selected = current
+        framingGuide.aspect = engine.width.toFloat() / maxOf(engine.height, 1)
+        framingGuide.visibility = if (guideOn) View.VISIBLE else View.GONE
         lensBar.removeAllViews()
         if (zooms.size < 2) return  // one lens: nothing to choose
+        val guideButton = pill(TextView(this)).apply {
+            text = "Guide"
+            if (guideOn) {
+                setTextColor(Color.BLACK)
+                (background as GradientDrawable).setColor(Color.WHITE)
+            }
+            setOnClickListener { engine.setGuide(!engine.guide) }
+        }
+        lensBar.addView(guideButton, LinearLayout.LayoutParams(-2, -2).apply { setMargins(dp(4), 0, dp(12), 0) })
         for (zoom in zooms) {
             val button = pill(TextView(this)).apply {
-                text = if (zoom == Math.floor(zoom)) "${zoom.toInt()}×" else "$zoom×"
+                text = FramingGuide.lensLabel(zoom)
                 if (zoom == current) {
                     setTextColor(Color.BLACK)
                     (background as GradientDrawable).setColor(Color.argb(230, 255, 214, 10))
@@ -464,6 +480,9 @@ class MainActivity : Activity() {
             override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
         }
         root.addView(textureView, FrameLayout.LayoutParams(-1, -1))
+        // Over the preview, under the controls: drawn while the guide's on.
+        framingGuide = FramingGuide(this).apply { visibility = View.GONE }
+        root.addView(framingGuide, FrameLayout.LayoutParams(-1, -1))
 
         connectionText = pill(TextView(this))
         root.addView(connectionText, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START).apply {

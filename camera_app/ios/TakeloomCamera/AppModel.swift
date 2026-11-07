@@ -24,6 +24,7 @@ final class AppModel: ObservableObject {
     /// The lens buttons on screen: the camera's optical steps, and which is on.
     @Published var lenses: [Double] = []
     @Published var currentLens: Double = 1
+    @Published var guide = false
 
     nonisolated let pipeline = CameraPipeline()
     private let link = ServerLink()
@@ -68,6 +69,12 @@ final class AppModel: ObservableObject {
         let current = steps.min { abs(log(zoom / $0)) < abs(log(zoom / $1)) } ?? 1
         if steps != lenses { lenses = steps }
         if current != currentLens { currentLens = current }
+        if pipeline.guide != guide { guide = pipeline.guide }
+    }
+
+    func toggleGuide() {
+        guide.toggle()
+        pipeline.setGuide(guide)
     }
 
     /// A lens tapped on screen: switch now, and tell the server, which
@@ -162,6 +169,8 @@ final class AppModel: ObservableObject {
         guard let kind = message["kind"] as? String, let sessionID = message["session_id"] as? String else { return }
         switch kind {
         case "start_recording":
+            guide = false
+            pipeline.setGuide(false)  // a recording is always through the chosen lens
             startRecording(sessionID)
         case "stop_recording":
             stopRecording(sessionID)

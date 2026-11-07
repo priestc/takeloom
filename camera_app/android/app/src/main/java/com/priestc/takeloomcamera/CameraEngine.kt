@@ -132,6 +132,10 @@ class CameraEngine(context: Context) {
     @Volatile var lenses: List<Lens> = emptyList()
         private set
     private var openId: String? = null
+    /** The framing guide's on: the camera runs the widest lens, whatever
+     *  [framing] says, until it's turned off (or a recording starts). */
+    @Volatile var guide = false
+        private set
     private var request: CaptureRequest.Builder? = null
     private var framingPlan: FramingPlan? = null
 
@@ -474,7 +478,7 @@ class CameraEngine(context: Context) {
     /** On the camera thread: the right lens, then its zoom ratio and crop
      *  region, then the request again. */
     private fun applyFraming() {
-        val lens = lensFor(framing.zoom)
+        val lens = if (guide) lenses.firstOrNull() else lensFor(framing.zoom)
         if (lens != null && lens.id != openId) return switchCamera(lens.id)  // applied once it's open
         val s = session ?: return
         val r = request ?: return
@@ -543,6 +547,13 @@ class CameraEngine(context: Context) {
         } finally {
             image.close()
         }
+    }
+
+    /** The framing guide on or off (see [guide]). */
+    fun setGuide(on: Boolean) = handler.post {
+        if (guide == on) return@post
+        guide = on
+        applyFraming()
     }
 
     fun stop() = handler.post { stopLocked() }
