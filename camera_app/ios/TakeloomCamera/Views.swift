@@ -4,18 +4,27 @@ import SwiftUI
 @main
 struct TakeloomCameraApp: App {
     @StateObject private var model = AppModel()
+    @StateObject private var mountSleep = MountSleep()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(model)
+                .environmentObject(mountSleep)
                 .onAppear { model.startCamera() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // Only while the app's on screen; leaving it puts the user's
+            // brightness straight back.
+            if phase == .active { mountSleep.start() } else { mountSleep.stop() }
         }
     }
 }
 
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject var mountSleep: MountSleep
     @State private var showingSettings = false
 
     var body: some View {
@@ -55,7 +64,16 @@ struct ContentView: View {
                 }
             }
             .padding()
+
+            if mountSleep.asleep {
+                // In the mount: black over everything (the camera, live feed
+                // and preview JPEGs carry on underneath). A tap only wakes it.
+                Color.black.ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture { mountSleep.touched() }
+            }
         }
+        .simultaneousGesture(TapGesture().onEnded { mountSleep.touched() })
         .sheet(isPresented: $showingSettings) {
             SettingsView().environmentObject(model)
         }

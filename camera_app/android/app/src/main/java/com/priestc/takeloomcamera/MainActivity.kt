@@ -21,6 +21,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
@@ -54,6 +55,9 @@ class MainActivity : Activity() {
     private var recordingSince = 0L
     private var uploadStatus: String? = null
     private var lastRotation = -1
+    private lateinit var mountSleep: MountSleep
+    /** Black over everything while [mountSleep] has the screen "off". */
+    private lateinit var sleepCover: View
 
     /** A turn from one landscape to the other is a 180° display change with
      *  no configuration change, so it's only seen here. */
@@ -75,6 +79,7 @@ class MainActivity : Activity() {
         // at the top or the bottom, and the frames are turned to match.
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         buildUi()
+        mountSleep = MountSleep(this, onSleep = { setScreenAsleep(true) }, onWake = { setScreenAsleep(false) })
         wire()
         getSystemService(DisplayManager::class.java).registerDisplayListener(displayListener, main)
         onRotation()
@@ -167,6 +172,44 @@ class MainActivity : Activity() {
                 Surface.ROTATION_270 else Surface.ROTATION_90
         engine.setUpsideDown(rotation != uprightRotation)
         configureTransform(engine.width, engine.height)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        mountSleep.start()
+    }
+
+    override fun onPause() {
+        mountSleep.stop()
+        super.onPause()
+    }
+
+    /** A tap while blanked only wakes the screen; it doesn't reach a button. */
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
+            val wasAsleep = mountSleep.asleep
+            mountSleep.touched()
+            if (wasAsleep) {
+                swallowGesture = true
+                return true
+            }
+            swallowGesture = false
+        }
+        if (swallowGesture) return true
+        return super.dispatchTouchEvent(ev)
+    }
+
+    private var swallowGesture = false
+
+    /** In the mount: black screen at the lowest backlight. The camera, live
+     *  feed and server preview JPEGs (taken from the TextureView underneath)
+     *  carry on regardless. */
+    private fun setScreenAsleep(asleep: Boolean) {
+        sleepCover.visibility = if (asleep) View.VISIBLE else View.GONE
+        window.attributes = window.attributes.apply {
+            screenBrightness = if (asleep) WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_OFF
+            else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+        }
     }
 
     override fun onDestroy() {
@@ -409,6 +452,11 @@ class MainActivity : Activity() {
         root.addView(settingsButton, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.BOTTOM or Gravity.END).apply {
             setMargins(0, 0, dp(16), dp(16))
         })
+        sleepCover = View(this).apply {
+            setBackgroundColor(Color.BLACK)
+            visibility = View.GONE
+        }
+        root.addView(sleepCover, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
         showState(LinkState.Idle)
     }
