@@ -205,7 +205,7 @@ _EDIT_COLORS = ["#2a6db0", "#d0702a", "#2e9d4f", "#9b4fc4", "#c4a72a", "#c44f6d"
 
 
 def _stage_player(rel: str, videos: list[tuple[str, str, str]], shifts: list[float],
-                  footer_entries: list[list] | None = None) -> str:
+                  footer_entries: list[list] | None = None, mics: list[str] | None = None) -> str:
     """Every camera's video stacked and played together, in step, showing
     one at a time: the one the editor's timeline says (Preview edit: the
     final video as it'll render, cutting as it plays), or the one picked
@@ -215,7 +215,10 @@ def _stage_player(rel: str, videos: list[tuple[str, str, str]], shifts: list[flo
     `shifts`: each video's sync shift (edit.time_shift), so session time T
     is T + shift in that file. `footer_entries` (footer.schedule; None:
     the videos carry their own): the footer, drawn over the picture with
-    the camera showing, as the render will draw it. Exposes STAGE for the
+    the camera showing, as the render will draw it. `mics` (URLs of the
+    phones' mic tracks, on the session timeline): an Audio switch between
+    Processed (the main camera's, from the audio interface) and Acoustic
+    (those played together, the videos muted). Exposes STAGE for the
     editor."""
     import json as _json
     buttons = "".join(
@@ -244,21 +247,33 @@ def _stage_player(rel: str, videos: list[tuple[str, str, str]], shifts: list[flo
         + ("<label class='small'><input id='st-follow' type='checkbox' checked> Preview edit</label>" if len(videos) > 1 else
            "<input id='st-follow' type='checkbox' checked hidden>")
         + "</div>"
-        f"<script>var STAGE=(function(SH,FOOT,TITLES){{"
+        + (("<p class='small'>Audio: <label><input type='radio' name='st-audio' value='processed' checked "
+            "onchange='STAGE.setAudio(this.value)'> Processed (audio interface)</label> "
+            "<label><input type='radio' name='st-audio' value='acoustic' onchange='STAGE.setAudio(this.value)'> "
+            f"Acoustic ({len(mics)} phone mic{'s' if len(mics) != 1 else ''})</label></p>"
+            "<div id='stage-mics' hidden>"
+            + "".join(f"<audio src='{url}' preload='auto'></audio>" for url in mics) + "</div>")
+           if mics else "")
+        + f"<script>var STAGE=(function(SH,FOOT,TITLES){{"
         "var V=[].slice.call(document.querySelectorAll('#stage video')),master=0,shown=0,manual=0,camAt=null,playing=false,drag=false;"
+        "var A=[].slice.call(document.querySelectorAll('#stage-mics audio')),mode='processed';"
         "var seekEl=document.getElementById('st-seek'),follow=document.getElementById('st-follow');"
         "function fmt(t){t=Math.max(0,Math.round(t));return Math.floor(t/60)+':'+String(t%60).padStart(2,'0');}"
         "function now(){return V[master].currentTime-SH[master];}"
         "function dur(){return Math.max(0,(V[master].duration||0)-SH[master]);}"
         "function show(i){if(i===shown)return;V[shown].style.opacity=0;V[i].style.opacity=1;shown=i;"
         "document.querySelectorAll('button.cam').forEach(function(b,j){b.classList.toggle('on',j===i);});}"
-        "function setMaster(i){master=i;V.forEach(function(v,j){v.muted=j!==i;});}"
+        "function setMaster(i){master=i;V.forEach(function(v,j){v.muted=mode==='acoustic'||j!==i;});}"
+        "function setAudio(m){mode=m;setMaster(master);if(m!=='acoustic')A.forEach(function(a){a.pause();});else if(playing)align();"
+        "document.querySelectorAll('input[name=st-audio]').forEach(function(r){r.checked=r.value===m;});}"
         "function align(){var T=now();V.forEach(function(v,j){if(j===master)return;var w=T+SH[j];"
-        "if(Math.abs(v.currentTime-w)>0.2)v.currentTime=Math.max(0,w);if(playing&&v.paused)v.play().catch(function(){});});}"
-        "function seek(T){V.forEach(function(v,j){v.currentTime=Math.max(0,T+SH[j]);});}"
+        "if(Math.abs(v.currentTime-w)>0.2)v.currentTime=Math.max(0,w);if(playing&&v.paused)v.play().catch(function(){});});"
+        "if(mode==='acoustic')A.forEach(function(a){if(Math.abs(a.currentTime-T)>0.25)a.currentTime=Math.max(0,T);"
+        "if(playing&&a.paused)a.play().catch(function(){});});}"
+        "function seek(T){V.forEach(function(v,j){v.currentTime=Math.max(0,T+SH[j]);});A.forEach(function(a){a.currentTime=Math.max(0,T);});}"
         "function play(){playing=true;document.getElementById('st-play').textContent='❚❚';"
         "V[master].play().catch(function(){});align();}"
-        "function pause(){playing=false;document.getElementById('st-play').textContent='▶';V.forEach(function(v){v.pause();});}"
+        "function pause(){playing=false;document.getElementById('st-play').textContent='▶';V.forEach(function(v){v.pause();});A.forEach(function(a){a.pause();});}"
         "var footEl=document.getElementById('st-footer'),footText='';"
         "function fit(){if(!footEl)return;var h=document.getElementById('stage').clientHeight,b=Math.max(14,h/24);"
         "footEl.style.height=b+'px';footEl.style.fontSize=Math.max(9,b*0.6)+'px';footEl.style.paddingLeft=(14*h/1080)+'px';}"
@@ -273,7 +288,7 @@ def _stage_player(rel: str, videos: list[tuple[str, str, str]], shifts: list[flo
         "V.forEach(function(v){v.addEventListener('ended',function(){if(v===V[master])pause();});});"
         "setMaster(0);requestAnimationFrame(frame);"
         "return{duration:dur,seek:seek,play:play,pause:pause,toggle:function(){playing?pause():play();},"
-        "setMaster:setMaster,setCamAt:function(f){camAt=f;},"
+        "setMaster:setMaster,setCamAt:function(f){camAt=f;},setAudio:setAudio,audio:function(){return mode;},"
         "manual:function(i){follow.checked=false;manual=i;show(i);},"
         "following:function(){return follow.checked;},"
         "ready:function(cb){var m=V[0];if(m.readyState>=1)cb();else m.addEventListener('loadedmetadata',function f(){m.removeEventListener('loadedmetadata',f);cb();});},"
@@ -371,7 +386,7 @@ def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor
         "if(s.state=='queued'||s.state=='rendering')setTimeout(edPoll,2000);}"
         "function edPoll(){fetch('/sessions/'+encodeURIComponent(ED.session)+'/edit-status').then(function(r){return r.json();}).then(edState);}"
         "function edRender(){fetch('/sessions/'+encodeURIComponent(ED.session)+'/edit',{method:'POST',"
-        "headers:{'Content-Type':'application/json'},body:JSON.stringify({priority:edPri,cuts:edCuts})})"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({priority:edPri,cuts:edCuts,audio:STAGE.audio()})})"
         ".then(function(r){return r.json();}).then(edState);}"
         "function ytState(s){var el=document.getElementById('yt-status'),b=document.getElementById('yt-publish'),P=ED.pub;"
         "var rendered=document.getElementById('ed-final').textContent.length>0;"
@@ -389,7 +404,7 @@ def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor
         "fetch('/sessions/'+encodeURIComponent(ED.session)+'/publish',{method:'POST',headers:{'Content-Type':'application/json'},"
         "body:JSON.stringify({title:t,description:ED.pub.description,privacy:document.getElementById('yt-privacy').value})})"
         ".then(function(r){return r.json();}).then(ytState);}"
-        "(function(){STAGE.setCamAt(edCamAt);"
+        "(function(){STAGE.setCamAt(edCamAt);if(ED.plan&&ED.plan.audio)STAGE.setAudio(ED.plan.audio);"
         "document.getElementById('yt-title').value=ED.pub.title;document.getElementById('yt-privacy').value=ED.pub.privacy;"
         "ytState(ED.pub.status);"
         "var p=ED.plan&&(ED.plan.priority||(ED.plan.primary!=null?[ED.plan.primary]:null));"
@@ -428,8 +443,10 @@ def session_page(vault: Vault, name: str, data: dict, editor=None, publisher=Non
             # the final video.
             from .edit import camera_files
             shifts = [shift for _title, _path, shift in camera_files(directory, data)]
+            from .edit import mic_files
+            mics = [_media_url(f"{rel}/{path.name}") for _title, path in mic_files(directory, data)]
             parts.append(_stage_player(rel, videos, shifts,
-                                       footer.schedule(data) if footer.wanted(data) else None))
+                                       footer.schedule(data) if footer.wanted(data) else None, mics))
             if len(videos) > 1:
                 parts.append(_edit_editor(name, rel, videos, editor, publisher, data))
         else:

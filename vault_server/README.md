@@ -95,6 +95,12 @@ frame-accurately, and the sound unbroken from the main camera from start to fini
 never breaks the audio. Rendering needs the same ffmpeg (with `libx264`) as encoding below; it
 takes about as long as encoding one camera's session video. See `takeloom_vault/edit.py`.
 
+A session whose phones' mics were archived (takeloom saves each as `<camera>_mic.flac`, on the
+session's timeline) also gets an **Audio** switch: **Processed** is the audio interface's sound
+(the main camera's tracks), **Acoustic** is the phones' mics played together, the room as the
+phones heard it. The player previews either, and the render uses the one chosen: for Acoustic,
+the mics summed and limited as the soundtrack, with the processed mix kept as a second track.
+
 ## Publishing to YouTube
 
 Beside **Render final video**, **Publish to YouTube** uploads the session's `edit.mp4` straight

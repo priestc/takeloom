@@ -3,7 +3,7 @@
 The session page's timeline editor (web.py) saves a plan, edit.json in the
 session's folder:
 
-    {"priority": [0, 2, 1], "cuts": [[0.0, 0], [42.5, 2], [47.5, 0], ...]}
+    {"priority": [0, 2, 1], "audio": "processed", "cuts": [[0.0, 0], [42.5, 2], [47.5, 0], ...]}
 
 "priority" ranks the cameras: the first is the main camera, on screen
 most of the time and the source of the sound; the others are cut to now
@@ -12,8 +12,12 @@ list of (time on the session's timeline in seconds, camera), each camera
 shown from its cut to the next. Cameras are indexes into
 web.session_videos' list, resolved here (a plan never names a file).
 Rendering makes edit.mp4: each stretch of picture from its camera's own
-session video, and the audio, unbroken start to finish, from the main
-camera, so a cut never breaks the sound.
+session video, and the audio unbroken start to finish, so a cut never
+breaks the sound. "audio" picks it: "processed" is the main camera's
+(the audio interface's mix, plus its Instrument Only track); "acoustic" is
+the phones' own mics (takeloom archives each as <camera>_mic.flac, already
+on the session's timeline), summed and limited, with the processed mix
+kept as a second track.
 
 All of a session's camera videos are on the same timeline, apart from a few
 tens of ms: a camera with a negative sync offset had its audio delayed by
@@ -115,6 +119,18 @@ def probe(path: Path) -> tuple[float, int, int]:
     return float(info["format"]["duration"]), int(stream["width"]), int(stream["height"])
 
 
+def mic_files(directory: Path, data: dict) -> list[tuple[str, Path]]:
+    """(camera title, file) of each phone mic track the session has
+    (the camera entries' "mic_file", when it's there)."""
+    from .web import camera_title
+    found = []
+    for cam in data.get("extra_cameras") or []:
+        name = cam.get("mic_file") or ""
+        if name and "/" not in name and not name.startswith(".") and (directory / name).is_file():
+            found.append((camera_title(cam.get("label") or "", cam.get("phone_camera") or {}, data), directory / name))
+    return found
+
+
 def checked_priority(priority, cameras: int) -> list[int]:
     """Every camera exactly once, highest priority first. Raises ValueError."""
     if (not isinstance(priority, list) or any(isinstance(c, bool) or not isinstance(c, int) for c in priority)
@@ -181,6 +197,9 @@ def checked_plan(plan: dict, cameras: int) -> dict:
             raise ValueError("pick the main camera")
         priority = [primary] + [c for c in range(cameras) if c != primary]
     primary = priority[0]
+    audio = plan.get("audio") or "processed"
+    if audio not in ("processed", "acoustic"):
+        raise ValueError("audio must be processed or acoustic")
     raw = plan.get("cuts")
     if not isinstance(raw, list) or not raw or len(raw) > MAX_CUTS:
         raise ValueError("the timeline is empty")
@@ -196,7 +215,7 @@ def checked_plan(plan: dict, cameras: int) -> dict:
         cuts.append([round(float(t), 3), cam])
     cuts.sort(key=lambda c: c[0])
     cuts[0][0] = 0.0
-    return {"priority": priority, "primary": primary, "cuts": cuts}
+    return {"priority": priority, "primary": primary, "audio": audio, "cuts": cuts}
 
 
 class EditRenderer:
@@ -311,15 +330,28 @@ class EditRenderer:
             (work / "parts.txt").write_text("".join(f"file '{n}'\n" for n in names))
             self._set(name, state="rendering", progress=1.0)
             out = directory / (OUTPUT_FILE + ".partial.mp4")
-            # The joined picture, and the main camera's two audio tracks
-            # (Mix, Instrument Only), unbroken from session time 0.
+            mics = mic_files(directory, data) if plan["audio"] == "acoustic" else []
+            if plan["audio"] == "acoustic" and not mics:
+                raise RuntimeError("this session has no phone mic tracks for acoustic audio")
             cmd = [*nice, "ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", "parts.txt",
-                   "-ss", f"{main_shift:.6f}", "-i", str(main_file),
-                   "-map", "0:v:0", "-map", "1:a:0", "-map", "1:a:1?",
-                   "-c:v", "copy", "-c:a:0", "aac", "-b:a:0", "192k", "-c:a:1", "flac",
-                   "-metadata:s:a:0", "title=Mix", "-metadata:s:a:1", "title=Instrument Only",
-                   "-disposition:a:0", "default", "-disposition:a:1", "0",
-                   "-t", f"{total:.6f}", "-movflags", "+faststart", str(out)]
+                   "-ss", f"{main_shift:.6f}", "-i", str(main_file)]
+            if mics:
+                # The phones' mics, summed (not averaged: room mics are quiet)
+                # and limited, as the soundtrack; the processed mix second.
+                for _title, path in mics:
+                    cmd += ["-i", str(path)]
+                inputs = "".join(f"[{2 + i}:a]" for i in range(len(mics)))
+                cmd += ["-filter_complex", f"{inputs}amix=inputs={len(mics)}:normalize=0,alimiter=limit=0.95[ac]",
+                        "-map", "0:v:0", "-map", "[ac]", "-map", "1:a:0",
+                        "-c:v", "copy", "-c:a:0", "aac", "-b:a:0", "192k", "-c:a:1", "aac", "-b:a:1", "192k",
+                        "-metadata:s:a:0", "title=Acoustic", "-metadata:s:a:1", "title=Mix"]
+            else:
+                # The main camera's two audio tracks (Mix, Instrument Only).
+                cmd += ["-map", "0:v:0", "-map", "1:a:0", "-map", "1:a:1?",
+                        "-c:v", "copy", "-c:a:0", "aac", "-b:a:0", "192k", "-c:a:1", "flac",
+                        "-metadata:s:a:0", "title=Mix", "-metadata:s:a:1", "title=Instrument Only"]
+            cmd += ["-disposition:a:0", "default", "-disposition:a:1", "0",
+                    "-t", f"{total:.6f}", "-movflags", "+faststart", str(out)]
             result = subprocess.run(cmd, cwd=work, capture_output=True, text=True)
             if result.returncode != 0 or not out.exists():
                 out.unlink(missing_ok=True)
