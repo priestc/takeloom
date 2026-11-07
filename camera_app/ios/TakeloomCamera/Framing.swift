@@ -35,7 +35,8 @@ struct ZoomCaps {
         max = Swift.min(Double(device.maxAvailableVideoZoomFactor) / main, Swift.max(10, (lenses.last ?? 1) * 2))
     }
 
-    var dictionary: [String: Any] { ["min": min, "max": max, "lenses": lenses, "pan": true] }
+    // The server keeps zoom optical-only and never pans (takeloom/phone_camera/framing.py).
+    var dictionary: [String: Any] { ["min": min, "max": max, "lenses": lenses, "pan": false] }
 
     /// Split a framing into what the camera does (a centered zoom, optical
     /// where a lens allows) and a crop of its frames for the rest.

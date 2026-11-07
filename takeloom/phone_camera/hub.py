@@ -149,6 +149,7 @@ class PhoneCameraHub:
         self._on_preview: Callable[[str, bytes], None] = lambda device_id, jpeg: None
         self._on_change: Callable[[], None] = lambda: None
         self._on_live_change: Callable[[], None] = lambda: None
+        self._on_framing: Callable[[str, dict], None] = lambda _device, _msg: None
         self._tcp_server: _ThreadingTCPServer | None = None
 
     # --- lifecycle ---
@@ -181,12 +182,15 @@ class PhoneCameraHub:
         on_change: Callable[[], None],
         session_dir_resolver: Callable[[str], Path | None],
         on_live_change: Callable[[], None] = lambda: None,
+        on_framing: Callable[[str, dict], None] = lambda _device, _msg: None,
     ) -> None:
         self._on_preview = on_preview
         self._on_change = on_change
         self._session_dir_resolver = session_dir_resolver
         # A phone's live feed reported a change (bandwidth.py re-plans).
         self._on_live_change = on_live_change
+        # A lens picked on the phone's own screen ({"kind": "framing"}).
+        self._on_framing = on_framing
 
     def log(self, message: str) -> None:
         self._log(message)
@@ -573,6 +577,11 @@ class _Handler(socketserver.BaseRequestHandler):
             if before != {k: conn.info.status.get(k) for k in _LIVE_STATUS_KEYS}:
                 hub._on_live_change()
             self._report_live_feed(conn.info)
+        elif kind == "framing":
+            # Off the reader thread: saving the config and answering the
+            # phone mustn't hold up its video.
+            threading.Thread(target=hub._on_framing, args=(conn.info.device_id, msg),
+                             name="phone-framing", daemon=True).start()
         elif kind == "recording_started":
             with hub._lock:
                 key = (str(msg.get("session_id")), conn.info.device_id)

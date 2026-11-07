@@ -54,6 +54,10 @@ struct ContentView: View {
                             .pillStyle()
                     }
                     Spacer()
+                    if model.lenses.count > 1 {
+                        LensButtons(lenses: model.lenses, current: model.currentLens) { model.chooseLens($0) }
+                        Spacer()
+                    }
                     Button {
                         showingSettings = true
                     } label: {
@@ -123,6 +127,29 @@ struct PreviewView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: HostView, context: Context) {}
+}
+
+/// One button per optical zoom step ("0.5×", "1×", "5×"), the current one highlighted.
+struct LensButtons: View {
+    let lenses: [Double]
+    let current: Double
+    let choose: (Double) -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(lenses, id: \.self) { lens in
+                Button {
+                    choose(lens)
+                } label: {
+                    Text(lens == lens.rounded() ? "\(Int(lens))×" : String(format: "%g×", lens))
+                        .font(.subheadline.bold())
+                        .frame(minWidth: 36, minHeight: 36)
+                        .foregroundStyle(lens == current ? .black : .white)
+                        .background(lens == current ? Color.yellow : Color.black.opacity(0.5), in: Circle())
+                }
+            }
+        }
+    }
 }
 
 struct ConnectionPill: View {

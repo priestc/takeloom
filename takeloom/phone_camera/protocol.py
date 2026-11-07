@@ -50,6 +50,10 @@ Control messages (FRAME_JSON):
                      in video-ui. The phone reports what it can do in its
                      status: "zoom_caps": {"min", "max", "lenses": [...],
                      "pan": bool}, and what it's doing: "framing".
+    phone -> server  {"kind": "framing", "zoom": f, "x": f, "y": f}
+                     a lens picked on the phone's own screen: the server
+                     remembers it like a video-ui change (and answers with
+                     the framing it settled on).
     server -> phone  {"kind": "live_quality", "max_width": n, "bitrate": n}
                      this phone's share of the Wi-Fi (bandwidth.py), whenever
                      it changes. iOS holds a new size until a recording

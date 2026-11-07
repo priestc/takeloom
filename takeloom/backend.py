@@ -2059,6 +2059,15 @@ class LocalBackend(Backend):
         self._emit("camera_framing_changed", result)
         return result
 
+    def _on_phone_framing(self, device_id: str, msg: dict) -> None:
+        """A lens picked on the phone's own screen: remembered and shown in
+        video-ui exactly like a change made there."""
+        try:
+            self.set_camera_framing(DEVICE_PREFIX + device_id, float(msg.get("zoom") or 1.0),
+                                    float(msg.get("x", 0.5)), float(msg.get("y", 0.5)))
+        except (BackendError, TypeError, ValueError):
+            pass
+
     def _send_phone_framings(self) -> None:
         """Every connected phone its remembered framing (they start at 1x,
         centered)."""
@@ -2210,6 +2219,7 @@ class LocalBackend(Backend):
             on_change=self._on_phone_cameras_changed,
             session_dir_resolver=self._local_session_dir_path,
             on_live_change=self._on_phone_status_changed,
+            on_framing=self._on_phone_framing,
         )
 
     def _on_phone_cameras_changed(self) -> None:

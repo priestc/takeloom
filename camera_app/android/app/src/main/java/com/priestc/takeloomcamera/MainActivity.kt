@@ -58,6 +58,9 @@ class MainActivity : Activity() {
     private lateinit var mountSleep: MountSleep
     /** Black over everything while [mountSleep] has the screen "off". */
     private lateinit var sleepCover: View
+    /** The lens buttons along the bottom (one per [CameraEngine.lenses]). */
+    private lateinit var lensBar: LinearLayout
+    private var lensBarShows: Pair<List<Double>, Double>? = null
 
     /** A turn from one landscape to the other is a 180° display change with
      *  no configuration change, so it's only seen here. */
@@ -244,6 +247,7 @@ class MainActivity : Activity() {
 
     /** 5 Hz: the recording clock, and a preview JPEG for the server. */
     private fun tick() {
+        refreshLensBar()
         recordingText.visibility = if (recordingSession != null) View.VISIBLE else View.GONE
         if (recordingSession != null) {
             val s = (SystemClock.elapsedRealtime() - recordingSince) / 1000
@@ -387,7 +391,7 @@ class MainActivity : Activity() {
             "live_width" to engine.liveWidth, "live_height" to engine.liveHeight,
             "live_bitrate" to engine.liveBitrate,
             "framing" to engine.framing.json(),
-            "zoom_caps" to engine.zoomCaps?.json(),
+            "zoom_caps" to engine.zoomCapsJson(),
         )
     }
 
@@ -417,6 +421,35 @@ class MainActivity : Activity() {
         }
         uploadText.text = text ?: ""
         uploadText.visibility = if (text == null) View.GONE else View.VISIBLE
+    }
+
+    /** Rebuilt only when the lenses or the current one change (tick, 5 Hz). */
+    private fun refreshLensBar() {
+        val zooms = engine.lenses.map { it.zoom }
+        val current = zooms.minByOrNull { Math.abs(Math.log(maxOf(engine.framing.zoom, 1e-6) / it)) } ?: 1.0
+        val shows = zooms to current
+        if (shows == lensBarShows) return
+        lensBarShows = shows
+        lensBar.removeAllViews()
+        if (zooms.size < 2) return  // one lens: nothing to choose
+        for (zoom in zooms) {
+            val button = pill(TextView(this)).apply {
+                text = if (zoom == Math.floor(zoom)) "${zoom.toInt()}×" else "$zoom×"
+                if (zoom == current) {
+                    setTextColor(Color.BLACK)
+                    (background as GradientDrawable).setColor(Color.argb(230, 255, 214, 10))
+                }
+                setOnClickListener { chooseLens(zoom) }
+            }
+            lensBar.addView(button, LinearLayout.LayoutParams(-2, -2).apply { setMargins(dp(4), 0, dp(4), 0) })
+        }
+    }
+
+    /** A lens tapped on screen: switch now, and tell the server, which
+     *  remembers it and shows it in video-ui (and answers with the same). */
+    private fun chooseLens(zoom: Double) {
+        engine.setFraming(Framing(zoom))
+        link.sendJson(jsonOf("kind" to "framing", "zoom" to zoom, "x" to 0.5, "y" to 0.5))
     }
 
     private fun pill(view: TextView) = view.apply {
@@ -466,6 +499,10 @@ class MainActivity : Activity() {
         }
         root.addView(settingsButton, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.BOTTOM or Gravity.END).apply {
             setMargins(0, 0, dp(16), dp(16))
+        })
+        lensBar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        root.addView(lensBar, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+            setMargins(dp(16), dp(16), dp(16), dp(16))
         })
         sleepCover = View(this).apply {
             setBackgroundColor(Color.BLACK)

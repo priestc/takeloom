@@ -21,6 +21,9 @@ final class AppModel: ObservableObject {
     @Published var discoveryFoundNothing = false
     @Published var useFrontCamera = Settings.useFrontCamera
     @Published var quality = Settings.quality
+    /// The lens buttons on screen: the camera's optical steps, and which is on.
+    @Published var lenses: [Double] = []
+    @Published var currentLens: Double = 1
 
     nonisolated let pipeline = CameraPipeline()
     private let link = ServerLink()
@@ -51,6 +54,28 @@ final class AppModel: ObservableObject {
         uploader.onProgress = { [weak self] text in Task { @MainActor in self?.uploadStatus = text } }
         uploader.onChange = { [weak self] in Task { @MainActor in self?.refreshPending() } }
         refreshPending()
+        // The pipeline sets its lenses and framing on its own queues (and the
+        // server's changes arrive there too); twice a second is plenty for
+        // the buttons to follow.
+        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshLenses() }
+        }
+    }
+
+    private func refreshLenses() {
+        let steps = pipeline.zoomCaps?.lenses ?? []
+        let zoom = max(pipeline.framing.zoom, 1e-6)
+        let current = steps.min { abs(log(zoom / $0)) < abs(log(zoom / $1)) } ?? 1
+        if steps != lenses { lenses = steps }
+        if current != currentLens { currentLens = current }
+    }
+
+    /// A lens tapped on screen: switch now, and tell the server, which
+    /// remembers it and shows it in video-ui (and answers with the same).
+    func chooseLens(_ zoom: Double) {
+        pipeline.setFraming(Framing(zoom: zoom))
+        link.sendJSON(["kind": "framing", "zoom": zoom, "x": 0.5, "y": 0.5])
+        currentLens = zoom
     }
 
     func startCamera() {

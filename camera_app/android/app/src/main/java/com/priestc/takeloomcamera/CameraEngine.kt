@@ -29,6 +29,10 @@ import android.view.Surface
 import java.io.File
 import java.nio.ByteBuffer
 
+/** One of the phone's cameras as a zoom step: [zoom] its field of view
+ *  against the main camera's (0.6 = ultra-wide), [id] its Camera2 id. */
+data class Lens(val zoom: Double, val id: String)
+
 data class FinishedRecording(
     val sessionId: String,
     val file: File,
@@ -104,6 +108,12 @@ class CameraEngine(context: Context) {
         private set
     @Volatile var zoomCaps: ZoomCaps? = null
         private set
+    /** Every camera usable as a zoom step on this side, widest first. Only
+     *  the ones Android lets apps open: on many phones (Samsung's included)
+     *  the telephoto is reserved for the maker's own camera app. */
+    @Volatile var lenses: List<Lens> = emptyList()
+        private set
+    private var openId: String? = null
     private var request: CaptureRequest.Builder? = null
     private var framingPlan: FramingPlan? = null
     /** What [FrameRotator] cuts out, in the picture as the server sees it
@@ -150,13 +160,10 @@ class CameraEngine(context: Context) {
         stopLocked()
         this.front = front
         val id = cameraId(front) ?: return@post onError("No camera available.")
-        val chars = manager.getCameraCharacteristics(id)
-        zoomCaps = ZoomCaps(chars)
-        useBootTime = chars.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
-            CameraMetadata.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
         val size = chooseSize(front, quality)
         width = size.width
         height = size.height
+        lenses = findLenses(id, front)
 
         try {
             val (codec, surface) = startEncoder(width, height, quality.bitrate, live = false)
@@ -193,8 +200,22 @@ class CameraEngine(context: Context) {
         val preview = Surface(texture)
         previewSurface = preview
 
+        openCamera(lensFor(framing.zoom)?.id ?: id)
+    }
+
+    /** On the camera thread. The encoders and [FrameRotator] stay as they
+     *  are, so switching lenses mid-recording only pauses the picture. */
+    @SuppressLint("MissingPermission")
+    private fun openCamera(id: String) {
+        val preview = previewSurface ?: return
+        val chars = manager.getCameraCharacteristics(id)
+        zoomCaps = ZoomCaps(chars)
+        useBootTime = chars.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
+            CameraMetadata.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
+        openId = id
         manager.openCamera(id, object : CameraDevice.StateCallback() {
             override fun onOpened(camera: CameraDevice) {
+                if (openId != id) return camera.close()  // switched again meanwhile
                 device = camera
                 createSession(camera, preview)
             }
@@ -210,6 +231,62 @@ class CameraEngine(context: Context) {
                 onError("Camera error $error.")
             }
         }, handler)
+    }
+
+    /** On the camera thread: close the open camera, open [id] in its place. */
+    private fun switchCamera(id: String) {
+        runCatching { session?.close() }
+        session = null
+        request = null
+        runCatching { device?.close() }
+        device = null
+        framingPlan = null
+        openCamera(id)
+    }
+
+    /**
+     * The main camera plus every other camera on the same side that apps
+     * may open, as zoom steps by field of view (focal length over sensor
+     * width), keeping only ones that can capture at the recording's size
+     * and differ from the main camera by more than a few percent.
+     */
+    private fun findLenses(mainId: String, front: Boolean): List<Lens> {
+        val main = manager.getCameraCharacteristics(mainId)
+        val mainFov = fovOf(main) ?: return listOf(Lens(1.0, mainId))
+        val facing = main.get(CameraCharacteristics.LENS_FACING)
+        val found = mutableListOf(Lens(1.0, mainId))
+        if (front) return found
+        for (id in manager.cameraIdList) {
+            if (id == mainId) continue
+            val chars = runCatching { manager.getCameraCharacteristics(id) }.getOrNull() ?: continue
+            if (chars.get(CameraCharacteristics.LENS_FACING) != facing) continue
+            val fov = fovOf(chars) ?: continue
+            val zoom = Math.round(mainFov / fov * 10) / 10.0
+            if (Math.abs(zoom - 1.0) < 0.05 || found.any { Math.abs(it.zoom - zoom) < 0.05 }) continue
+            val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: continue
+            if (map.getOutputSizes(SurfaceTexture::class.java)?.any { it.width == width && it.height == height } != true) continue
+            found += Lens(zoom, id)
+        }
+        return found.sortedBy { it.zoom }
+    }
+
+    /** Sensor width over focal length: bigger is wider. */
+    private fun fovOf(chars: CameraCharacteristics): Double? {
+        val focal = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.minOrNull() ?: return null
+        val sensor = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: return null
+        if (focal <= 0f) return null
+        return sensor.width.toDouble() / focal
+    }
+
+    /** The lens nearest [zoom] (by ratio). */
+    private fun lensFor(zoom: Double): Lens? =
+        lenses.minByOrNull { Math.abs(Math.log(maxOf(zoom, 1e-6) / it.zoom)) }
+
+    /** The status's "zoom_caps": optical steps only. */
+    fun zoomCapsJson(): org.json.JSONObject? {
+        val l = lenses.ifEmpty { return null }
+        return jsonOf("min" to l.first().zoom, "max" to l.last().zoom,
+            "lenses" to org.json.JSONArray(l.map { it.zoom }), "pan" to false)
     }
 
     /** The live feed's size: the largest of the camera's no wider than 1280 in the recording's aspect. */
@@ -343,14 +420,20 @@ class CameraEngine(context: Context) {
         applyFraming()
     }
 
-    /** On the camera thread: the zoom ratio and crop region, then the request again. */
+    /** On the camera thread: the right lens, then its zoom ratio and crop
+     *  region, then the request again. */
     private fun applyFraming() {
+        val lens = lensFor(framing.zoom)
+        if (lens != null && lens.id != openId) return switchCamera(lens.id)  // applied once it's open
         val s = session ?: return
         val r = request ?: return
         val caps = zoomCaps ?: return
         // The server's x/y are in the picture as it sees it; with the
         // frames turned 180°, that's the opposite side of the sensor.
-        val f = if (upsideDown) framing.copy(x = 1 - framing.x, y = 1 - framing.y) else framing
+        // The lens does its own share of the zoom; this camera the rest.
+        val zoom = maxOf(caps.min, framing.zoom / (lens?.zoom ?: 1.0) * caps.min)
+        val f0 = framing.copy(zoom = zoom)
+        val f = if (upsideDown) f0.copy(x = 1 - f0.x, y = 1 - f0.y) else f0
         val plan = caps.plan(f, framingPlan)
         val cameraChanged = plan.ratio != framingPlan?.ratio || plan.crop != framingPlan?.crop
         framingPlan = plan
@@ -402,6 +485,7 @@ class CameraEngine(context: Context) {
         request = null
         runCatching { device?.close() }
         device = null
+        openId = null
         rotator?.release()  // before the encoder surfaces it draws into go
         rotator = null
         draining = false
