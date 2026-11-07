@@ -212,38 +212,6 @@ def parse_session_log(data: dict, total_frames: int | None = None) -> list[Compl
     return completed
 
 
-def watermark_schedule(data: dict, video_offset_ms: float) -> list[tuple[float, str]]:
-    """The session video's watermark over time: [(start_s, text), ...] on
-    the video's own timeline, changing whenever a different song is loaded
-    so it always names the song actually playing (and, with it, whichever
-    instrument and the wall-clock time that song came up) — every take cut
-    from this video (see take_video.py) then carries its own song's name.
-    Before the first song it's just musician/instrument/date."""
-    from ..video.capture import format_watermark_text
-    sample_rate = data.get("sample_rate") or 48000
-    mix_start = data.get("mix_start_frame") or 0
-    audio_delay_s = max(0.0, -video_offset_ms / 1000.0)  # same shift as take_video_ref
-    musician = data.get("musician", "")
-    events = data.get("events", [])
-    session_start = next((e.get("wall_time", "") for e in events if e.get("event_type") == "session_start"), "")
-    schedule = [(0.0, format_watermark_text(musician, data.get("instrument", ""), session_start, ""))]
-    current = None
-    for e in events:
-        name, frame = e.get("track_name"), e.get("frame")
-        if not name or frame is None or name == current:
-            continue
-        current = name
-        start_s = max(0.0, (frame - mix_start) / sample_rate + audio_delay_s)
-        text = format_watermark_text(
-            musician, e.get("instrument") or data.get("instrument", ""), e.get("wall_time", ""), name,
-        )
-        if start_s <= schedule[-1][0]:
-            schedule[-1] = (schedule[-1][0], text)  # replaces the opening (or an instantly superseded) entry
-        else:
-            schedule.append((start_s, text))
-    return schedule
-
-
 def filter_draw_for_track(data: dict, track_index: int, track_name: str) -> dict | None:
     """The song-set draw (session_log.json's filter_slot_draws shape) that
     `track_name` was at `track_index` — a slot redrawn mid-session logs
@@ -345,6 +313,13 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
         align_extra_cameras(session_dir, data, log_path, config.video_latency_compensation_ms)
         extra_cameras = [c for c in extra_cameras if (session_dir / c["file"]).exists()]
     have_video = session_video_raw.exists() and session_mix_flac.exists()
+    # The footer (musician, instrument, song, date, and now the camera) is no
+    # longer burned into the camera videos here: the vault's web video mixer
+    # shows it over the player and draws it into the final edit
+    # (vault_server/takeloom_vault/footer.py). Marked so it knows these
+    # videos are clean; older sessions' videos already carry theirs.
+    data["video_footer"] = "none"
+    atomic_write_text(log_path, json.dumps(data, indent=2))
     # Only present for a MIDI-recorded session (backend.py's _end_session
     # writes it, from audio/midi_log.py's MidiEventLog) — absent for an
     # analog one, and for a MIDI session recorded before this existed.
@@ -365,7 +340,7 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
 
     completed = parse_session_log(data, total_frames=total_frames)
 
-    # The whole-session archive video, watermarked once for the session —
+    # The whole-session archive video —
     # built *before* the takes, since a take's video is no longer a file of
     # its own: it's a pointer into this one (see take_video_ref), cut out
     # on demand only when someone actually wants to watch it (the vault
@@ -377,7 +352,6 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
             session_video_raw, session_mix_flac, session_flac,
             session_dir / encoding_name("session_video.mp4"),
             video_offset_ms=video_offset_ms,
-            watermark_schedule=watermark_schedule(data, video_offset_ms),
             relative_to=session_dir,
         )
         render_jobs.append({"output": "session_video.mp4", "spec": spec})
@@ -389,7 +363,6 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
             session_video_raw, session_mix_flac, session_flac,
             session_dir / "session_video.mp4",
             video_offset_ms=video_offset_ms,
-            watermark_schedule=watermark_schedule(data, video_offset_ms),
         )
 
     # Every camera's finished whole-session video (made here, or by the
@@ -405,7 +378,8 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
         })
 
     # Each camera becomes its own finished whole-session video: the
-    # session's audio, watermarked, lined up with that camera's offset.
+    # session's audio, lined up with that camera's offset (no footer: see
+    # video_footer above). Without one, its video is a stream copy, no re-encode.
     extra_videos_ok = True
     if extra_cameras and session_mix_flac.exists():
         from ..video.capture import mux_spec, mux_video_audio
@@ -417,14 +391,14 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
             if defer_video:
                 spec, pngs = mux_spec(
                     raw, session_mix_flac, session_flac, session_dir / encoding_name(entry["final_file"]),
-                    video_offset_ms=offset_ms, watermark_schedule=watermark_schedule(data, offset_ms),
+                    video_offset_ms=offset_ms,
                     relative_to=session_dir,
                 )
                 render_jobs.append({"output": entry["final_file"], "spec": spec})
                 render_cleanup += [raw.name, *(png.name for png in pngs)]
             elif mux_video_audio(
                 raw, session_mix_flac, session_flac, session_dir / entry["final_file"],
-                video_offset_ms=offset_ms, watermark_schedule=watermark_schedule(data, offset_ms),
+                video_offset_ms=offset_ms,
             ):
                 raw.unlink(missing_ok=True)
             else:

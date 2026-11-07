@@ -23,8 +23,9 @@ whole frames (FPS) and each is encoded to exactly its frame count, so the
 picture never drifts from the sound however many cuts there are.
 
 Each stretch is its own short ffmpeg encode (frame-accurate seek, scaled to
-the main camera's size), then they're joined without re-encoding and the
-audio added. One render at a time, on a background thread, at low priority,
+the main camera's size, with the footer drawn in: footer.py, naming that
+stretch's camera; for sessions whose videos are clean), then they're joined
+without re-encoding and the audio added. One render at a time, on a background thread, at low priority,
 like render.py's session encodes.
 """
 
@@ -40,12 +41,49 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from . import footer
 from .store import Vault
 
 PLAN_FILE = "edit.json"
 OUTPUT_FILE = "edit.mp4"
 FPS = 30
 MAX_CUTS = 5000
+_FONTS = ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/System/Library/Fonts/Helvetica.ttc")
+
+
+def can_draw_text() -> bool:
+    """ffmpeg here has drawtext (built with libfreetype), for the footer."""
+    try:
+        out = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return " drawtext " in out
+
+
+def footer_filters(entries: list[list], start: float, end: float, camera: str, height: int,
+                   work: Path, tag: str) -> str:
+    """The drawbox/drawtext filters for one stretch [start, end) of the
+    session: the footer strip (1/24 of the height, translucent black, as it
+    always was) and, over it, each footer text that applies in the stretch
+    with the camera's name, timed from the stretch's own start. Texts go
+    through files (textfile, no expansion), so nothing in a song title can
+    upset the filter; paths are relative to `work`, ffmpeg's working dir."""
+    bar = max(28, height // 24)
+    size = max(13, bar - 12)
+    font = next((f"fontfile={f}" for f in _FONTS if Path(f).exists()), "font=Sans")
+    parts = [f"drawbox=x=0:y=ih-{bar}:w=iw:h={bar}:color=black@0.43:t=fill"]
+    for j, (at, text) in enumerate(entries):
+        until = entries[j + 1][0] if j + 1 < len(entries) else math.inf
+        a, b = max(at, start), min(until, end)
+        if b <= a:
+            continue
+        name = f"{tag}_{j}.txt"
+        (work / name).write_text(footer.with_camera(text, camera))
+        parts.append(
+            f"drawtext={font}:textfile={name}:expansion=none:fontsize={size}:fontcolor=white@0.92:"
+            f"x=14:y=h-{bar}+({bar}-th)/2:enable='between(t,{a - start:.3f},{b - start:.3f})'"
+        )
+    return ",".join(parts)
 
 
 def time_shift(entry_offset_ms) -> float:
@@ -166,6 +204,7 @@ class EditRenderer:
         self.vault = vault
         self.log = log
         self.available = available
+        self.draws_text = available and can_draw_text()
         self._lock = threading.Lock()
         self._status: dict[str, dict] = {}  # session -> {"state", "progress", "error"}
         self._wake = threading.Event()
@@ -243,6 +282,9 @@ class EditRenderer:
         work = directory / ".edit-work"
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir()
+        entries = footer.schedule(data) if footer.wanted(data) and self.draws_text else None
+        if footer.wanted(data) and not self.draws_text:
+            self.log(f"{name}'s edit: no footer (this ffmpeg has no drawtext)")
         nice = ["nice", "-n", "10"] if shutil.which("nice") else []
         started = time.monotonic()
         self.log(f"Rendering {name}'s edit: {len(stretches)} stretches, {total:.0f}s")
@@ -252,10 +294,18 @@ class EditRenderer:
                 self._set(name, state="rendering", progress=round(start / total, 3) if total else 0)
                 frames = round((end - start) * FPS)
                 part = work / f"part{i:05d}.mp4"
-                if not self._encode_stretch(nice, cameras[cam][1], start + cameras[cam][2], frames, width, height, part):
+
+                def overlay(camera: int) -> str:
+                    if entries is None:
+                        return ""
+                    return footer_filters(entries, start, end, cameras[camera][0], height, work, f"t{i:05d}")
+
+                if not self._encode_stretch(nice, cameras[cam][1], start + cameras[cam][2], frames, width, height,
+                                            part, overlay(cam), work):
                     # That camera has nothing there (it started late or ended
                     # early): the main camera instead, so the timing holds.
-                    if not self._encode_stretch(nice, main_file, start + main_shift, frames, width, height, part):
+                    if not self._encode_stretch(nice, main_file, start + main_shift, frames, width, height, part,
+                                                overlay(plan["primary"]), work):
                         raise RuntimeError(f"couldn't render {start:.1f}-{end:.1f}s")
                 names.append(part.name)
             (work / "parts.txt").write_text("".join(f"file '{n}'\n" for n in names))
@@ -281,14 +331,17 @@ class EditRenderer:
 
     @staticmethod
     def _encode_stretch(nice: list[str], src: Path, seek: float, frames: int, width: int, height: int,
-                        out: Path) -> bool:
+                        out: Path, overlay: str = "", work: Path | None = None) -> bool:
         """Exactly `frames` frames of `src` from `seek`, at FPS and the main
-        camera's size (the last frame held if the source runs out)."""
+        camera's size (the last frame held if the source runs out), with
+        `overlay`'s filters (the footer) on top; run in `work`."""
         vf = (f"fps={FPS},scale={width}:{height}:force_original_aspect_ratio=decrease,"
               f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,tpad=stop_mode=clone:stop_duration=3600")
+        if overlay:
+            vf += "," + overlay
         cmd = [*nice, "ffmpeg", "-v", "error", "-y", "-ss", f"{seek:.6f}", "-i", str(src),
                "-map", "0:v:0", "-vf", vf, "-frames:v", str(frames),
                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
                "-video_track_timescale", "90000", "-an", str(out)]
-        result = subprocess.run(cmd, capture_output=True)
+        result = subprocess.run(cmd, capture_output=True, cwd=work)
         return result.returncode == 0 and out.exists() and out.stat().st_size > 0

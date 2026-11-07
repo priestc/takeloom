@@ -204,7 +204,8 @@ def sessions_page(vault: Vault, logs: dict[str, dict], pending: list[PairingRequ
 _EDIT_COLORS = ["#2a6db0", "#d0702a", "#2e9d4f", "#9b4fc4", "#c4a72a", "#c44f6d"]
 
 
-def _stage_player(rel: str, videos: list[tuple[str, str, str]], shifts: list[float]) -> str:
+def _stage_player(rel: str, videos: list[tuple[str, str, str]], shifts: list[float],
+                  footer_entries: list[list] | None = None) -> str:
     """Every camera's video stacked and played together, in step, showing
     one at a time: the one the editor's timeline says (Preview edit: the
     final video as it'll render, cutting as it plays), or the one picked
@@ -212,7 +213,10 @@ def _stage_player(rel: str, videos: list[tuple[str, str, str]], shifts: list[flo
     render. Its own controls, since a video's built-in ones can't sit over
     the others. Others drifting more than 0.2 s are pulled back into step.
     `shifts`: each video's sync shift (edit.time_shift), so session time T
-    is T + shift in that file. Exposes STAGE for the editor."""
+    is T + shift in that file. `footer_entries` (footer.schedule; None:
+    the videos carry their own): the footer, drawn over the picture with
+    the camera showing, as the render will draw it. Exposes STAGE for the
+    editor."""
     import json as _json
     buttons = "".join(
         f"<button class='cam{' on' if i == 0 else ''}' onclick='STAGE.manual({i})'>{escape(title)}</button>"
@@ -223,15 +227,24 @@ def _stage_player(rel: str, videos: list[tuple[str, str, str]], shifts: list[flo
         f"style='position:absolute;inset:0;width:100%;height:100%;object-fit:contain;opacity:{1 if i == 0 else 0}'></video>"
         for i, (_title, file, _label) in enumerate(videos)
     )
+    titles = [title for title, _file, _label in videos]
+    # The footer: a translucent strip 1/24 of the picture's height, like
+    # the one edit.py draws (footer.py), sized from the stage as it resizes.
+    footer_div = ("<div id='st-footer' style='position:absolute;left:0;right:0;bottom:0;background:rgba(0,0,0,.43);"
+                  "color:rgba(255,255,255,.92);white-space:nowrap;overflow:hidden;display:flex;align-items:center;"
+                  "pointer-events:none;font-family:\"DejaVu Sans\",Helvetica,Arial,sans-serif'></div>"
+                  if footer_entries is not None else "")
     return (
-        f"<p>{buttons}</p>"
-        f"<div id='stage' style='position:relative;width:100%;aspect-ratio:16/9;background:#000;border-radius:6px;overflow:hidden'>{angles}</div>"
+        f"<p>{buttons if len(videos) > 1 else ''}</p>"
+        f"<div id='stage' style='position:relative;width:100%;aspect-ratio:16/9;background:#000;border-radius:6px;overflow:hidden'>{angles}{footer_div}</div>"
         "<div style='display:flex;gap:.6em;align-items:center;margin:.4em 0'>"
         "<button id='st-play' onclick='STAGE.toggle()' style='min-width:3em'>▶</button>"
         "<input id='st-seek' type='range' min='0' max='1000' value='0' style='flex:1'>"
         "<span id='st-time' class='small muted'>0:00</span>"
-        "<label class='small'><input id='st-follow' type='checkbox' checked> Preview edit</label></div>"
-        f"<script>var STAGE=(function(SH){{"
+        + ("<label class='small'><input id='st-follow' type='checkbox' checked> Preview edit</label>" if len(videos) > 1 else
+           "<input id='st-follow' type='checkbox' checked hidden>")
+        + "</div>"
+        f"<script>var STAGE=(function(SH,FOOT,TITLES){{"
         "var V=[].slice.call(document.querySelectorAll('#stage video')),master=0,shown=0,manual=0,camAt=null,playing=false,drag=false;"
         "var seekEl=document.getElementById('st-seek'),follow=document.getElementById('st-follow');"
         "function fmt(t){t=Math.max(0,Math.round(t));return Math.floor(t/60)+':'+String(t%60).padStart(2,'0');}"
@@ -246,7 +259,13 @@ def _stage_player(rel: str, videos: list[tuple[str, str, str]], shifts: list[flo
         "function play(){playing=true;document.getElementById('st-play').textContent='❚❚';"
         "V[master].play().catch(function(){});align();}"
         "function pause(){playing=false;document.getElementById('st-play').textContent='▶';V.forEach(function(v){v.pause();});}"
-        "function frame(){var T=now();show(follow.checked&&camAt?camAt(T):manual);"
+        "var footEl=document.getElementById('st-footer'),footText='';"
+        "function fit(){if(!footEl)return;var h=document.getElementById('stage').clientHeight,b=Math.max(14,h/24);"
+        "footEl.style.height=b+'px';footEl.style.fontSize=Math.max(9,b*0.6)+'px';footEl.style.paddingLeft=(14*h/1080)+'px';}"
+        "window.addEventListener('resize',fit);fit();"
+        "function footer(T){if(!footEl||!FOOT)return;var t=FOOT[0][1];for(var i=0;i<FOOT.length&&FOOT[i][0]<=T;i++)t=FOOT[i][1];"
+        "t=t+'   \u2022   '+TITLES[shown];if(t!==footText){footText=t;footEl.textContent=t;}}"
+        "function frame(){var T=now();show(follow.checked&&camAt?camAt(T):manual);footer(T);"
         "if(!drag&&dur())seekEl.value=Math.round(1000*T/dur());"
         "document.getElementById('st-time').textContent=fmt(T)+' / '+fmt(dur());if(playing)align();requestAnimationFrame(frame);}"
         "seekEl.addEventListener('input',function(){drag=true;seek(seekEl.value/1000*dur());});"
@@ -259,7 +278,7 @@ def _stage_player(rel: str, videos: list[tuple[str, str, str]], shifts: list[flo
         "following:function(){return follow.checked;},"
         "ready:function(cb){var m=V[0];if(m.readyState>=1)cb();else m.addEventListener('loadedmetadata',function f(){m.removeEventListener('loadedmetadata',f);cb();});},"
         "element:function(){return document.getElementById('stage');}};"
-        f"}})({_json.dumps(shifts)});</script>"
+        f"}})({_json.dumps(shifts)},{_json.dumps(footer_entries)},{_json.dumps(titles)});</script>"
     )
 
 
@@ -365,13 +384,17 @@ def session_page(vault: Vault, name: str, data: dict, editor=None) -> str:
     videos = session_videos(directory, data)
     has_video = bool(videos)
     if has_video:
-        if len(videos) > 1 and editor is not None:
+        from . import footer
+        if editor is not None and (len(videos) > 1 or footer.wanted(data)):
             # Every camera playing together, cutting between them as the
-            # editor's timeline says: a preview of the final video.
+            # editor's timeline says, with the footer over it: a preview of
+            # the final video.
             from .edit import camera_files
             shifts = [shift for _title, _path, shift in camera_files(directory, data)]
-            parts.append(_stage_player(rel, videos, shifts))
-            parts.append(_edit_editor(name, rel, videos, editor))
+            parts.append(_stage_player(rel, videos, shifts,
+                                       footer.schedule(data) if footer.wanted(data) else None))
+            if len(videos) > 1:
+                parts.append(_edit_editor(name, rel, videos, editor))
         else:
             parts.append(f"<video id='v' controls preload='metadata' src='{_media_url(rel + '/' + videos[0][1])}'></video>")
     elif (directory / "render_jobs.json").exists():

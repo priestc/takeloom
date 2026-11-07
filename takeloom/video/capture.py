@@ -214,12 +214,6 @@ class VideoRecorder:
         return self._proc is not None and self._proc.poll() is None
 
 
-def format_watermark_text(musician: str, instrument: str, when: str, backing_track: str) -> str:
-    """Build the small watermark line burned into the bottom of the video."""
-    parts = [p for p in (musician, instrument, when, backing_track) if p]
-    return "   •   ".join(parts)
-
-
 def probe_video_size(path: Path) -> tuple[int, int]:
     """Return (width, height) of a video file's first video stream."""
     result = subprocess.run(
