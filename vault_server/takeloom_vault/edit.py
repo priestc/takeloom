@@ -3,14 +3,17 @@
 The session page's timeline editor (web.py) saves a plan, edit.json in the
 session's folder:
 
-    {"primary": 0, "cuts": [[0.0, 0], [42.5, 2], [47.5, 0], ...]}
+    {"priority": [0, 2, 1], "cuts": [[0.0, 0], [42.5, 2], [47.5, 0], ...]}
 
-"cuts" is a list of (time on the session's timeline in seconds, camera),
-each camera shown from its cut to the next; cameras are indexes into
+"priority" ranks the cameras: the first is the main camera, on screen
+most of the time and the source of the sound; the others are cut to now
+and then, the lower the priority the less often (auto_cuts). "cuts" is a
+list of (time on the session's timeline in seconds, camera), each camera
+shown from its cut to the next. Cameras are indexes into
 web.session_videos' list, resolved here (a plan never names a file).
 Rendering makes edit.mp4: each stretch of picture from its camera's own
 session video, and the audio, unbroken start to finish, from the main
-camera ("primary"), so a cut never breaks the sound.
+camera, so a cut never breaks the sound.
 
 All of a session's camera videos are on the same timeline, apart from a few
 tens of ms: a camera with a negative sync offset had its audio delayed by
@@ -74,12 +77,72 @@ def probe(path: Path) -> tuple[float, int, int]:
     return float(info["format"]["duration"]), int(stream["width"]), int(stream["height"])
 
 
+def checked_priority(priority, cameras: int) -> list[int]:
+    """Every camera exactly once, highest priority first. Raises ValueError."""
+    if (not isinstance(priority, list) or any(isinstance(c, bool) or not isinstance(c, int) for c in priority)
+            or sorted(priority) != list(range(cameras))):
+        raise ValueError("the camera priority must list every camera once")
+    return list(priority)
+
+
+def usable(camera: int, start: float, end: float) -> bool:
+    """Whether a camera's shot is worth cutting to from start to end on the
+    session's timeline. Always, for now: the place for a check that the
+    performer is actually in frame (a model running here, looking at that
+    camera's video), so auto_cuts skips an angle they've walked out of."""
+    return True
+
+
+def auto_cuts(total: float, priority: list[int], every: float, length: float,
+              usable: Callable[[int, float, float], bool] = usable) -> list[list]:
+    """The main camera (priority[0]) throughout, cutting to another camera
+    for `length` s every `every` s. Which one: the others share the
+    cut-ins by priority, the lowest getting the fewest: weights n, n-1, ...,
+    1 for n others, interleaved evenly (smooth weighted round-robin) rather
+    than bunched, skipping any camera not `usable` for that stretch (none
+    usable: that cut-in is skipped). Nothing in the last few seconds."""
+    main, others = priority[0], priority[1:]
+    cuts: list[list] = [[0.0, main]]
+    if not others or every <= 0 or length <= 0:
+        return cuts
+    weights = {cam: len(others) - rank for rank, cam in enumerate(others)}
+    credit = {cam: 0 for cam in others}
+    total_weight = sum(weights.values())
+    t = float(every)
+    while t + length < total - 5:
+        for cam in others:
+            credit[cam] += weights[cam]
+        candidates = [cam for cam in others if usable(cam, t, t + length)]
+        if candidates:
+            pick = max(candidates, key=lambda cam: credit[cam])
+            credit[pick] -= total_weight
+            cuts += [[round(t, 3), pick], [round(t + length, 3), main]]
+        t += every
+    return cuts
+
+
+def session_length(directory: Path, data: dict, main: int) -> float:
+    """The session's length on its timeline: the main camera's video, less
+    its sync shift, in whole frames."""
+    cameras = camera_files(directory, data)
+    _title, path, shift = cameras[main]
+    duration, _w, _h = probe(path)
+    return math.floor((duration - shift) * FPS) / FPS
+
+
 def checked_plan(plan: dict, cameras: int) -> dict:
-    """The plan, validated: {"primary": camera, "cuts": [[t, camera], ...]}
-    sorted, starting at 0, cameras in range. Raises ValueError."""
-    primary = plan.get("primary")
-    if not isinstance(primary, int) or isinstance(primary, bool) or not 0 <= primary < cameras:
-        raise ValueError("pick the main camera")
+    """The plan, validated: {"priority": [...], "primary": priority[0],
+    "cuts": [[t, camera], ...]} sorted, starting at 0, cameras in range.
+    A plan from before priorities ({"primary"}) gets one: the main camera,
+    then the rest in order. Raises ValueError."""
+    if "priority" in plan:
+        priority = checked_priority(plan.get("priority"), cameras)
+    else:
+        primary = plan.get("primary")
+        if not isinstance(primary, int) or isinstance(primary, bool) or not 0 <= primary < cameras:
+            raise ValueError("pick the main camera")
+        priority = [primary] + [c for c in range(cameras) if c != primary]
+    primary = priority[0]
     raw = plan.get("cuts")
     if not isinstance(raw, list) or not raw or len(raw) > MAX_CUTS:
         raise ValueError("the timeline is empty")
@@ -95,7 +158,7 @@ def checked_plan(plan: dict, cameras: int) -> dict:
         cuts.append([round(float(t), 3), cam])
     cuts.sort(key=lambda c: c[0])
     cuts[0][0] = 0.0
-    return {"primary": primary, "cuts": cuts}
+    return {"priority": priority, "primary": primary, "cuts": cuts}
 
 
 class EditRenderer:

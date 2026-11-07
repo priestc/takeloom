@@ -73,9 +73,13 @@ duplicates.
 
 ## Editing a session into one video
 
-A session page with more than one camera has an **Edit** section: pick the main camera and how
-often the others cut in (every N seconds, for M seconds), and it fills in a timeline strip, one
-colour per camera. Click any stretch to switch it to the next camera; the player above jumps
+A session page with more than one camera has an **Edit** section. Set the **camera priority**
+(▲/▼): the first camera is the main one, on screen most of the time and the source of the sound;
+the others are cut in every N seconds for M seconds, shared by priority (with three others,
+3 : 2 : 1, interleaved evenly), so the lowest is cut to least. The cuts are worked out here on
+the vault (`edit.auto_cuts`), which asks `edit.usable` whether a camera is worth cutting to for
+each stretch: always, for now, and the place to plug in a check that the performer is in
+frame. The page shows them as a timeline strip, one colour per camera. Click any stretch to switch it to the next camera; the player above jumps
 there showing that camera. **Render final video** saves the plan (`edit.json` in the session's
 folder) and makes `edit.mp4` in the background: each stretch of picture from its camera, cut
 frame-accurately, and the sound unbroken from the main camera from start to finish, so a cut

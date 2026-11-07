@@ -205,57 +205,59 @@ _EDIT_COLORS = ["#2a6db0", "#d0702a", "#2e9d4f", "#9b4fc4", "#c4a72a", "#c44f6d"
 
 
 def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor) -> str:
-    """The timeline editor (edit.py renders its plan): a main camera, the
-    others cut in every so often, a clickable strip to change any stretch,
-    and Render. The audio is always the main camera's, unbroken."""
+    """The timeline editor (edit.py renders its plan): a camera priority
+    (the first is the main camera and the sound; the lower, the less it's
+    cut to), automatic cuts from it (edit.auto_cuts, on the server), a
+    clickable strip to change any stretch, and Render."""
     import json as _json
-    directory_plan = None
+    plan = None
     try:
-        directory_plan = _json.loads((Path(editor.vault.session_dir(name)) / "edit.json").read_text())
+        plan = _json.loads((Path(editor.vault.session_dir(name)) / "edit.json").read_text())
     except (OSError, ValueError):
         pass
     status = editor.status(name)
     titles = [title for title, _file, _label in videos]
     urls = [_media_url(f"{rel}/{file}") for _title, file, _label in videos]
-    options = "".join(f"<option value='{i}'>{escape(t)}</option>" for i, t in enumerate(titles))
-    legend = " ".join(
-        f"<span class='pill' style='background:{_EDIT_COLORS[i % len(_EDIT_COLORS)]};color:#fff'>{escape(t)}</span>"
-        for i, t in enumerate(titles)
-    )
     final = (f"<p id='ed-final'>Final video: <a href='{_media_url(rel + '/edit.mp4')}'>edit.mp4</a></p>"
              if status.get("state") == "done" else "<p id='ed-final'></p>")
     config = _json.dumps({
-        "session": name, "titles": titles, "urls": urls, "colors": _EDIT_COLORS, "plan": directory_plan,
+        "session": name, "titles": titles, "urls": urls, "colors": _EDIT_COLORS, "plan": plan,
         "status": status, "available": editor.available, "final": _media_url(rel + "/edit.mp4"),
     }).replace("</", "<\\/")
     return (
         "<h2>Edit</h2>"
-        "<p class='muted small'>One final video from all the cameras: the main camera most of the time, the "
-        "others cut in now and then. The sound is the main camera's, unbroken. Click a stretch of the "
+        "<p class='muted small'>One final video from all the cameras, cut automatically. Camera priority: "
+        "the first is the main camera, on screen most of the time and the source of the sound (unbroken); "
+        "the others are cut in now and then, the lower the priority the less often. Click a stretch of the "
         "timeline to switch it to the next camera (the player shows it), then Render.</p>"
-        f"<p>Main camera <select id='ed-main'>{options}</select> · cut to the others every "
-        "<input id='ed-every' type='number' min='5' value='30' style='width:4em'> s for "
-        "<input id='ed-len' type='number' min='1' value='5' style='width:3em'> s "
-        "<button onclick='edFill()'>Fill timeline</button></p>"
+        "<table id='ed-priority' class='songs'></table>"
+        "<p>Cut to the others every <input id='ed-every' type='number' min='5' value='30' style='width:4em'> s "
+        "for <input id='ed-len' type='number' min='1' value='5' style='width:3em'> s "
+        "<button onclick='edFill()'>Fill timeline</button> <span id='ed-fill' class='muted small'></span></p>"
         "<div id='ed-bar' style='display:flex;height:34px;border-radius:6px;overflow:hidden;"
         "border:1px solid var(--line);cursor:pointer'></div>"
-        f"<p class='small'>{legend}</p>"
         "<p><button class='ok' id='ed-render' onclick='edRender()'>Render final video</button> "
         "<span id='ed-status' class='muted'></span></p>"
         + final +
         f"<script>var ED={config};</script>"
         "<script>"
-        "var edCuts=[];"
+        "var edCuts=[],edPri=[];"
         "function edDur(){return document.getElementById('v').duration||0;}"
         "function edFmt(t){t=Math.round(t);return Math.floor(t/60)+':'+String(t%60).padStart(2,'0');}"
-        "function edFill(){var p=+document.getElementById('ed-main').value,ev=+document.getElementById('ed-every').value,"
-        "len=+document.getElementById('ed-len').value,d=edDur(),o=[],k=0;"
-        "for(var i=0;i<ED.titles.length;i++)if(i!=p)o.push(i);edCuts=[[0,p]];"
-        "if(o.length&&ev>=5&&len>0)for(var t=ev;t+len<d-5;t+=ev){edCuts.push([t,o[k++%o.length]]);edCuts.push([t+len,p]);}"
-        "edDraw();}"
+        "function edSwatch(c){return \"<span class='pill' style='background:\"+ED.colors[c%ED.colors.length]+\";color:#fff'>\"+"
+        "ED.titles[c].replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</span>';}"
+        "function edList(){var t=document.getElementById('ed-priority');t.innerHTML='<tr><th>Priority</th><th>Camera</th><th></th></tr>';"
+        "edPri.forEach(function(c,i){var r=t.insertRow();r.insertCell().textContent=(i+1)+(i==0?' (main, sound)':'');"
+        "r.insertCell().innerHTML=edSwatch(c);var m=r.insertCell();"
+        "[['▲',-1],['▼',1]].forEach(function(b){var j=i+b[1];if(j<0||j>=edPri.length)return;var x=document.createElement('button');"
+        "x.textContent=b[0];x.onclick=function(){var s=edPri[i];edPri[i]=edPri[j];edPri[j]=s;edList();edFill();};m.appendChild(x);});});}"
+        "function edFill(){var q='priority='+edPri.join(',')+'&every='+document.getElementById('ed-every').value+"
+        "'&len='+document.getElementById('ed-len').value;document.getElementById('ed-fill').textContent='…';"
+        "fetch('/sessions/'+encodeURIComponent(ED.session)+'/edit-fill?'+q).then(function(r){return r.json();})"
+        ".then(function(j){document.getElementById('ed-fill').textContent=j.error||'';if(j.cuts){edCuts=j.cuts;edDraw();}});}"
         "function edDraw(){var b=document.getElementById('ed-bar'),d=edDur();b.innerHTML='';if(!d)return;"
         "edCuts.forEach(function(c,i){var e=i+1<edCuts.length?edCuts[i+1][0]:d,s=document.createElement('div');"
-        "s.style.flex=(e-c[0])+' 0 0';s.style.background=ED.colors[c[1]%ED.colors.length];"
+        "s.style.flex=Math.max(e-c[0],0)+' 0 0';s.style.background=ED.colors[c[1]%ED.colors.length];"
         "s.style.borderRight='1px solid rgba(255,255,255,.6)';"
         "s.title=ED.titles[c[1]]+'  '+edFmt(c[0])+'–'+edFmt(e);"
         "s.onclick=function(){c[1]=(c[1]+1)%ED.titles.length;edDraw();edShow(c[0],c[1]);};b.appendChild(s);});}"
@@ -272,12 +274,15 @@ def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor
         "if(s.state=='queued'||s.state=='rendering')setTimeout(edPoll,2000);}"
         "function edPoll(){fetch('/sessions/'+encodeURIComponent(ED.session)+'/edit-status').then(function(r){return r.json();}).then(edState);}"
         "function edRender(){fetch('/sessions/'+encodeURIComponent(ED.session)+'/edit',{method:'POST',"
-        "headers:{'Content-Type':'application/json'},body:JSON.stringify({primary:+document.getElementById('ed-main').value,cuts:edCuts})})"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({priority:edPri,cuts:edCuts})})"
         ".then(function(r){return r.json();}).then(edState);}"
-        "(function(){var v=document.getElementById('v');function init(){"
-        "if(ED.plan){document.getElementById('ed-main').value=ED.plan.primary;edCuts=ED.plan.cuts;edDraw();}else edFill();}"
+        "(function(){var v=document.getElementById('v');"
+        "var p=ED.plan&&(ED.plan.priority||(ED.plan.primary!=null?[ED.plan.primary]:null));"
+        "edPri=ED.titles.map(function(_,i){return i;});"
+        "if(p){edPri=p.concat(edPri.filter(function(i){return p.indexOf(i)<0;}));}"
+        "edList();function init(){if(ED.plan&&ED.plan.cuts){edCuts=ED.plan.cuts;edDraw();}else edFill();}"
         "if(v.readyState>=1)init();else v.addEventListener('loadedmetadata',function f(){v.removeEventListener('loadedmetadata',f);init();});"
-        "document.getElementById('ed-main').onchange=edFill;edState(ED.status);})();"
+        "edState(ED.status);})();"
         "</script>"
     )
 

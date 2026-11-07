@@ -259,6 +259,11 @@ class _Handler(BaseHTTPRequestHandler):
             return self._html(web.clients_page(list(auth.clients), auth.pending_requests()))
         if m := re.fullmatch(r"/sessions/([^/]+)/edit-status", path):
             return self._json(self.server.editor.status(m.group(1)))
+        if m := re.fullmatch(r"/sessions/([^/]+)/edit-fill", path):
+            # The timeline editor's automatic cuts (edit.auto_cuts), from a
+            # camera priority: decided here, where a check that the
+            # performer's in shot can run (edit.usable).
+            return self._json(self._edit_fill(m.group(1)))
         if m := re.fullmatch(r"/sessions/([^/]+)", path):
             data = vault.read_session_log(m.group(1))
             if data is None:
@@ -336,6 +341,24 @@ class _Handler(BaseHTTPRequestHandler):
         if m := re.fullmatch(r"sessions/([^/]+)/session_log\.json", relative):
             self.server.renderer.enqueue(m.group(1))
         self._json(result)
+
+    def _edit_fill(self, name: str) -> dict:
+        from . import edit
+        data = self.server.vault.read_session_log(name)
+        if data is None:
+            raise _HTTPError(HTTPStatus.NOT_FOUND, f"No session named {name!r}")
+        directory = self.server.vault.session_dir(name)
+        query = parse_qs(urlsplit(self.path).query)
+        try:
+            cameras = len(edit.camera_files(directory, data))
+            priority = edit.checked_priority([int(x) for x in (query.get("priority") or [""])[0].split(",") if x],
+                                             cameras)
+            every = min(max(float((query.get("every") or ["30"])[0]), 5.0), 3600.0)
+            length = min(max(float((query.get("len") or ["5"])[0]), 1.0), every)
+        except ValueError as e:
+            raise _HTTPError(HTTPStatus.BAD_REQUEST, str(e)) from e
+        total = edit.session_length(directory, data, priority[0])
+        return {"duration": total, "cuts": edit.auto_cuts(total, priority, every, length)}
 
     def _send_take_video(self, take_filename: str) -> None:
         # ?camera=<label>: that camera's view of the take; none: its default.
