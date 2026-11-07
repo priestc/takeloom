@@ -54,6 +54,11 @@ Control messages (FRAME_JSON):
                      a lens picked on the phone's own screen: the server
                      remembers it like a video-ui change (and answers with
                      the framing it settled on).
+    server -> phone  {"kind": "battery_estimate", "level": 0..1|null, "charging": bool,
+                      "minutes_left": n|null, "full_hours": h|null}
+                     how long this phone's battery will last, from the drain
+                     rate the server learns per phone (battery.py), whenever
+                     it changes. null: charging, or not learned yet.
     server -> phone  {"kind": "live_quality", "max_width": n, "bitrate": n}
                      this phone's share of the Wi-Fi (bandwidth.py), whenever
                      it changes. iOS holds a new size until a recording

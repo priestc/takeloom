@@ -17,6 +17,10 @@ camera (Backend.set_program_camera): the stream switches to it, and during a
 session the switch goes into the session log, so the streamed video can be
 rebuilt afterwards from the cameras' recordings.
 
+Under each Takeloom Camera phone's thumbnail: its battery, and how long
+it'll last at the drain rate the server has learned for that phone
+(Backend.camera_batteries; phone_camera/battery.py).
+
 A separate window from the main UI, which is left as it is for now; the
 plan is for this to take over video entirely and the main UI to become
 audio-only. Like the main UI it's usually a remote-control terminal for the
@@ -75,6 +79,7 @@ class VideoUIFrame(tk.Frame):
         # The program camera's framing (Backend.get_camera_framing's dict),
         # as shown and as being changed here; None if it can't be framed.
         self._framing: dict | None = None
+        self._batteries: dict[str, dict] = {}  # camera device -> battery.summary()
         self._framing_pending: dict | None = None  # newest change not yet sent
         self._framing_sender_busy = False
 
@@ -141,7 +146,13 @@ class VideoUIFrame(tk.Frame):
 
     def _refresh(self) -> None:
         backend = self._backend
-        self._run(lambda: (backend.session_cameras(), backend.get_program_camera()), self._on_refreshed)
+        def load():
+            try:
+                batteries = backend.camera_batteries()
+            except Exception:  # noqa: BLE001 — a server from before battery tracking
+                batteries = {}
+            return backend.session_cameras(), backend.get_program_camera(), batteries
+        self._run(load, self._on_refreshed)
 
     def _on_refreshed(self, result, error) -> None:
         if not self.winfo_exists():
@@ -149,11 +160,13 @@ class VideoUIFrame(tk.Frame):
         if error or result is None:
             self.status_var.set(error or "Couldn't load the cameras.")
             return
-        cameras, program = [tuple(c) for c in result[0]], result[1]
+        cameras, program, batteries = [tuple(c) for c in result[0]], result[1], result[2]
+        self._batteries = dict(batteries or {})
         if cameras != self._cameras:
             self._cameras = cameras
             self._build_strip()
         self._set_program(program)
+        self._paint_batteries()
 
     def _on_backend_event(self, event: str, data: dict) -> None:
         # From a backend thread: hop to Tk's.
@@ -173,6 +186,9 @@ class VideoUIFrame(tk.Frame):
                     self._show_framing(data)  # someone else's change (or the server's clamp)
             elif not data.get("camera"):
                 self._refresh_framing()  # a phone's zoom abilities changed
+        elif event == "camera_battery_changed" and data.get("camera"):
+            self._batteries[data["camera"]] = data
+            self._paint_batteries()
         elif event == "session_cameras_changed":
             self._refresh()
         elif event == "streaming_status":
@@ -204,17 +220,36 @@ class VideoUIFrame(tk.Frame):
             caption = tk.Label(border, background=IDLE_COLOR, foreground="white", anchor="w",
                                text=f"{index}  {label}" if index <= 9 else label)
             caption.pack(fill="x")
-            for widget in (border, image, caption):
+            battery = tk.Label(border, background=IDLE_COLOR, foreground="#dddddd", anchor="w", text="")
+            for widget in (border, image, caption, battery):
                 widget.bind("<Button-1>", lambda _e, d=device: self._choose(d))
-            self._tiles[device] = {"border": border, "image": image, "caption": caption,
+            self._tiles[device] = {"border": border, "image": image, "caption": caption, "battery": battery,
                                    "label": label, "imgtk": blank}
         self._paint_selection()
+        self._paint_batteries()
+
+    def _paint_batteries(self) -> None:
+        """The battery line under each phone's thumbnail; none for a camera
+        with no battery (a webcam) or before its first report. Red once
+        under 20%, or 30 minutes left, while it isn't charging."""
+        from ..phone_camera.battery import describe
+        for device, tile in self._tiles.items():
+            info = self._batteries.get(device) or {}
+            text = describe(info)
+            if not text:
+                tile["battery"].pack_forget()
+                continue
+            low = not info.get("charging") and (
+                (info.get("level") or 1) < 0.2 or (info.get("minutes_left") is not None and info["minutes_left"] < 30))
+            tile["battery"].configure(text="🔋 " + text, foreground="#ff6b6b" if low else "#dddddd")
+            tile["battery"].pack(fill="x")
 
     def _paint_selection(self) -> None:
         for device, tile in self._tiles.items():
             selected = device == self._program
             color = PROGRAM_COLOR if selected else IDLE_COLOR
             tile["border"].configure(background=color)
+            tile["battery"].configure(background=color)
             text = tile["caption"].cget("text").removesuffix("  ● LIVE")
             tile["caption"].configure(background=color,
                                       text=text + ("  ● LIVE" if selected and self._streaming else ""))

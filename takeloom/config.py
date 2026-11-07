@@ -250,6 +250,10 @@ class KnownCamera:
     # A Takeloom Camera phone's zoom and pan (phone_camera/framing.py's
     # Framing.to_dict()), sent to it whenever it connects. {} = never set.
     framing: dict = field(default_factory=dict)
+    # A Takeloom Camera phone's learned battery drain while running the app,
+    # as a fraction of a full charge per hour (phone_camera/battery.py).
+    # 0 = not learned yet.
+    battery_drain_per_hour: float = 0.0
 
     @property
     def label(self) -> str:

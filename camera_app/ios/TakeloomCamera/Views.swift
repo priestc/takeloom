@@ -38,8 +38,13 @@ struct ContentView: View {
                 HStack(alignment: .top) {
                     ConnectionPill(state: model.linkState)
                     Spacer()
-                    if let since = model.recordingSince {
-                        RecordingPill(since: since)
+                    VStack(alignment: .trailing, spacing: 8) {
+                        if let since = model.recordingSince {
+                            RecordingPill(since: since)
+                        }
+                        if let level = model.batteryLevel {
+                            BatteryPill(level: level, charging: model.charging, minutesLeft: model.batteryMinutesLeft)
+                        }
                     }
                 }
                 Spacer()
@@ -198,6 +203,28 @@ struct LensButtons: View {
                 }
             }
         }
+    }
+}
+
+/// "🔋 64% · 3h 10m left", "⚡ 64% · charging", or just the level until the
+/// server has learned this phone's drain rate (takeloom/phone_camera/battery.py).
+struct BatteryPill: View {
+    let level: Float
+    let charging: Bool
+    let minutesLeft: Int?
+
+    var body: some View {
+        let percent = Int((level * 100).rounded())
+        let low = !charging && (percent < 20 || (minutesLeft ?? Int.max) < 30)
+        // The color before pillStyle(): the one nearest the text wins.
+        Text(text(percent)).foregroundStyle(low ? Color(red: 1, green: 0.42, blue: 0.42) : .white).pillStyle()
+    }
+
+    private func text(_ percent: Int) -> String {
+        if charging { return "⚡ \(percent)% · charging" }
+        guard let minutes = minutesLeft else { return "🔋 \(percent)%" }
+        if minutes >= 60 { return "🔋 \(percent)% · \(minutes / 60)h \(String(format: "%02d", minutes % 60))m left" }
+        return "🔋 \(percent)% · \(minutes)m left"
     }
 }
 

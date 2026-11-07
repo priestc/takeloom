@@ -108,6 +108,9 @@ class RemoteBackend(Backend):
     def get_camera_framing(self, camera_device: str) -> dict:
         return self._client.call("get_camera_framing", {"camera": camera_device})
 
+    def camera_batteries(self) -> dict[str, dict]:
+        return self._client.call("camera_batteries", {}).get("batteries", {})
+
     def set_camera_framing(self, camera_device: str, zoom: float, x: float, y: float) -> dict:
         return self._client.call("set_camera_framing", {"camera": camera_device, "zoom": zoom, "x": x, "y": y})
 

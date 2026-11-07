@@ -47,6 +47,10 @@ class MainActivity : Activity() {
     private lateinit var connectionText: TextView
     private lateinit var recordingText: TextView
     private lateinit var uploadText: TextView
+    /** Battery, and how long it'll last by the server's learned drain rate. */
+    private lateinit var batteryText: TextView
+    @Volatile private var batteryMinutesLeft: Int? = null
+    private var batteryTicks = 0
     private val main = Handler(Looper.getMainLooper())
     private val previewExecutor = Executors.newSingleThreadExecutor()
     @Volatile private var previewBusy = false
@@ -230,6 +234,7 @@ class MainActivity : Activity() {
         link.onNeedKeyframe = { engine.requestKeyframe() }
         link.onLiveQuality = { _, bitrate -> if (bitrate > 0) engine.setLiveQuality(bitrate) }
         link.onFraming = { framing -> engine.setFraming(framing) }
+        link.onBatteryEstimate = { minutes -> main.post { batteryMinutesLeft = minutes; refreshBattery() } }
         link.statusProvider = { statusFields() }
         link.onState = { state -> main.post { showState(state); if (state is LinkState.Connected) uploader.kick() } }
         link.onCommand = { msg -> main.post { handleCommand(msg) } }
@@ -249,6 +254,7 @@ class MainActivity : Activity() {
     /** 5 Hz: the recording clock, and a preview JPEG for the server. */
     private fun tick() {
         refreshLensBar()
+        if (batteryTicks++ % 25 == 0) refreshBattery()  // every 5 s
         recordingText.visibility = if (recordingSession != null) View.VISIBLE else View.GONE
         if (recordingSession != null) {
             val s = (SystemClock.elapsedRealtime() - recordingSince) / 1000
@@ -360,6 +366,30 @@ class MainActivity : Activity() {
             uploader.kick()
         }
         link.sendStatus()
+    }
+
+    /** "🔋 64% · 3h 10m left", "⚡ 64% · charging", or just the level
+     *  until the server has learned this phone's drain rate. */
+    private fun refreshBattery() {
+        val battery = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = battery?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = battery?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        val plugged = (battery?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0) != 0
+        if (level < 0 || scale <= 0) {
+            batteryText.visibility = View.GONE
+            return
+        }
+        val percent = level * 100 / scale
+        val minutes = batteryMinutesLeft
+        batteryText.text = when {
+            plugged -> "⚡ $percent% · charging"
+            minutes != null && minutes >= 60 -> "🔋 $percent% · ${minutes / 60}h ${String.format("%02d", minutes % 60)}m left"
+            minutes != null -> "🔋 $percent% · ${minutes}m left"
+            else -> "🔋 $percent%"
+        }
+        val low = !plugged && (percent < 20 || (minutes != null && minutes < 30))
+        batteryText.setTextColor(if (low) Color.rgb(255, 107, 107) else Color.WHITE)
+        batteryText.visibility = View.VISIBLE
     }
 
     private fun statusFields(): JSONObject {
@@ -489,7 +519,14 @@ class MainActivity : Activity() {
             setMargins(dp(16), dp(16), dp(16), 0)
         })
         recordingText = pill(TextView(this)).apply { setTextColor(Color.rgb(255, 80, 80)); visibility = View.GONE }
-        root.addView(recordingText, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply {
+        batteryText = pill(TextView(this)).apply { visibility = View.GONE }
+        val topRight = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.END
+            addView(recordingText, LinearLayout.LayoutParams(-2, -2).apply { setMargins(0, 0, 0, dp(8)) })
+            addView(batteryText, LinearLayout.LayoutParams(-2, -2))
+        }
+        root.addView(topRight, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply {
             setMargins(0, dp(16), dp(16), 0)
         })
         uploadText = pill(TextView(this)).apply { visibility = View.GONE }

@@ -44,6 +44,8 @@ class ServerLink(private val settings: Settings) {
     var onLiveQuality: (Int, Int) -> Unit = { _, _ -> }
     /** framing from the server: zoom and pan. */
     var onFraming: (Framing) -> Unit = {}
+    /** The server's battery_estimate: minutes left (null: charging, or not learned yet). */
+    var onBatteryEstimate: (Int?) -> Unit = {}
     var statusProvider: () -> JSONObject = { JSONObject() }
     var nowNs: () -> Long = { System.nanoTime() }
     var onNeedKeyframe: () -> Unit = {}
@@ -187,6 +189,7 @@ class ServerLink(private val settings: Settings) {
             }
             "request_keyframe" -> onNeedKeyframe()
             "live_quality" -> onLiveQuality(msg.optInt("max_width"), msg.optInt("bitrate"))
+            "battery_estimate" -> onBatteryEstimate(if (msg.isNull("minutes_left")) null else msg.optInt("minutes_left"))
             "framing" -> onFraming(Framing(msg.optDouble("zoom", 1.0), msg.optDouble("x", 0.5), msg.optDouble("y", 0.5)))
             else -> onCommand(msg)
         }

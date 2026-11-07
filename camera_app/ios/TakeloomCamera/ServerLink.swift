@@ -46,6 +46,9 @@ final class ServerLink {
     var onLiveQuality: ((Int, Int) -> Void)?
     /// framing from the server: zoom and pan.
     var onFraming: ((Framing) -> Void)?
+    /// battery_estimate from the server: minutes left (nil: charging, or
+    /// not learned yet — takeloom/phone_camera/battery.py).
+    var onBatteryEstimate: ((Int?) -> Void)?
 
     private var connection: FramedConnection?
     private var host = ""
@@ -190,6 +193,8 @@ final class ServerLink {
             }
         case "request_keyframe":
             onNeedKeyframe?()
+        case "battery_estimate":
+            onBatteryEstimate?((message["minutes_left"] as? NSNumber)?.intValue)
         case "framing":
             if let zoom = (message["zoom"] as? NSNumber)?.doubleValue,
                let x = (message["x"] as? NSNumber)?.doubleValue, let y = (message["y"] as? NSNumber)?.doubleValue {

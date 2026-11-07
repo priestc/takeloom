@@ -25,6 +25,10 @@ final class AppModel: ObservableObject {
     @Published var lenses: [Double] = []
     @Published var currentLens: Double = 1
     @Published var guide = false
+    /// Battery (0...1, nil: unknown), charging, and the server's estimate.
+    @Published var batteryLevel: Float?
+    @Published var charging = false
+    @Published var batteryMinutesLeft: Int?
 
     nonisolated let pipeline = CameraPipeline()
     private let link = ServerLink()
@@ -38,6 +42,9 @@ final class AppModel: ObservableObject {
         link.onNeedKeyframe = { [pipeline] in pipeline.requestKeyframe() }
         link.onLiveQuality = { [pipeline] width, bitrate in pipeline.setLiveQuality(maxWidth: width, bitrate: bitrate) }
         link.onFraming = { [pipeline] framing in pipeline.setFraming(framing) }
+        link.onBatteryEstimate = { [weak self] minutes in
+            Task { @MainActor in self?.batteryMinutesLeft = minutes }
+        }
         link.statusProvider = { [weak self] in self?.statusFields() ?? [:] }
         link.onState = { [weak self] state in
             Task { @MainActor in
@@ -70,6 +77,12 @@ final class AppModel: ObservableObject {
         if steps != lenses { lenses = steps }
         if current != currentLens { currentLens = current }
         if pipeline.guide != guide { guide = pipeline.guide }
+        let level = UIDevice.current.batteryLevel
+        let newLevel: Float? = level >= 0 ? level : nil
+        if newLevel != batteryLevel { batteryLevel = newLevel }
+        let state = UIDevice.current.batteryState
+        let isCharging = state == .charging || state == .full
+        if isCharging != charging { charging = isCharging }
     }
 
     func toggleGuide() {

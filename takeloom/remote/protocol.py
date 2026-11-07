@@ -73,6 +73,8 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
     if op == "set_program_camera":
         backend.set_program_camera(args["camera"])
         return {}
+    if op == "camera_batteries":
+        return {"batteries": backend.camera_batteries()}
     if op == "get_camera_framing":
         return backend.get_camera_framing(args["camera"])
     if op == "set_camera_framing":

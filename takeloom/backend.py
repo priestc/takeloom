@@ -1047,6 +1047,14 @@ class Backend(ABC):
         ...
 
     @abstractmethod
+    def camera_batteries(self) -> dict[str, dict]:
+        """Every connected Takeloom Camera phone's battery, by camera device:
+        phone_camera/battery.py's summary() — {"level", "charging",
+        "minutes_left", "full_hours"}. Changes are announced with
+        "camera_battery_changed" ({"camera", ...the same})."""
+        ...
+
+    @abstractmethod
     def camera_versions(self) -> dict[str, dict]:
         """camera_device -> {"version", "latest", "outdated"} for each
         connected Takeloom Camera phone: the app version it's running, the
@@ -1942,6 +1950,12 @@ class LocalBackend(Backend):
         self._phone_full_previews: dict = {}
         self._phone_full_previews_lock = threading.Lock()
         self._framing_lock = threading.Lock()
+        # Per phone (device_id): its BatteryTracker, learned drain rate, and
+        # the summary last announced (phone_camera/battery.py).
+        self._battery_lock = threading.Lock()
+        self._battery_trackers: dict = {}
+        self._battery_rates: dict[str, float] = {}
+        self._battery_shown: dict[str, dict] = {}
         # The last plan bandwidth.describe() logged; serializes re-planning.
         self._bandwidth_plan: str | None = None
         self._bandwidth_lock = threading.Lock()
@@ -2058,6 +2072,44 @@ class LocalBackend(Backend):
         result = self._framing_result(camera_device, framing, caps)
         self._emit("camera_framing_changed", result)
         return result
+
+    def _on_phone_status(self, device_id: str, status: dict) -> None:
+        """Every status a phone sends: learn its battery drain, and when what
+        it shows changes, tell video-ui and the phone itself."""
+        from .phone_camera import battery
+        raw = status.get("battery")
+        level = float(raw) if isinstance(raw, (int, float)) and 0 <= raw <= 1 else None
+        charging = bool(status.get("charging"))
+        key = DEVICE_PREFIX + device_id
+        with self._battery_lock:
+            tracker = self._battery_trackers.setdefault(device_id, battery.BatteryTracker())
+            if device_id not in self._battery_rates:
+                known = next((c for c in self.get_config().known_cameras if c.key == key), None)
+                self._battery_rates[device_id] = known.battery_drain_per_hour if known else 0.0
+            measured = tracker.update(level, charging)
+            if measured is not None:
+                rate = battery.learned(self._battery_rates[device_id], measured)
+                self._battery_rates[device_id] = rate
+                with self._framing_lock:  # the same config file
+                    config = self.get_config()
+                    known = next((c for c in config.known_cameras if c.key == key), None)
+                    if known is not None:
+                        known.battery_drain_per_hour = round(rate, 4)
+                        config.save(self._config_path)
+            info = battery.summary(level, charging, self._battery_rates[device_id])
+            if info == self._battery_shown.get(device_id):
+                return
+            self._battery_shown[device_id] = info
+        self._emit("camera_battery_changed", {"camera": key, **info})
+        if self._phone_hub is not None:
+            self._phone_hub.send(device_id, {"kind": "battery_estimate", **info})
+
+    def camera_batteries(self) -> dict[str, dict]:
+        if self._phone_hub is None:
+            return {}
+        connected = {info.device_id for info in self._phone_hub.cameras()}
+        with self._battery_lock:
+            return {DEVICE_PREFIX + d: dict(info) for d, info in self._battery_shown.items() if d in connected}
 
     def _on_phone_framing(self, device_id: str, msg: dict) -> None:
         """A lens picked on the phone's own screen: remembered and shown in
@@ -2220,6 +2272,7 @@ class LocalBackend(Backend):
             session_dir_resolver=self._local_session_dir_path,
             on_live_change=self._on_phone_status_changed,
             on_framing=self._on_phone_framing,
+            on_status=self._on_phone_status,
         )
 
     def _on_phone_cameras_changed(self) -> None:

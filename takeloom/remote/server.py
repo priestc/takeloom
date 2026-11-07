@@ -52,6 +52,7 @@ _READ_ONLY_OPS = {
     "is_recording", "get_monitoring_mode", "get_voice_switch", "poll_vault_pairing", "check_vault_server",
     "list_sessions", "get_session_detail", "analyze_take", "fetch_take_file", "fetch_backing_file", "fetch_take_video",
     "list_completed_takes", "benchmark_audio_modifiers", "get_song_mix", "get_camera_framing",
+    "camera_batteries",
 }
 # Not read-only, but sent many times a second (dragging a camera's framing
 # in video-ui), so not logged either.
