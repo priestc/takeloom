@@ -42,11 +42,13 @@ data class FinishedRecording(
  * Camera2 capture into two hardware H.264 encodes: the recording's (full
  * quality, into [Mp4Recorder] during a session, which adds the mic) and the
  * live feed's ([onEncodedFrame], up to 720p, at the bitrate the server's
- * Wi-Fi budget gives this phone — [setLiveQuality]). The live encoder's size
- * is fixed while the camera runs: changing it means a new capture session,
- * which would put a gap in a recording. A camera that can't feed a third
- * surface gets the old single encode, shared by both ([liveAdaptive] false:
- * the server then counts this phone's whole recording bitrate).
+ * Wi-Fi budget gives this phone — [setLiveQuality]). The camera itself only
+ * feeds the on-screen preview and a [FrameRotator], which draws every frame
+ * into both encoders, turned 180° when the phone is mounted the other way
+ * up ([setUpsideDown]). The live encoder's size is fixed while the camera
+ * runs. If the live encoder can't start, the recording's encode is shared by
+ * both ([liveAdaptive] false: the server then counts this phone's whole
+ * recording bitrate).
  *
  * Every timestamp here is on the camera's sensor clock — either boot time or
  * monotonic, depending on the device (SENSOR_INFO_TIMESTAMP_SOURCE). [nowNs]
@@ -68,6 +70,12 @@ class CameraEngine(context: Context) {
     private var liveEncoder: MediaCodec? = null
     private var liveSurface: Surface? = null
     private var previewSurface: Surface? = null
+    private var rotator: FrameRotator? = null
+    /** What the phone's orientation asks for; applied whenever not recording. */
+    @Volatile private var wantUpsideDown = false
+    /** What the encoders are actually getting (frozen during a recording). */
+    @Volatile var upsideDown = false
+        private set
     private val drainThreads = mutableListOf<Thread>()
     @Volatile private var draining = false
     @Volatile private var videoFormat: MediaFormat? = null
@@ -108,11 +116,12 @@ class CameraEngine(context: Context) {
     }
 
     /**
-     * Which landscape the activity must lock to so the sensor's frames come
-     * out upright with no rotation at all — the encoder surface gets them
-     * unrotated, and the live H.264 has nowhere to carry a rotation flag.
+     * The landscape in which the sensor's frames come out upright as they
+     * are. Held the other way round (Surface.ROTATION_180 from this one), the
+     * frames are turned 180° by the [FrameRotator] instead — see
+     * [setUpsideDown].
      */
-    fun requiredOrientation(front: Boolean): Int {
+    fun uprightOrientation(front: Boolean): Int {
         val id = cameraId(front) ?: return ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
         val sensor = manager.getCameraCharacteristics(id).get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
         val deviceDegrees = if (front) (360 - sensor) % 360 else sensor
@@ -162,6 +171,19 @@ class CameraEngine(context: Context) {
                 liveAdaptive = true
             }
         }
+        if (!liveAdaptive) {
+            liveWidth = width
+            liveHeight = height
+        }
+        val outputs = listOfNotNull(
+            Triple(encoderSurface!!, width, height),
+            liveSurface?.let { Triple(it, liveWidth, liveHeight) },
+        )
+        try {
+            rotator = FrameRotator(width, height, outputs).also { it.rotate180 = upsideDown }
+        } catch (e: Exception) {
+            return@post onError(e.message ?: "Couldn't set up the frame rotator.")
+        }
         texture.setDefaultBufferSize(width, height)
         val preview = Surface(texture)
         previewSurface = preview
@@ -195,9 +217,8 @@ class CameraEngine(context: Context) {
 
     @Suppress("DEPRECATION")
     private fun createSession(camera: CameraDevice, preview: Surface) {
-        val encoderInput = encoderSurface ?: return
-        val live = liveSurface
-        val targets = listOfNotNull(preview, encoderInput, live)
+        val encoderInput = rotator?.inputSurface ?: return
+        val targets = listOf(preview, encoderInput)
         camera.createCaptureSession(targets, object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(s: CameraCaptureSession) {
                 session = s
@@ -211,15 +232,7 @@ class CameraEngine(context: Context) {
             }
 
             override fun onConfigureFailed(s: CameraCaptureSession) {
-                if (live != null) {
-                    // No third stream on this camera: one encode for both.
-                    stopLiveEncoder()
-                    liveWidth = width
-                    liveHeight = height
-                    createSession(camera, preview)
-                } else {
-                    onError("Couldn't configure the camera at ${width}x$height.")
-                }
+                onError("Couldn't configure the camera at ${width}x$height.")
             }
         }, handler)
     }
@@ -329,7 +342,10 @@ class CameraEngine(context: Context) {
         val s = session ?: return
         val r = request ?: return
         val caps = zoomCaps ?: return
-        val (ratio, crop) = caps.plan(framing)
+        // The server's x/y are in the picture as it sees it; with the
+        // frames turned 180°, that's the opposite side of the sensor.
+        val f = if (upsideDown) framing.copy(x = 1 - framing.x, y = 1 - framing.y) else framing
+        val (ratio, crop) = caps.plan(f)
         if (ratio != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             r.set(CaptureRequest.CONTROL_ZOOM_RATIO, ratio)
         }
@@ -346,6 +362,26 @@ class CameraEngine(context: Context) {
         }
     }
 
+    /**
+     * The phone is held the other way up from [uprightOrientation] (camera
+     * bump at the bottom): turn the encoded frames 180°. Never mid-recording
+     * (the iOS app freezes rotation the same way): a recording's frames all
+     * keep the orientation it started with, and a change made meanwhile is
+     * applied once it stops.
+     */
+    fun setUpsideDown(value: Boolean) = handler.post {
+        wantUpsideDown = value
+        applyUpsideDown()
+    }
+
+    private fun applyUpsideDown() {
+        if (recorder != null || upsideDown == wantUpsideDown) return
+        upsideDown = wantUpsideDown
+        rotator?.rotate180 = upsideDown
+        applyFraming()
+        requestKeyframe()  // the live decoder gets a clean picture straight away
+    }
+
     fun stop() = handler.post { stopLocked() }
 
     private fun stopLocked() {
@@ -354,6 +390,8 @@ class CameraEngine(context: Context) {
         request = null
         runCatching { device?.close() }
         device = null
+        rotator?.release()  // before the encoder surfaces it draws into go
+        rotator = null
         draining = false
         drainThreads.forEach { it.join(500) }
         drainThreads.clear()
@@ -388,6 +426,7 @@ class CameraEngine(context: Context) {
         val r = recorder ?: return
         if (r.sessionId != sessionId) return
         recorder = null
+        handler.post { applyUpsideDown() }  // any turn made during the recording
         Thread {
             val result = runCatching {
                 r.finish()

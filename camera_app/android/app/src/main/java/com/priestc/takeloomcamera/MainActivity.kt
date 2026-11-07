@@ -12,6 +12,8 @@ import android.graphics.Matrix
 import android.graphics.RectF
 import android.graphics.SurfaceTexture
 import android.graphics.drawable.GradientDrawable
+import android.content.pm.ActivityInfo
+import android.hardware.display.DisplayManager
 import android.os.BatteryManager
 import android.os.Bundle
 import android.os.Handler
@@ -51,6 +53,15 @@ class MainActivity : Activity() {
     private var recordingSession: String? = null
     private var recordingSince = 0L
     private var uploadStatus: String? = null
+    private var lastRotation = -1
+
+    /** A turn from one landscape to the other is a 180° display change with
+     *  no configuration change, so it's only seen here. */
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) {}
+        override fun onDisplayRemoved(displayId: Int) {}
+        override fun onDisplayChanged(displayId: Int) = onRotation()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -60,9 +71,13 @@ class MainActivity : Activity() {
         engine = CameraEngine(this)
         link = ServerLink(settings)
         uploader = Uploader(store, settings)
-        requestedOrientation = engine.requiredOrientation(settings.useFrontCamera)
+        // Either landscape: the mount holds the phone with the camera bump
+        // at the top or the bottom, and the frames are turned to match.
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         buildUi()
         wire()
+        getSystemService(DisplayManager::class.java).registerDisplayListener(displayListener, main)
+        onRotation()
 
         val needed = arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
             .filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
@@ -140,7 +155,22 @@ class MainActivity : Activity() {
         link.connect(host)
     }
 
+    /** Which landscape the phone is in now: re-fit the preview, and tell the
+     *  engine whether the sensor's frames need turning 180° to be upright. */
+    private fun onRotation() {
+        @Suppress("DEPRECATION")
+        val rotation = windowManager.defaultDisplay.rotation
+        if (rotation == lastRotation) return
+        lastRotation = rotation
+        val uprightRotation =
+            if (engine.uprightOrientation(settings.useFrontCamera) == ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE)
+                Surface.ROTATION_270 else Surface.ROTATION_90
+        engine.setUpsideDown(rotation != uprightRotation)
+        configureTransform(engine.width, engine.height)
+    }
+
     override fun onDestroy() {
+        getSystemService(DisplayManager::class.java).unregisterDisplayListener(displayListener)
         engine.stop()
         link.disconnect()
         super.onDestroy()
@@ -477,9 +507,9 @@ class MainActivity : Activity() {
                 if (!recording && (wantFront != settings.useFrontCamera || wantQuality != settings.quality)) {
                     settings.useFrontCamera = wantFront
                     settings.quality = wantQuality
-                    // The activity's landscape lock depends on the camera
-                    // (see CameraEngine.requiredOrientation); recreating it
-                    // reopens the camera with the new settings.
+                    // Which landscape is upright depends on the camera
+                    // (see CameraEngine.uprightOrientation); recreating the
+                    // activity reopens the camera with the new settings.
                     engine.stop()
                     recreate()
                     return@setPositiveButton
