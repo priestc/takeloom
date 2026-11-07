@@ -5804,7 +5804,9 @@ class LocalBackend(Backend):
                     # same already-flowing audio rather than trying to
                     # keep the (now-closed) scan streams alive artificially.
                     monitor = self._active_monitor
-                    if monitor is not None and inst is not None:
+                    # No tuner for a MIDI instrument: always in tune (and
+                    # its session starts at once — recording_driver.py).
+                    if monitor is not None and inst is not None and not inst.is_midi:
                         self._attach_tuner_sink(monitor.engine, inst.input_label, effective_tuning(inst))
                 from .audio.synth import DEFAULT_SYNTH_VOICE
                 self._emit("auto_detect_status", {

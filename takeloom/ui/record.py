@@ -1091,6 +1091,11 @@ class RecordFrame(ttk.Frame):
                 self.synth_voice_row.grid_remove()
             if self._identify_state == "identifying":
                 self._identify_state = "ready"
+                if self._detected_is_midi:
+                    # "ready" is for tuning, and a keyboard is always in
+                    # tune: straight into the session, as if Play had been
+                    # pressed (after this handler, once the UI's caught up).
+                    self.after(0, self._confirm_start)
                 # Every channel's stream just got torn down (see Backend.
                 # start_auto_detect_instrument), so no more tuner_status
                 # events are coming until the next scan — but deliberately

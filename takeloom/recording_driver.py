@@ -25,6 +25,8 @@ identify cycle first — Start Local/Start Streaming kicks off an auto-detect
 scan (identify_state "identifying"), and only once it commits to an
 instrument (identify_state "ready") does Play actually call Backend.start_
 recording() — see _begin_identify/_redo_identify/_confirm_start below.
+"ready" is the time to tune, so a MIDI instrument skips it: a keyboard is
+always in tune, and its session opens the moment it's detected.
 Every other key here just forwards straight to the backend.
 
 Both hooks — and `log()` — may be called from a background thread (the
@@ -439,6 +441,14 @@ class RecordingDeckDriver:
         self._backend.stop_auto_detect_instrument()
         self._backend.start_auto_detect_instrument()
 
+    def _auto_start(self) -> None:
+        """A MIDI instrument's session, started without the tuning stage."""
+        try:
+            self.streamdeck.notify("Keyboard detected — starting…")
+            self._confirm_start()
+        except Exception as e:  # noqa: BLE001 — as handle_key: "ready" stays, Play can retry
+            self._log(f"StreamDeck: couldn't start the session: {e}")
+
     def _confirm_start(self) -> None:
         """Play, pressed once auto-detect has committed to an instrument —
         the moment the identify cycle actually ends and a session opens.
@@ -584,6 +594,11 @@ class RecordingDeckDriver:
                 self._log(f"StreamDeck: detected '{full_name}' ({label or 'no label'}).")
                 if self.identify_state == "identifying":
                     self.identify_state = "ready"
+                    if data.get("is_midi"):
+                        # Nothing to tune on a keyboard: straight into the
+                        # session, off this event thread (start_recording
+                        # can take a while), as if Play had been pressed.
+                        threading.Thread(target=self._auto_start, name="midi-autostart", daemon=True).start()
                     # Every channel's stream just got torn down (see
                     # Backend.start_auto_detect_instrument), so no more
                     # tuner_status events are coming until the next scan —
