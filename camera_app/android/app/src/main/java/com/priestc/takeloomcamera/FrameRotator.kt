@@ -46,7 +46,6 @@ class FrameRotator(width: Int, height: Int, outputs: List<Triple<Surface, Int, I
     private lateinit var surfaceTexture: SurfaceTexture
     lateinit var inputSurface: Surface
         private set
-    private val texMatrix = FloatArray(16)
     @Volatile private var released = false
 
     private class Target(val egl: EGLSurface, val width: Int, val height: Int)
@@ -119,7 +118,11 @@ class FrameRotator(width: Int, height: Int, outputs: List<Triple<Surface, Int, I
         if (released) return
         EGL14.eglMakeCurrent(display, pbuffer, pbuffer, context)
         surfaceTexture.updateTexImage()
-        surfaceTexture.getTransformMatrix(texMatrix)
+        // Not surfaceTexture.getTransformMatrix(): for a SurfaceTexture the
+        // camera adds a turn by the sensor orientation (so a preview comes
+        // out upright in the phone's natural portrait), which would put the
+        // video 90° off. The encoders always got the sensor's frames as
+        // they are, so all that's needed is GL's bottom-up rows flipped.
         val timestampNs = surfaceTexture.timestamp
         val coords = if (rotate180) ROTATED_COORDS else UPRIGHT_COORDS
         for (t in targets) {
@@ -128,7 +131,7 @@ class FrameRotator(width: Int, height: Int, outputs: List<Triple<Surface, Int, I
             GLES20.glUseProgram(program)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texture)
-            GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(program, "uTexMatrix"), 1, false, texMatrix, 0)
+            GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(program, "uTexMatrix"), 1, false, FLIP_ROWS, 0)
             val pos = GLES20.glGetAttribLocation(program, "aPos")
             val tex = GLES20.glGetAttribLocation(program, "aTex")
             GLES20.glEnableVertexAttribArray(pos)
@@ -213,11 +216,13 @@ class FrameRotator(width: Int, height: Int, outputs: List<Triple<Surface, Int, I
                 position(0)
             }
 
+        /** t -> 1 - t (column-major): the buffer's first row at the top. */
+        val FLIP_ROWS = floatArrayOf(1f, 0f, 0f, 0f, 0f, -1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 1f, 0f, 1f)
+
         // Full-screen triangle strip: bottom-left, bottom-right, top-left, top-right.
         val QUAD = floats(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
         val UPRIGHT_COORDS = floats(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
-        // The same corners, 180° round: (s, t) -> (1 - s, 1 - t). A half turn
-        // commutes with whatever flip/rotation SurfaceTexture's matrix holds.
+        // The same corners, 180° round: (s, t) -> (1 - s, 1 - t).
         val ROTATED_COORDS = floats(1f, 1f, 0f, 1f, 1f, 0f, 0f, 0f)
     }
 }
