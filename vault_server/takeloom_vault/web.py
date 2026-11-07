@@ -201,7 +201,88 @@ def sessions_page(vault: Vault, logs: dict[str, dict], pending: list[PairingRequ
     return page("Sessions", refresh + _pairing_banner(pending) + f"<h1>Sessions <span class='muted small'>{len(rows)}</span></h1>" + table)
 
 
-def session_page(vault: Vault, name: str, data: dict) -> str:
+_EDIT_COLORS = ["#2a6db0", "#d0702a", "#2e9d4f", "#9b4fc4", "#c4a72a", "#c44f6d"]
+
+
+def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor) -> str:
+    """The timeline editor (edit.py renders its plan): a main camera, the
+    others cut in every so often, a clickable strip to change any stretch,
+    and Render. The audio is always the main camera's, unbroken."""
+    import json as _json
+    directory_plan = None
+    try:
+        directory_plan = _json.loads((Path(editor.vault.session_dir(name)) / "edit.json").read_text())
+    except (OSError, ValueError):
+        pass
+    status = editor.status(name)
+    titles = [title for title, _file, _label in videos]
+    urls = [_media_url(f"{rel}/{file}") for _title, file, _label in videos]
+    options = "".join(f"<option value='{i}'>{escape(t)}</option>" for i, t in enumerate(titles))
+    legend = " ".join(
+        f"<span class='pill' style='background:{_EDIT_COLORS[i % len(_EDIT_COLORS)]};color:#fff'>{escape(t)}</span>"
+        for i, t in enumerate(titles)
+    )
+    final = (f"<p id='ed-final'>Final video: <a href='{_media_url(rel + '/edit.mp4')}'>edit.mp4</a></p>"
+             if status.get("state") == "done" else "<p id='ed-final'></p>")
+    config = _json.dumps({
+        "session": name, "titles": titles, "urls": urls, "colors": _EDIT_COLORS, "plan": directory_plan,
+        "status": status, "available": editor.available, "final": _media_url(rel + "/edit.mp4"),
+    }).replace("</", "<\\/")
+    return (
+        "<h2>Edit</h2>"
+        "<p class='muted small'>One final video from all the cameras: the main camera most of the time, the "
+        "others cut in now and then. The sound is the main camera's, unbroken. Click a stretch of the "
+        "timeline to switch it to the next camera (the player shows it), then Render.</p>"
+        f"<p>Main camera <select id='ed-main'>{options}</select> · cut to the others every "
+        "<input id='ed-every' type='number' min='5' value='30' style='width:4em'> s for "
+        "<input id='ed-len' type='number' min='1' value='5' style='width:3em'> s "
+        "<button onclick='edFill()'>Fill timeline</button></p>"
+        "<div id='ed-bar' style='display:flex;height:34px;border-radius:6px;overflow:hidden;"
+        "border:1px solid var(--line);cursor:pointer'></div>"
+        f"<p class='small'>{legend}</p>"
+        "<p><button class='ok' id='ed-render' onclick='edRender()'>Render final video</button> "
+        "<span id='ed-status' class='muted'></span></p>"
+        + final +
+        f"<script>var ED={config};</script>"
+        "<script>"
+        "var edCuts=[];"
+        "function edDur(){return document.getElementById('v').duration||0;}"
+        "function edFmt(t){t=Math.round(t);return Math.floor(t/60)+':'+String(t%60).padStart(2,'0');}"
+        "function edFill(){var p=+document.getElementById('ed-main').value,ev=+document.getElementById('ed-every').value,"
+        "len=+document.getElementById('ed-len').value,d=edDur(),o=[],k=0;"
+        "for(var i=0;i<ED.titles.length;i++)if(i!=p)o.push(i);edCuts=[[0,p]];"
+        "if(o.length&&ev>=5&&len>0)for(var t=ev;t+len<d-5;t+=ev){edCuts.push([t,o[k++%o.length]]);edCuts.push([t+len,p]);}"
+        "edDraw();}"
+        "function edDraw(){var b=document.getElementById('ed-bar'),d=edDur();b.innerHTML='';if(!d)return;"
+        "edCuts.forEach(function(c,i){var e=i+1<edCuts.length?edCuts[i+1][0]:d,s=document.createElement('div');"
+        "s.style.flex=(e-c[0])+' 0 0';s.style.background=ED.colors[c[1]%ED.colors.length];"
+        "s.style.borderRight='1px solid rgba(255,255,255,.6)';"
+        "s.title=ED.titles[c[1]]+'  '+edFmt(c[0])+'–'+edFmt(e);"
+        "s.onclick=function(){c[1]=(c[1]+1)%ED.titles.length;edDraw();edShow(c[0],c[1]);};b.appendChild(s);});}"
+        "function edShow(t,cam){var v=document.getElementById('v');var go=function(){v.currentTime=t;v.play();};"
+        "if(v.getAttribute('src')!=ED.urls[cam]){v.src=ED.urls[cam];v.addEventListener('loadedmetadata',function f(){"
+        "v.removeEventListener('loadedmetadata',f);go();});}else go();"
+        "document.querySelectorAll('button.cam').forEach(function(x,i){x.classList.toggle('on',i==cam);});}"
+        "function edState(s){var el=document.getElementById('ed-status'),btn=document.getElementById('ed-render');"
+        "btn.disabled=!ED.available||s.state=='queued'||s.state=='rendering';"
+        "el.textContent=!ED.available?'This vault can\\'t render (it needs ffmpeg with libx264).':"
+        "s.state=='queued'?'Waiting to render…':s.state=='rendering'?'Rendering… '+Math.round(100*(s.progress||0))+'%':"
+        "s.state=='failed'?'Render failed: '+(s.error||''):s.state=='done'?'Rendered.':'';"
+        "if(s.state=='done')document.getElementById('ed-final').innerHTML='Final video: <a href=\"'+ED.final+'?'+Date.now()+'\">edit.mp4</a>';"
+        "if(s.state=='queued'||s.state=='rendering')setTimeout(edPoll,2000);}"
+        "function edPoll(){fetch('/sessions/'+encodeURIComponent(ED.session)+'/edit-status').then(function(r){return r.json();}).then(edState);}"
+        "function edRender(){fetch('/sessions/'+encodeURIComponent(ED.session)+'/edit',{method:'POST',"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({primary:+document.getElementById('ed-main').value,cuts:edCuts})})"
+        ".then(function(r){return r.json();}).then(edState);}"
+        "(function(){var v=document.getElementById('v');function init(){"
+        "if(ED.plan){document.getElementById('ed-main').value=ED.plan.primary;edCuts=ED.plan.cuts;edDraw();}else edFill();}"
+        "if(v.readyState>=1)init();else v.addEventListener('loadedmetadata',function f(){v.removeEventListener('loadedmetadata',f);init();});"
+        "document.getElementById('ed-main').onchange=edFill;edState(ED.status);})();"
+        "</script>"
+    )
+
+
+def session_page(vault: Vault, name: str, data: dict, editor=None) -> str:
     directory = vault.session_dir(name)
     rel = f"sessions/{name}"
     events = data.get("events") or []
@@ -230,6 +311,8 @@ def session_page(vault: Vault, name: str, data: dict) -> str:
             )
             parts.append(f"<p>{buttons}</p>")
         parts.append(f"<video id='v' controls preload='metadata' src='{_media_url(rel + '/' + videos[0][1])}'></video>")
+        if editor is not None and len(videos) > 1:
+            parts.append(_edit_editor(name, rel, videos, editor))
     elif (directory / "render_jobs.json").exists():
         parts.append(
             "<p class='banner'>This session's videos are being encoded on this machine "

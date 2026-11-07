@@ -71,6 +71,17 @@ Takes recorded before this have their own `.mp4`. Running `takeloom vault migrat
 on the studio machine records the refs for them, and adding `--delete` removes those `.mp4`
 duplicates.
 
+## Editing a session into one video
+
+A session page with more than one camera has an **Edit** section: pick the main camera and how
+often the others cut in (every N seconds, for M seconds), and it fills in a timeline strip, one
+colour per camera. Click any stretch to switch it to the next camera; the player above jumps
+there showing that camera. **Render final video** saves the plan (`edit.json` in the session's
+folder) and makes `edit.mp4` in the background: each stretch of picture from its camera, cut
+frame-accurately, and the sound unbroken from the main camera from start to finish, so a cut
+never breaks the audio. Rendering needs the same ffmpeg (with `libx264`) as encoding below; it
+takes about as long as encoding one camera's session video. See `takeloom_vault/edit.py`.
+
 ## Encoding session videos here
 
 Encoding a session's videos (every camera's whole-session video, re-encoded to burn in its

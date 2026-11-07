@@ -46,6 +46,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import web
 from .auth import Auth
+from .edit import EditRenderer
 from .render import Renderer
 from .store import Vault, VaultPathError
 from .takes import TakeVideoCache, TakeVideoError
@@ -94,11 +95,13 @@ class _HTTPError(Exception):
 class VaultHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, vault: Vault, auth: Auth, take_videos: TakeVideoCache, renderer: Renderer) -> None:
+    def __init__(self, address, vault: Vault, auth: Auth, take_videos: TakeVideoCache, renderer: Renderer,
+                 editor: EditRenderer) -> None:
         self.vault = vault
         self.auth = auth
         self.take_videos = take_videos
         self.renderer = renderer
+        self.editor = editor
         super().__init__(address, _Handler)
 
 
@@ -232,6 +235,17 @@ class _Handler(BaseHTTPRequestHandler):
                 if req is not None:
                     log(f"Pairing for {req.client_name} ({req.ip}) {req.status} via web UI from {self.ip}")
                 return self._redirect("/")
+            if m := re.fullmatch(r"/sessions/([^/]+)/edit", path):
+                # The timeline editor's plan: saved, and rendered to edit.mp4
+                # in the background (edit.py).
+                if vault.read_session_log(m.group(1)) is None:
+                    raise _HTTPError(HTTPStatus.NOT_FOUND, f"No session named {m.group(1)!r}")
+                try:
+                    status = self.server.editor.save_and_render(m.group(1), self._read_json())
+                except ValueError as e:
+                    return self._json({"state": "failed", "error": str(e)}, HTTPStatus.BAD_REQUEST)
+                log(f"Edit of {m.group(1)} saved from {self.ip}; rendering")
+                return self._json(status)
             if m := re.fullmatch(r"/clients/(\w+)/revoke", path):
                 if auth.revoke(m.group(1)):
                     log(f"Paired client {m.group(1)} revoked via web UI from {self.ip}")
@@ -243,11 +257,13 @@ class _Handler(BaseHTTPRequestHandler):
             return self._html(web.sessions_page(vault, vault.all_session_logs(), auth.pending_requests()))
         if path == "/clients":
             return self._html(web.clients_page(list(auth.clients), auth.pending_requests()))
+        if m := re.fullmatch(r"/sessions/([^/]+)/edit-status", path):
+            return self._json(self.server.editor.status(m.group(1)))
         if m := re.fullmatch(r"/sessions/([^/]+)", path):
             data = vault.read_session_log(m.group(1))
             if data is None:
                 raise _HTTPError(HTTPStatus.NOT_FOUND, f"No session named {m.group(1)!r}")
-            return self._html(web.session_page(vault, m.group(1), data))
+            return self._html(web.session_page(vault, m.group(1), data, self.server.editor))
         if path.startswith("/media/"):
             return self._send_file(vault.resolve(path[len("/media/"):]))
         if m := re.fullmatch(r"/takes/([^/]+)/video", path):
@@ -373,7 +389,8 @@ def serve(vault: Vault, auth: Auth, take_videos: TakeVideoCache, host: str, port
     take_videos.start_sweeper()
     renderer = Renderer(vault, log)
     renderer.start()
-    httpd = VaultHTTPServer((host, port), vault, auth, take_videos, renderer)
+    editor = EditRenderer(vault, log, renderer.available)
+    httpd = VaultHTTPServer((host, port), vault, auth, take_videos, renderer, editor)
     log(f"takeloom-vault serving {vault.root} on http://{socket.gethostname()}:{port} (pid {os.getpid()})")
     try:
         httpd.serve_forever()

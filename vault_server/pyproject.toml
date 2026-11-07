@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "takeloom-vault"
-version = "0.3.1"
+version = "0.4.0"
 description = "Takeloom Studio Vault server: stores recorded sessions and serves a web browser/player for them"
 requires-python = ">=3.9"
 # Deliberately stdlib-only: this runs headless on the storage box (tank2),
