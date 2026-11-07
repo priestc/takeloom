@@ -79,7 +79,10 @@ the others are cut in every N seconds for M seconds, shared by priority (with th
 3 : 2 : 1, interleaved evenly), so the lowest is cut to least. The cuts are worked out here on
 the vault (`edit.auto_cuts`), which asks `edit.usable` whether a camera is worth cutting to for
 each stretch: always, for now, and the place to plug in a check that the performer is in
-frame. The page shows them as a timeline strip, one colour per camera. Click any stretch to switch it to the next camera; the player above jumps
+frame. The page shows them as a timeline strip, one colour per camera. The player above previews the
+result: every camera's video plays together, in step, and with **Preview edit** on it cuts
+between them as the timeline says, with the priority-1 camera's sound, just as the render will
+(a camera's button turns preview off and holds that camera). Click any stretch to switch it to the next camera; the player above jumps
 there showing that camera. **Render final video** saves the plan (`edit.json` in the session's
 folder) and makes `edit.mp4` in the background: each stretch of picture from its camera, cut
 frame-accurately, and the sound unbroken from the main camera from start to finish, so a cut

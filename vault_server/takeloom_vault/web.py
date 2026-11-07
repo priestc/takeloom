@@ -204,6 +204,65 @@ def sessions_page(vault: Vault, logs: dict[str, dict], pending: list[PairingRequ
 _EDIT_COLORS = ["#2a6db0", "#d0702a", "#2e9d4f", "#9b4fc4", "#c4a72a", "#c44f6d"]
 
 
+def _stage_player(rel: str, videos: list[tuple[str, str, str]], shifts: list[float]) -> str:
+    """Every camera's video stacked and played together, in step, showing
+    one at a time: the one the editor's timeline says (Preview edit: the
+    final video as it'll render, cutting as it plays), or the one picked
+    with its button. Only the priority-1 camera's sound plays, as in the
+    render. Its own controls, since a video's built-in ones can't sit over
+    the others. Others drifting more than 0.2 s are pulled back into step.
+    `shifts`: each video's sync shift (edit.time_shift), so session time T
+    is T + shift in that file. Exposes STAGE for the editor."""
+    import json as _json
+    buttons = "".join(
+        f"<button class='cam{' on' if i == 0 else ''}' onclick='STAGE.manual({i})'>{escape(title)}</button>"
+        for i, (title, _file, _label) in enumerate(videos)
+    )
+    angles = "".join(
+        f"<video src='{_media_url(rel + '/' + file)}' preload='auto' playsinline muted "
+        f"style='position:absolute;inset:0;width:100%;height:100%;object-fit:contain;opacity:{1 if i == 0 else 0}'></video>"
+        for i, (_title, file, _label) in enumerate(videos)
+    )
+    return (
+        f"<p>{buttons}</p>"
+        f"<div id='stage' style='position:relative;width:100%;aspect-ratio:16/9;background:#000;border-radius:6px;overflow:hidden'>{angles}</div>"
+        "<div style='display:flex;gap:.6em;align-items:center;margin:.4em 0'>"
+        "<button id='st-play' onclick='STAGE.toggle()' style='min-width:3em'>▶</button>"
+        "<input id='st-seek' type='range' min='0' max='1000' value='0' style='flex:1'>"
+        "<span id='st-time' class='small muted'>0:00</span>"
+        "<label class='small'><input id='st-follow' type='checkbox' checked> Preview edit</label></div>"
+        f"<script>var STAGE=(function(SH){{"
+        "var V=[].slice.call(document.querySelectorAll('#stage video')),master=0,shown=0,manual=0,camAt=null,playing=false,drag=false;"
+        "var seekEl=document.getElementById('st-seek'),follow=document.getElementById('st-follow');"
+        "function fmt(t){t=Math.max(0,Math.round(t));return Math.floor(t/60)+':'+String(t%60).padStart(2,'0');}"
+        "function now(){return V[master].currentTime-SH[master];}"
+        "function dur(){return Math.max(0,(V[master].duration||0)-SH[master]);}"
+        "function show(i){if(i===shown)return;V[shown].style.opacity=0;V[i].style.opacity=1;shown=i;"
+        "document.querySelectorAll('button.cam').forEach(function(b,j){b.classList.toggle('on',j===i);});}"
+        "function setMaster(i){master=i;V.forEach(function(v,j){v.muted=j!==i;});}"
+        "function align(){var T=now();V.forEach(function(v,j){if(j===master)return;var w=T+SH[j];"
+        "if(Math.abs(v.currentTime-w)>0.2)v.currentTime=Math.max(0,w);if(playing&&v.paused)v.play().catch(function(){});});}"
+        "function seek(T){V.forEach(function(v,j){v.currentTime=Math.max(0,T+SH[j]);});}"
+        "function play(){playing=true;document.getElementById('st-play').textContent='❚❚';"
+        "V[master].play().catch(function(){});align();}"
+        "function pause(){playing=false;document.getElementById('st-play').textContent='▶';V.forEach(function(v){v.pause();});}"
+        "function frame(){var T=now();show(follow.checked&&camAt?camAt(T):manual);"
+        "if(!drag&&dur())seekEl.value=Math.round(1000*T/dur());"
+        "document.getElementById('st-time').textContent=fmt(T)+' / '+fmt(dur());if(playing)align();requestAnimationFrame(frame);}"
+        "seekEl.addEventListener('input',function(){drag=true;seek(seekEl.value/1000*dur());});"
+        "seekEl.addEventListener('change',function(){drag=false;});"
+        "V.forEach(function(v){v.addEventListener('ended',function(){if(v===V[master])pause();});});"
+        "setMaster(0);requestAnimationFrame(frame);"
+        "return{duration:dur,seek:seek,play:play,pause:pause,toggle:function(){playing?pause():play();},"
+        "setMaster:setMaster,setCamAt:function(f){camAt=f;},"
+        "manual:function(i){follow.checked=false;manual=i;show(i);},"
+        "following:function(){return follow.checked;},"
+        "ready:function(cb){var m=V[0];if(m.readyState>=1)cb();else m.addEventListener('loadedmetadata',function f(){m.removeEventListener('loadedmetadata',f);cb();});},"
+        "element:function(){return document.getElementById('stage');}};"
+        f"}})({_json.dumps(shifts)});</script>"
+    )
+
+
 def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor) -> str:
     """The timeline editor (edit.py renders its plan): a camera priority
     (the first is the main camera and the sound; the lower, the less it's
@@ -242,7 +301,9 @@ def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor
         f"<script>var ED={config};</script>"
         "<script>"
         "var edCuts=[],edPri=[];"
-        "function edDur(){return document.getElementById('v').duration||0;}"
+        "function edDur(){return STAGE.duration();}"
+        "function edCamAt(T){var c=edCuts,lo=0,hi=c.length-1;if(!c.length)return edPri[0]||0;"
+        "while(lo<hi){var m=(lo+hi+1)>>1;if(c[m][0]<=T)lo=m;else hi=m-1;}return c[lo][1];}"
         "function edFmt(t){t=Math.round(t);return Math.floor(t/60)+':'+String(t%60).padStart(2,'0');}"
         "function edSwatch(c){return \"<span class='pill' style='background:\"+ED.colors[c%ED.colors.length]+\";color:#fff'>\"+"
         "ED.titles[c].replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</span>';}"
@@ -250,7 +311,8 @@ def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor
         "edPri.forEach(function(c,i){var r=t.insertRow();r.insertCell().textContent=(i+1)+(i==0?' (main, sound)':'');"
         "r.insertCell().innerHTML=edSwatch(c);var m=r.insertCell();"
         "[['▲',-1],['▼',1]].forEach(function(b){var j=i+b[1];if(j<0||j>=edPri.length)return;var x=document.createElement('button');"
-        "x.textContent=b[0];x.onclick=function(){var s=edPri[i];edPri[i]=edPri[j];edPri[j]=s;edList();edFill();};m.appendChild(x);});});}"
+        "x.textContent=b[0];x.onclick=function(){var s=edPri[i];edPri[i]=edPri[j];edPri[j]=s;edList();edFill();};m.appendChild(x);});});"
+        "STAGE.setMaster(edPri[0]);}"
         "function edFill(){var q='priority='+edPri.join(',')+'&every='+document.getElementById('ed-every').value+"
         "'&len='+document.getElementById('ed-len').value;document.getElementById('ed-fill').textContent='…';"
         "fetch('/sessions/'+encodeURIComponent(ED.session)+'/edit-fill?'+q).then(function(r){return r.json();})"
@@ -261,10 +323,7 @@ def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor
         "s.style.borderRight='1px solid rgba(255,255,255,.6)';"
         "s.title=ED.titles[c[1]]+'  '+edFmt(c[0])+'–'+edFmt(e);"
         "s.onclick=function(){c[1]=(c[1]+1)%ED.titles.length;edDraw();edShow(c[0],c[1]);};b.appendChild(s);});}"
-        "function edShow(t,cam){var v=document.getElementById('v');var go=function(){v.currentTime=t;v.play();};"
-        "if(v.getAttribute('src')!=ED.urls[cam]){v.src=ED.urls[cam];v.addEventListener('loadedmetadata',function f(){"
-        "v.removeEventListener('loadedmetadata',f);go();});}else go();"
-        "document.querySelectorAll('button.cam').forEach(function(x,i){x.classList.toggle('on',i==cam);});}"
+        "function edShow(t,cam){STAGE.seek(t);if(!STAGE.following())STAGE.manual(cam);}"
         "function edState(s){var el=document.getElementById('ed-status'),btn=document.getElementById('ed-render');"
         "btn.disabled=!ED.available||s.state=='queued'||s.state=='rendering';"
         "el.textContent=!ED.available?'This vault can\\'t render (it needs ffmpeg with libx264).':"
@@ -276,12 +335,12 @@ def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor
         "function edRender(){fetch('/sessions/'+encodeURIComponent(ED.session)+'/edit',{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({priority:edPri,cuts:edCuts})})"
         ".then(function(r){return r.json();}).then(edState);}"
-        "(function(){var v=document.getElementById('v');"
+        "(function(){STAGE.setCamAt(edCamAt);"
         "var p=ED.plan&&(ED.plan.priority||(ED.plan.primary!=null?[ED.plan.primary]:null));"
         "edPri=ED.titles.map(function(_,i){return i;});"
         "if(p){edPri=p.concat(edPri.filter(function(i){return p.indexOf(i)<0;}));}"
         "edList();function init(){if(ED.plan&&ED.plan.cuts){edCuts=ED.plan.cuts;edDraw();}else edFill();}"
-        "if(v.readyState>=1)init();else v.addEventListener('loadedmetadata',function f(){v.removeEventListener('loadedmetadata',f);init();});"
+        "STAGE.ready(init);"
         "edState(ED.status);})();"
         "</script>"
     )
@@ -306,18 +365,15 @@ def session_page(vault: Vault, name: str, data: dict, editor=None) -> str:
     videos = session_videos(directory, data)
     has_video = bool(videos)
     if has_video:
-        if len(videos) > 1:
-            # One video element; a button per camera swaps its source and
-            # keeps the place, so switching angles doesn't lose your spot.
-            buttons = "".join(
-                f"<button class='cam{' on' if i == 0 else ''}' onclick=\"cam(this,'{_media_url(rel + '/' + file)}')\">"
-                f"{escape(title)}</button>"
-                for i, (title, file, _label) in enumerate(videos)
-            )
-            parts.append(f"<p>{buttons}</p>")
-        parts.append(f"<video id='v' controls preload='metadata' src='{_media_url(rel + '/' + videos[0][1])}'></video>")
-        if editor is not None and len(videos) > 1:
+        if len(videos) > 1 and editor is not None:
+            # Every camera playing together, cutting between them as the
+            # editor's timeline says: a preview of the final video.
+            from .edit import camera_files
+            shifts = [shift for _title, _path, shift in camera_files(directory, data)]
+            parts.append(_stage_player(rel, videos, shifts))
             parts.append(_edit_editor(name, rel, videos, editor))
+        else:
+            parts.append(f"<video id='v' controls preload='metadata' src='{_media_url(rel + '/' + videos[0][1])}'></video>")
     elif (directory / "render_jobs.json").exists():
         parts.append(
             "<p class='banner'>This session's videos are being encoded on this machine "
@@ -390,7 +446,9 @@ def session_page(vault: Vault, name: str, data: dict, editor=None) -> str:
         )
     parts.append("<h2>Files</h2><table>" + "".join(files) + "</table>")
     parts.append(
-        "<script>function seek(t){var v=document.getElementById('v');v.currentTime=t;v.play();"
+        "<script>function seek(t){if(window.STAGE){STAGE.seek(t);STAGE.play();"
+        "STAGE.element().scrollIntoView({behavior:'smooth'});return;}"
+        "var v=document.getElementById('v');v.currentTime=t;v.play();"
         "v.scrollIntoView({behavior:'smooth'});}"
         "function cam(b,u){var v=document.getElementById('v'),t=v.currentTime,p=!v.paused;"
         "document.querySelectorAll('button.cam').forEach(function(x){x.classList.remove('on')});"
