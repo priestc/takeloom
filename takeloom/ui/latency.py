@@ -154,7 +154,7 @@ class LatencyFrame(ttk.Frame):
             row += 1
         if not camera_names:
             ttk.Label(
-                self, text="No cameras found. Configure one on the Recording Devices tab first.",
+                self, text="No cameras found. Connect one first (video-ui's Settings › Cameras lists them).",
                 foreground="#b00020",
             ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
             row += 1
@@ -342,7 +342,8 @@ class LatencyFrame(ttk.Frame):
 
         def worker() -> None:
             try:
-                backend.save_config(config)
+                from ..config import LATENCY_FIELDS, copy_fields
+                backend.save_config(copy_fields(backend.get_config(), config, LATENCY_FIELDS))
                 error = None
             except BackendError as e:
                 error = str(e)

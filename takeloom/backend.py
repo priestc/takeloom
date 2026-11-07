@@ -6302,7 +6302,7 @@ class LocalBackend(Backend):
                 })
         elif config.streaming_enabled and config.youtube_stream_key:
             self._emit("streaming_status", {
-                "status": "Streaming needs a camera — set one up on the Recording Devices tab.", "active": False,
+                "status": "Streaming needs a camera — connect one (video-ui's Settings › Cameras lists them).", "active": False,
             })
 
         def stream_tee(device: str) -> dict:

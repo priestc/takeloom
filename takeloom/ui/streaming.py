@@ -76,7 +76,7 @@ class StreamingFrame(ttk.Frame):
             self,
             text="When enabled, every session streams live to YouTube for its whole duration — the "
                  "stream starts the moment Record is pressed and ends the moment the session stops. "
-                 "Requires a camera to be configured on the Recording Devices tab.",
+                 "Requires a connected camera (see Settings › Cameras).",
             foreground="#666666", wraplength=560, justify="left",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 16))
 
@@ -288,7 +288,8 @@ class StreamingFrame(ttk.Frame):
 
         def worker() -> None:
             try:
-                backend.save_config(config)
+                from ..config import STREAMING_FIELDS, copy_fields
+                backend.save_config(copy_fields(backend.get_config(), config, STREAMING_FIELDS))
             except BackendError as e:
                 self.after(0, lambda: messagebox.showerror("Save failed", str(e)))
                 return
@@ -326,7 +327,8 @@ class StreamingFrame(ttk.Frame):
 
         def worker() -> None:
             try:
-                backend.save_config(config)
+                from ..config import STREAMING_FIELDS, copy_fields
+                backend.save_config(copy_fields(backend.get_config(), config, STREAMING_FIELDS))
                 error = None
             except BackendError as e:
                 error = str(e)

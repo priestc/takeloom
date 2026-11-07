@@ -236,6 +236,30 @@ def camera_key(device_id: str, detected_name: str) -> str:
     return LOCAL_CAMERA_PREFIX + detected_name
 
 
+# The settings video-ui's Settings tab owns (camera_settings.py, streaming.py,
+# latency.py); the main window owns everything else. Each window's Save
+# starts from the config as it is now and changes only its own fields
+# (copy_fields), so the two windows, open side by side, never undo each
+# other's changes.
+STREAMING_FIELDS = (
+    "streaming_enabled", "youtube_stream_key", "streaming_video_width", "streaming_bitrate_kbps",
+    "youtube_oauth_client_id", "youtube_oauth_client_secret", "youtube_oauth_refresh_token",
+    "youtube_title_template", "youtube_description_template", "youtube_broadcast_visibility",
+)
+LATENCY_FIELDS = ("latency_compensation_ms", "video_latency_compensation_ms")
+VIDEO_SETTINGS_FIELDS = (
+    "known_cameras", "main_camera", "video_encoding", "camera_wifi_budget_mbps",
+    "video_latency_compensation_ms", *STREAMING_FIELDS,
+)
+
+
+def copy_fields(dest: "StudioConfig", src: "StudioConfig", fields: tuple[str, ...]) -> "StudioConfig":
+    """dest, with `fields` taken from src. Returns dest."""
+    for name in fields:
+        setattr(dest, name, getattr(src, name))
+    return dest
+
+
 @dataclass
 class KnownCamera:
     """A camera this machine has seen at least once (StudioConfig.
@@ -309,7 +333,7 @@ class StudioConfig:
     studio_musician: str = ""
     studio_name: str = ""
     studio_location: str = ""
-    # Every camera ever seen, named on Recording Devices. All the visible,
+    # Every camera ever seen, named in video-ui's Settings › Cameras. All the visible,
     # connected ones are shown and recorded each session (backend.py's
     # session_cameras); main_camera (a KnownCamera.key) is the one per-take
     # videos come from — "" or not connected: the first connected camera.

@@ -85,6 +85,7 @@ class VideoUIFrame(tk.Frame):
 
         self.strip = tk.Frame(self, background=BG)
         self.strip.pack(side="top", fill="x", padx=12, pady=(12, 8))
+        self._build_strip()  # "No cameras" until the first refresh says otherwise
         # Packed before the program view, so the picture can never push it
         # out of the window.
         self.status_var = tk.StringVar(value="")
@@ -205,8 +206,8 @@ class VideoUIFrame(tk.Frame):
             child.destroy()
         self._tiles = {}
         if not self._cameras:
-            tk.Label(self.strip, text="No cameras. Add one on the main window's Recording Devices tab, "
-                                      "or connect Takeloom Camera.",
+            tk.Label(self.strip, text="No cameras. Connect one, or open Takeloom Camera on a phone; "
+                                      "name or hide them in Settings › Cameras.",
                      background=BG, foreground="#bbbbbb").pack(anchor="w")
         for index, (device, label) in enumerate(self._cameras, start=1):
             border = tk.Frame(self.strip, background=IDLE_COLOR, padx=3, pady=3, cursor="hand2")
@@ -255,6 +256,10 @@ class VideoUIFrame(tk.Frame):
                                       text=text + ("  ● LIVE" if selected and self._streaming else ""))
 
     def _on_key(self, event) -> None:
+        # Only while this view is showing, and not while typing in a field
+        # (the Settings tab's camera names, say).
+        if not self.winfo_viewable() or isinstance(event.widget, (tk.Entry, tk.Text, tk.Spinbox)):
+            return
         if event.char and event.char.isdigit() and event.char != "0":
             index = int(event.char) - 1
             if index < len(self._cameras):
@@ -479,6 +484,41 @@ def _local_server_running(port: int) -> bool:
         return False
 
 
+def _build_tabs(root: tk.Misc, app_state: AppState) -> None:
+    """Cameras (the switcher: VideoUIFrame) and Settings: every video and
+    camera setting, moved here from the main window, which is for audio.
+    Settings' sections are built the first time they're shown; Latency,
+    like on the main window before, is never rebuilt, since it holds a live
+    audio stream and camera capture during a test."""
+    from tkinter import ttk
+
+    from .camera_settings import CameraSettingsFrame
+    from .latency import LatencyFrame
+    from .streaming import StreamingFrame
+
+    notebook = ttk.Notebook(root)
+    notebook.pack(fill="both", expand=True)
+    cameras_tab = tk.Frame(notebook, background=BG)
+    notebook.add(cameras_tab, text="Cameras")
+    VideoUIFrame(cameras_tab, app_state).pack(fill="both", expand=True)
+
+    settings = ttk.Notebook(notebook)
+    notebook.add(settings, text="Settings")
+    sections = []
+    for title, cls in (("Cameras", CameraSettingsFrame), ("Streaming", StreamingFrame), ("Latency", LatencyFrame)):
+        holder = ttk.Frame(settings, padding=8)
+        settings.add(holder, text=title)
+        sections.append({"holder": holder, "cls": cls, "built": False})
+
+    def show_section(_event=None) -> None:
+        entry = sections[settings.index(settings.select())]
+        if not entry["built"]:
+            entry["cls"](entry["holder"], app_state).pack(fill="both", expand=True)
+            entry["built"] = True
+
+    settings.bind("<<NotebookTabChanged>>", show_section)
+
+
 def run(remote_ip: str | None = None) -> None:
     from pathlib import Path
 
@@ -499,7 +539,7 @@ def run(remote_ip: str | None = None) -> None:
     app_state = AppState()
 
     def build() -> None:
-        VideoUIFrame(root, app_state).pack(fill="both", expand=True)
+        _build_tabs(root, app_state)
 
     app_state.build_ui = build
 
