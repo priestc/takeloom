@@ -24,9 +24,36 @@ from .store import PARTIAL_PREFIX, Vault
 SWEEP_INTERVAL_SECONDS = 3600
 
 
+LEGACY_SESSION_VIDEO = "session_video.mp4"
+
+
+def camera_refs(info: dict) -> list[dict]:
+    """Every camera's ref in a take's video info, each with "camera" and
+    "file" (a legacy single ref: one, for session_video.mp4). Same as
+    takeloom/take_video.py's camera_refs — keep in step."""
+    if isinstance(info.get("cameras"), list):
+        return [c for c in info["cameras"] if isinstance(c, dict) and c.get("file")]
+    if "start_s" in info:
+        return [{"camera": "", "file": LEGACY_SESSION_VIDEO, **info}]
+    return []
+
+
+def choose_camera(info: dict, camera: str | None = None) -> dict | None:
+    """`camera`'s ref (by label), else the take's default (the program
+    camera when it started), else the first. Same as take_video.py's."""
+    refs = camera_refs(info)
+    for wanted in (camera, info.get("default")):
+        if wanted:
+            match = next((r for r in refs if r.get("camera") == wanted), None)
+            if match is not None:
+                return match
+    return refs[0] if refs else None
+
+
 def find_take_ref(vault: Vault, take_filename: str) -> dict | None:
-    """The video ref for `take_filename`, from whichever session's "takes"
-    snapshot lists it, or None. A legacy take whose snapshot has no ref
+    """The video info for `take_filename` (every camera's ref: see
+    camera_refs), from whichever session's "takes" snapshot lists it, or
+    None. A legacy take whose snapshot has no ref
     (processed before refs existed) won't be found; its old per-take .mp4
     in completed_takes/ is served instead, if there is one."""
     for name in vault.session_names():
@@ -73,22 +100,28 @@ class TakeVideoCache:
         self._locks_lock = threading.Lock()
         self.dir.mkdir(parents=True, exist_ok=True)
 
-    def path_for(self, take_filename: str) -> Path:
-        """A ready-to-serve video of `take_filename`: its legacy per-take
-        .mp4 if the vault still has one, else a cached clip, cut first if
-        needed. Raises TakeVideoError if neither is possible. Concurrent
-        requests for the same take wait for one cut rather than each
-        starting their own."""
+    def path_for(self, take_filename: str, camera: str = "") -> Path:
+        """A ready-to-serve video of `take_filename` from `camera` (a label;
+        "": the take's default, the program camera when it started): its
+        legacy per-take .mp4 if the vault still has one, else a cached clip,
+        cut first if needed. Raises TakeVideoError if neither is possible.
+        Concurrent requests for the same clip wait for one cut rather than
+        each starting their own."""
         if "/" in take_filename or "\\" in take_filename or take_filename.startswith("."):
             raise TakeVideoError(f"Invalid take name {take_filename!r}")
         legacy = self.vault.root / "completed_takes" / (Path(take_filename).stem + ".mp4")
         if legacy.is_file():
             return legacy
 
-        ref = find_take_ref(self.vault, take_filename)
+        info = find_take_ref(self.vault, take_filename)
+        ref = choose_camera(info, camera) if info is not None else None
         if ref is None:
             raise TakeVideoError(f"No video is recorded for take {take_filename!r}.")
-        session_video = self.vault.session_dir(ref["session"]) / "session_video.mp4"
+        video_file = str(ref["file"])
+        if "/" in video_file or "\\" in video_file or video_file.startswith("."):
+            raise TakeVideoError(f"Bad video file {video_file!r} for take {take_filename!r}.")
+        ref = {**ref, "session": info["session"]}
+        session_video = self.vault.session_dir(info["session"]) / video_file
         if not session_video.is_file():
             if (session_video.parent / "render_jobs.json").is_file():
                 raise TakeVideoError(f"The session video for {take_filename!r} is still being encoded "

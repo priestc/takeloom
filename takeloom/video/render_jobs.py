@@ -1,8 +1,8 @@
 """Session video encodes left for the vault server to run.
 
-Encoding a session's videos (the main camera's session_video.mp4 and one
-per extra camera, each re-encoded to burn in the watermark) is the heavy
-part of processing a session. With StudioConfig.video_encoding "vault",
+Encoding a session's videos (one per camera, each re-encoded to burn in
+the watermark) is the heavy part of processing a session. With
+StudioConfig.video_encoding "vault",
 processing/splicer.py does everything else on this machine and, instead
 of encoding, describes each encode in the session directory as
 render_jobs.json, beside their inputs (raw videos, audio, watermark PNGs).

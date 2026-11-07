@@ -195,8 +195,7 @@ def _migrate_backup_server(data: dict) -> None:
 
 def _migrate_cameras(data: dict, known_cameras: list[KnownCamera]) -> None:
     """Configs from before known_cameras: camera_device/camera_label (the
-    one configured camera) and extra_cameras become known cameras, the
-    first of them the main camera."""
+    one configured camera) and extra_cameras become known cameras."""
     old = []
     if data.get("camera_device"):
         old.append((data["camera_device"], data.get("camera_label") or ""))
@@ -207,9 +206,8 @@ def _migrate_cameras(data: dict, known_cameras: list[KnownCamera]) -> None:
         key = camera_key(device, label)
         if not any(c.key == key for c in known_cameras):
             known_cameras.append(KnownCamera(key=key, detected_name=label))
-        if not data.get("main_camera"):
-            data["main_camera"] = key
-    for legacy in ("camera_device", "camera_label", "extra_cameras"):
+    # main_camera: from when one camera was special. Ignored now.
+    for legacy in ("camera_device", "camera_label", "extra_cameras", "main_camera"):
         data.pop(legacy, None)
 
 
@@ -248,7 +246,7 @@ STREAMING_FIELDS = (
 )
 LATENCY_FIELDS = ("latency_compensation_ms", "video_latency_compensation_ms")
 VIDEO_SETTINGS_FIELDS = (
-    "known_cameras", "main_camera", "video_encoding", "camera_wifi_budget_mbps",
+    "known_cameras", "video_encoding", "camera_wifi_budget_mbps",
     "video_latency_compensation_ms", *STREAMING_FIELDS,
 )
 
@@ -333,12 +331,11 @@ class StudioConfig:
     studio_musician: str = ""
     studio_name: str = ""
     studio_location: str = ""
-    # Every camera ever seen, named in video-ui's Settings › Cameras. All the visible,
-    # connected ones are shown and recorded each session (backend.py's
-    # session_cameras); main_camera (a KnownCamera.key) is the one per-take
-    # videos come from — "" or not connected: the first connected camera.
+    # Every camera ever seen, named in video-ui's Settings › Cameras. All the
+    # visible, connected ones are shown and recorded each session, as a set:
+    # each makes its own whole-session video, and every take can be watched
+    # from any of them (backend.py's session_cameras, take_video.py).
     known_cameras: list[KnownCamera] = field(default_factory=list)
-    main_camera: str = ""
     streamdeck_id: str = ""     # serial number of the selected physical Stream Deck; empty = don't connect to one
     streamdeck_label: str = ""  # human-friendly Stream Deck name, for display only
     # Keyed by instrument *label* (one of INSTRUMENT_LABELS), not by which

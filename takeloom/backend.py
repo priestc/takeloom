@@ -558,9 +558,11 @@ class Backend(ABC):
         ...
 
     @abstractmethod
-    def get_take_video_path(self, filename: str) -> str:
+    def get_take_video_path(self, filename: str, camera: str = "") -> str:
         """A local, playable video of completed take `filename` (as named in
-        a take dict), cut from its session's video on demand — see
+        a take dict) from `camera` (a camera's label; "": the take's
+        default, the camera on the program feed when it started), cut from
+        that camera's session video on demand — see
         take_video.py. Uses a legacy per-take .mp4 if one exists; else cuts
         the clip here if the session is on local disk; else has the remote
         vault server cut it (it caches the result) and downloads that. The
@@ -1000,16 +1002,17 @@ class Backend(ABC):
         """(camera_device, label) of every camera the Record tab previews and
         a session records: every connected camera that isn't hidden (local
         cameras and Takeloom Camera phones alike — nothing needs adding by
-        hand), labeled with the name given on Recording Devices, the main
-        camera (config.main_camera; else the first) first. Changes are
-        announced with a "session_cameras_changed" event."""
+        hand), labeled with the name given in video-ui's Settings ›
+        Cameras. A set: none is special, and each records its own
+        whole-session video. Changes are announced with a
+        "session_cameras_changed" event."""
         ...
 
     @abstractmethod
     def camera_inventory(self) -> list[dict]:
-        """Every camera ever seen (config.known_cameras), for Recording
-        Devices: {"key", "detected_name", "name", "label", "hidden",
-        "connected", "device", "main", "first_seen", "last_seen"}. Scans
+        """Every camera ever seen (config.known_cameras), for video-ui's
+        Settings › Cameras: {"key", "detected_name", "name", "label",
+        "hidden", "connected", "device", "first_seen", "last_seen"}. Scans
         for cameras first, so a newly plugged-in one is listed (and
         remembered) straight away."""
         ...
@@ -1017,9 +1020,9 @@ class Backend(ABC):
     @abstractmethod
     def get_program_camera(self) -> str:
         """The program ("out") camera: the one the live stream shows, picked
-        in the video-ui. One of session_cameras()' devices — the main
-        camera until another is picked, or if the picked one is gone. ""
-        if there are no cameras."""
+        in the video-ui. One of session_cameras()' devices — the first
+        until another is picked, or if the picked one is gone. "" if there
+        are no cameras."""
         ...
 
     @abstractmethod
@@ -1284,8 +1287,8 @@ class Backend(ABC):
 
 
 class _CameraPreviewManager:
-    """Owns the capture loops of every local camera being previewed (the
-    main one and any extras — see LocalBackend.session_cameras) and fans
+    """Owns the capture loops of every local camera being previewed (see
+    LocalBackend.session_cameras) and fans
     their JPEG frames out, tagged by device, to any number of subscribers.
     Paused/resumed around exclusive ffmpeg access during recording (mirrors
     RecordFrame's old _stop_preview/_start_preview dance, just headless).
@@ -1664,8 +1667,9 @@ class _ActiveSession:
     # the recorder, so _save_session_log can record what phone_camera/
     # sync.py needs to line its video up afterwards.
     phone_mix_start_ns: int | None = None
-    # Every camera besides the main one (see LocalBackend.session_cameras),
-    # each recording its own whole-session file — _ExtraCameraRecording.
+    # Every camera (see LocalBackend.session_cameras), each recording its
+    # own whole-session file — _ExtraCameraRecording (named from when one
+    # camera was special; video_recorder above is now only ever None).
     extra_cameras: list = field(default_factory=list)
     # time.monotonic_ns() when mix recording started, for the extra
     # cameras' phone sync (same role as phone_mix_start_ns).
@@ -1696,8 +1700,9 @@ class _ExtraCameraRecording:
 
 
 def _camera_file_stem(index: int, label: str) -> str:
-    """camera2_iphone, camera3_hd-webcam-emeet-c960, ... — index 1 is the
-    main camera (session_video.mp4)."""
+    """camera1_samsung, camera2_iphone-16, ... — one per camera recorded,
+    in session_cameras() order. (Before cameras were a set, the first
+    camera was session_video.mp4 and these started at 2.)"""
     slug = "".join(ch if ch.isalnum() else "-" for ch in label.lower()).strip("-")
     slug = "-".join(part for part in slug.split("-") if part)[:40]
     return f"camera{index}_{slug or 'camera'}"
@@ -1963,7 +1968,7 @@ class LocalBackend(Backend):
         self._camera_scan: tuple[float, list | None] = (0.0, None)
         self._camera_scan_lock = threading.Lock()
         # The program camera picked in the video-ui (see get_program_camera);
-        # None until one is picked: the main camera.
+        # None until one is picked: the first camera.
         self._program_camera: str | None = None
         # "Sticky" mixer levels: once the operator nudges backing/takes volume,
         # that level carries forward to every track loaded afterward (like a
@@ -2226,35 +2231,17 @@ class LocalBackend(Backend):
         known = {c.key: c for c in config.known_cameras}
         cameras = [(key, device, known[key].label if key in known else name)
                    for key, device, name in scan if not (key in known and known[key].hidden)]
-        cameras.sort(key=lambda c: c[0] != config.main_camera)  # the main camera first; otherwise as found
         return [(device, label) for _key, device, label in cameras]
 
     def camera_inventory(self) -> list[dict]:
         scan = self._scan_cameras(force=True)
         config = self.get_config()
         connected = {key: device for key, device, _name in scan}
-        main = self.main_camera_key(scan)
         return [{
             "key": c.key, "detected_name": c.detected_name, "name": c.name, "label": c.label,
             "hidden": c.hidden, "connected": c.key in connected, "device": connected.get(c.key, ""),
-            "main": c.key == main, "first_seen": c.first_seen, "last_seen": c.last_seen,
+            "first_seen": c.first_seen, "last_seen": c.last_seen,
         } for c in config.known_cameras]
-
-    def main_camera_key(self, scan: list[tuple[str, str, str]] | None = None) -> str:
-        """The main camera's key: config.main_camera if it's connected and
-        visible, else the first connected visible camera ("" if none)."""
-        scan = self._scan_cameras() if scan is None else scan
-        config = self.get_config()
-        hidden = {c.key for c in config.known_cameras if c.hidden}
-        visible = [key for key, _device, _name in scan if key not in hidden]
-        if config.main_camera in visible:
-            return config.main_camera
-        return visible[0] if visible else ""
-
-    def main_camera_device(self) -> str:
-        """The main camera's current device id ("" if none is connected)."""
-        devices = self.session_cameras()
-        return devices[0][0] if devices else ""
 
     def rescan_cameras(self) -> list[tuple[str, str]]:
         """session_cameras() from a fresh scan (the rig watcher's camera
@@ -2850,10 +2837,9 @@ class LocalBackend(Backend):
                 vault_tags.append("flac")
             if (session_dir_path / "session_midi.mid").exists():
                 vault_tags.append("midi")
-            if (
-                (session_dir_path / "session_video.mp4").exists()
-                or (session_dir_path / "session_video_raw.mp4").exists()
-            ):
+            # session_video*.mp4: a session from before cameras were a set;
+            # camera<N>_*.mp4: each camera's own video (raw or finished).
+            if any(session_dir_path.glob("session_video*.mp4")) or any(session_dir_path.glob("camera*_*.mp4")):
                 vault_tags.append("video")
 
         return {
@@ -3259,8 +3245,10 @@ class LocalBackend(Backend):
         cents = load_backing_tuning(Path(self.get_config().session_vault_path), path.name)
         return str(_pitched_playback_path(path, cents))
 
-    def get_take_video_path(self, filename: str) -> str:
-        from .take_video import clip_take_video, read_take_video_ref
+    def get_take_video_path(self, filename: str, camera: str = "") -> str:
+        import hashlib
+
+        from .take_video import choose_camera, clip_take_video, read_take_video_ref
         from .vault import remote_vault, vault_root
         if not filename or "/" in filename or "\\" in filename:
             raise BackendError(f"Invalid take name '{filename}'.")
@@ -3270,14 +3258,19 @@ class LocalBackend(Backend):
         legacy = audio.with_suffix(".mp4")
         if legacy.exists():
             return str(legacy)
-        ref = read_take_video_ref(audio)
+        info = read_take_video_ref(audio)
+        ref = choose_camera(info, camera) if info is not None else None
         if ref is None:
             raise BackendError(f"'{filename}' has no video.")
+        video_file = str(ref["file"])
+        if "/" in video_file or "\\" in video_file or video_file.startswith("."):
+            raise BackendError(f"'{filename}' names a bad video file ({video_file!r}).")
         cache_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_take_videos")
-        out = cache_dir / f"{audio.stem}.mp4"
+        tag = hashlib.sha1(str(ref.get("camera", "")).encode()).hexdigest()[:8]
+        out = cache_dir / f"{audio.stem}.{tag}.mp4"
         if out.exists():
             return str(out)
-        session_video = root / "sessions" / ref["session"] / "session_video.mp4"
+        session_video = root / "sessions" / info["session"] / video_file
         if session_video.exists():
             if not clip_take_video(session_video, ref, out):
                 raise BackendError(f"Could not cut '{filename}' out of {session_video}.")
@@ -3288,7 +3281,7 @@ class LocalBackend(Backend):
                 f"The session video for '{filename}' ({ref['session']}) isn't on this machine, "
                 "and no paired remote vault is configured."
             )
-        if not client.download_take_video(filename, out):
+        if not client.download_take_video(filename, out, camera=ref.get("camera", "")):
             raise BackendError(f"Could not get the video for '{filename}' from the vault at {client.url}.")
         return str(out)
 
@@ -5966,13 +5959,13 @@ class LocalBackend(Backend):
             engine.start_recording(take_path)
             engine.set_on_song_end(self._on_video_check_naturally_ended)
 
-            # Video check always uses the configured camera (unlike the
-            # latency test, which lets the operator pick a different one to
-            # test), and captures it through the exact same
+            # Video check uses the program camera, the one the video-ui is
+            # showing (unlike the latency test, which lets the operator pick
+            # one to test), and captures it through the exact same
             # _open_video_recorder() path a real take does — so what you see
             # played back afterward is a true preview of production
             # quality/behavior, not a separate approximation.
-            video_recorder = self._open_video_recorder(self.main_camera_device(), video_raw)
+            video_recorder = self._open_video_recorder(self._resolve_program_camera(), video_raw)
             if video_recorder is not None:
                 engine.start_mix_recording(mix_flac)
 
@@ -6252,9 +6245,9 @@ class LocalBackend(Backend):
         phone_mix_start_ns = None
         preview_paused = False
         from .video.capture import VideoRecorder, ffmpeg_available
+        # Cameras are a set: every connected, visible camera records its own
+        # whole-session video the same way (below), and none is special.
         cameras = self.session_cameras()
-        camera_device, camera_label = cameras[0] if cameras else ("", "")
-        use_phone = is_phone_device(camera_device)
 
         def pause_preview() -> None:
             # Local cameras go to ffmpeg exclusively; the preview keeps
@@ -6314,70 +6307,22 @@ class LocalBackend(Backend):
                 "stream_width": stream_switcher.stream_width,
             }
 
-        if use_phone and (
-            self._phone_hub is None or self._phone_hub.camera(phone_device_id(camera_device)) is None
-        ):
-            self._emit("recording_status", {
-                "status": f"{camera_label or 'Takeloom Camera'} isn't connected — "
-                          "recording this session without it.",
-            })
-        elif camera_device:
-            if use_phone or ffmpeg_available():
-                if not use_phone:
-                    pause_preview()
-                session_video_raw = session_dir / "session_video_raw.mp4"
-                session_mix_flac = session_dir / "session_mix.flac"
-
-                # on_preview_frame tees a low-res copy of every frame back
-                # through _CameraPreviewManager (see push_external_frame) —
-                # same as _open_video_recorder's video check/latency-test
-                # path — so the Record tab's live feed keeps showing real
-                # camera frames for the whole session instead of freezing.
-                if use_phone:
-                    from .phone_camera.recorder import PhoneVideoRecorder
-                    device_id = phone_device_id(camera_device)
-                    # The phone's own recording is uploaded into this session
-                    # dir after it ends — registered now, before the phone
-                    # could possibly finish and start sending it.
-                    self._phone_hub.expect_upload(session_dir.name, session_dir, device_id)
-                    video_recorder = PhoneVideoRecorder(
-                        self._phone_hub, device_id, session_dir.name, session_video_raw,
-                        **stream_tee(camera_device),
-                    )
-                else:
-                    video_recorder = VideoRecorder(
-                        camera_device, session_video_raw,
-                        on_preview_frame=lambda jpeg, d=camera_device: self._preview.push_external_frame(d, jpeg),
-                        on_full_frame=lambda jpeg, d=camera_device: self._preview.push_full_frame(d, jpeg),
-                        **stream_tee(camera_device),
-                    )
-                if video_recorder.start():
-                    # Where the mix/video timeline begins on the session-audio
-                    # timeline — splicing maps take frames onto the video with
-                    # this (see _save_session_log / processing/splicer.py).
-                    mix_start_frame = engine.session_frames
-                    engine.start_mix_recording(session_mix_flac)
-                    mix_start_ns = time.monotonic_ns()
-                    if use_phone:
-                        phone_mix_start_ns = mix_start_ns
-                    video_start_wall_time = wall_timestamp()
-                else:
-                    video_recorder = None
-                    session_video_raw = None
-                    if use_phone:
-                        self._phone_hub.forget_upload(session_dir.name, device_id)
-
-        # Every other camera: started after the main one and the mix, so the
-        # main camera's timing (what the hand-tuned offset was measured
-        # against) is exactly what it always was.
+        # Every camera, each into its own raw file (a phone's own
+        # full-quality recording is uploaded afterwards), then the mix: the
+        # timeline processing lines each camera's video up against
+        # (phone_camera/sync.py). The session log's "extra_cameras" lists
+        # them all (the name is from when one camera was special).
         extra_cameras: list[_ExtraCameraRecording] = []
-        for index, (device, label) in enumerate(cameras[1:], start=2):
+        for index, (device, label) in enumerate(cameras, start=1):
             stem = _camera_file_stem(index, label)
             raw_file, final_file = f"{stem}_raw.mp4", f"{stem}.mp4"
             if is_phone_device(device):
                 device_id = phone_device_id(device)
                 if self._phone_hub is None or self._phone_hub.camera(device_id) is None:
-                    continue  # configured as an extra camera, but not connected right now
+                    self._emit("recording_status", {
+                        "status": f"{label or 'Takeloom Camera'} isn't connected — recording this session without it.",
+                    })
+                    continue
                 from .phone_camera.recorder import PhoneVideoRecorder
                 upload_file = f"{stem}_phone.mp4"
                 self._phone_hub.expect_upload(session_dir.name, session_dir, device_id, upload_file)
@@ -6400,13 +6345,15 @@ class LocalBackend(Backend):
                 )
                 if recorder.start():
                     extra_cameras.append(_ExtraCameraRecording(device, label, recorder, raw_file, final_file))
-        if extra_cameras and mix_start_ns is None:
-            # No main camera running: the extra cameras still need the
-            # mix as their timeline.
+        if extra_cameras:
+            # Where the mix/video timeline begins on the session-audio
+            # timeline: splicing maps take frames onto each video with this
+            # (see _save_session_log / processing/splicer.py).
             session_mix_flac = session_dir / "session_mix.flac"
             mix_start_frame = engine.session_frames
             engine.start_mix_recording(session_mix_flac)
             mix_start_ns = time.monotonic_ns()
+            video_start_wall_time = wall_timestamp()
         if preview_paused and video_recorder is None and not any(
             not is_phone_device(c.device) for c in extra_cameras
         ):
@@ -6577,8 +6524,8 @@ class LocalBackend(Backend):
 
     @staticmethod
     def _session_phone_ids(session: "_ActiveSession") -> list[str]:
-        """Device ids of every phone recording `session` (its main camera
-        first), i.e. every upload it's expecting."""
+        """Device ids of every phone recording `session`, i.e. every upload
+        it's expecting."""
         ids = []
         if session.phone_mix_start_ns is not None:
             ids.append(session.video_recorder.device_id)
@@ -6597,8 +6544,8 @@ class LocalBackend(Backend):
             # Each phone's full-quality recording, uploading now that the
             # session's over. Waited for here, on this background thread —
             # the app is already idle and a new session can start meanwhile.
-            # All of them before processing, not just the main camera's:
-            # in "remote" vault mode the session dir is gone afterwards.
+            # All of them before processing: in "remote" vault mode the
+            # session dir is gone afterwards.
             session_id = session.session_dir.name
             labels = {phone_device_id(c.device): c.label for c in session.extra_cameras}
             for device_id in self._session_phone_ids(session):
@@ -6666,7 +6613,7 @@ class LocalBackend(Backend):
             "studio_location": session.studio_location,
             "sample_rate": session.engine.sample_rate,
             "mix_start_frame": session.mix_start_frame,
-            "has_video": session.session_video_raw is not None,
+            "has_video": session.session_video_raw is not None or bool(session.extra_cameras),
             **({"phone_camera": session.video_recorder.session_log_info(session.phone_mix_start_ns)}
                if session.phone_mix_start_ns is not None else {}),
             **({"extra_cameras": [c.log_entry(session.mix_start_ns) for c in session.extra_cameras]}

@@ -210,13 +210,15 @@ class VaultClient:
         it succeeded (and the file now exists)."""
         return self._download(f"/api/files/{self._q(vault_relative)}", local_path, _TRANSFER_TIMEOUT)
 
-    def download_take_video(self, take_filename: str, local_path: Path) -> bool:
-        """The video of completed take `take_filename`, which the server
-        cuts from its session video on first request (and caches) — see
+    def download_take_video(self, take_filename: str, local_path: Path, camera: str = "") -> bool:
+        """The video of completed take `take_filename` from `camera` (a
+        label; "": the take's default), which the server cuts from that
+        camera's session video on first request (and caches) — see
         take_video.py. The first request for a take can sit silent for
         minutes while that encode runs, hence the long timeout."""
+        query = f"?camera={quote(camera, safe='')}" if camera else ""
         return self._download(
-            f"/api/takes/{quote(take_filename, safe='')}/video", local_path, _CLIP_TIMEOUT,
+            f"/api/takes/{quote(take_filename, safe='')}/video{query}", local_path, _CLIP_TIMEOUT,
         )
 
     def _download(self, path: str, local_path: Path, timeout: float) -> bool:

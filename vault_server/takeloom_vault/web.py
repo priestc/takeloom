@@ -14,6 +14,7 @@ from urllib.parse import quote
 
 from .auth import PAIRING_TTL_SECONDS, PairedClient, PairingRequest
 from .store import Vault
+from .takes import camera_refs
 
 _CSS = """
 :root { color-scheme: light dark; --muted: #888; --line: #8884; --accent: #4a7dff; }
@@ -31,6 +32,7 @@ th { font-weight: 600; font-size: .85em; color: var(--muted); }
 .code { font: 600 1.3em ui-monospace, monospace; letter-spacing: .12em; }
 button { font: inherit; padding: .25em .9em; border-radius: 6px; border: 1px solid var(--line); cursor: pointer; }
 button.ok { background: #2e9d4f; color: #fff; border-color: #2e9d4f; }
+button.cam.on { background: #2a6db0; color: #fff; border-color: #2a6db0; }
 video { width: 100%; max-height: 70vh; background: #000; border-radius: 6px; }
 audio { width: 100%; max-width: 520px; }
 .songs button { font-size: .85em; padding: .1em .6em; }
@@ -111,6 +113,21 @@ def _pairing_banner(pending: list[PairingRequest]) -> str:
     return "<div class='banner'>" + "".join(rows) + "</div>"
 
 
+def session_videos(directory: Path, data: dict) -> list[tuple[str, str]]:
+    """(camera label, file) of each finished camera video in a session:
+    one per camera ("extra_cameras" lists every camera since cameras became
+    a set), or session_video.mp4 for a session from before that."""
+    videos = []
+    if (directory / "session_video.mp4").exists():
+        phone = data.get("phone_camera") or {}
+        videos.append((phone.get("label") or data.get("camera_label") or "Camera", "session_video.mp4"))
+    for cam in data.get("extra_cameras") or []:
+        file = cam.get("final_file") or ""
+        if file and "/" not in file and (directory / file).exists():
+            videos.append((cam.get("label") or file, file))
+    return videos
+
+
 def sessions_page(vault: Vault, logs: dict[str, dict], pending: list[PairingRequest]) -> str:
     rows = []
     for name, data in sorted(
@@ -118,7 +135,7 @@ def sessions_page(vault: Vault, logs: dict[str, dict], pending: list[PairingRequ
     ):
         events = data.get("events") or []
         directory = vault.session_dir(name)
-        has_video = (directory / "session_video.mp4").exists()
+        has_video = bool(session_videos(directory, data))
         takes = _take_count(data)
         tracks = _track_names(data)
         rows.append(
@@ -160,9 +177,19 @@ def session_page(vault: Vault, name: str, data: dict) -> str:
         f"<p class='muted'>{meta}<br><span class='small'>{escape(name)}</span></p>",
     ]
 
-    has_video = (directory / "session_video.mp4").exists()
+    videos = session_videos(directory, data)
+    has_video = bool(videos)
     if has_video:
-        parts.append(f"<video id='v' controls preload='metadata' src='{_media_url(rel + '/session_video.mp4')}'></video>")
+        if len(videos) > 1:
+            # One video element; a button per camera swaps its source and
+            # keeps the place, so switching angles doesn't lose your spot.
+            buttons = "".join(
+                f"<button class='cam{' on' if i == 0 else ''}' onclick=\"cam(this,'{_media_url(rel + '/' + file)}')\">"
+                f"{escape(label)}</button>"
+                for i, (label, file) in enumerate(videos)
+            )
+            parts.append(f"<p>{buttons}</p>")
+        parts.append(f"<video id='v' controls preload='metadata' src='{_media_url(rel + '/' + videos[0][1])}'></video>")
     elif (directory / "render_jobs.json").exists():
         parts.append(
             "<p class='banner'>This session's videos are being encoded on this machine "
@@ -193,10 +220,21 @@ def session_page(vault: Vault, name: str, data: dict) -> str:
             links = []
             if (vault.root / "completed_takes" / filename).exists():
                 links.append(f"<a href='{_media_url('completed_takes/' + filename)}'>audio</a>")
-            # Cut from the session video on first click (see takes.py), so
-            # the first open of a long take takes a little while.
-            if take.get("video") or (vault.root / "completed_takes" / f"{stem}.mp4").exists():
-                links.append(f"<a href='/takes/{quote(filename, safe='')}/video'>video</a>")
+            # Cut from a camera's session video on first click (see
+            # takes.py), so the first open of a long take takes a little
+            # while. A link per camera; the default one (the camera on the
+            # program feed when the take started) first.
+            video_url = f"/takes/{quote(filename, safe='')}/video"
+            refs = camera_refs(take.get("video") or {})
+            if len(refs) > 1:
+                default = (take.get("video") or {}).get("default")
+                refs.sort(key=lambda r: r.get("camera") != default)
+                links.append("video: " + " ".join(
+                    f"<a href='{video_url}?camera={quote(r.get('camera', ''), safe='')}'>{escape(r.get('camera', ''))}</a>"
+                    for r in refs
+                ))
+            elif refs or (vault.root / "completed_takes" / f"{stem}.mp4").exists():
+                links.append(f"<a href='{video_url}'>video</a>")
             take_links.append(
                 f"<span class='pill'>{escape(take.get('instrument', ''))} take {take.get('take_number', '')}</span>"
                 + " ".join(links)
@@ -223,7 +261,11 @@ def session_page(vault: Vault, name: str, data: dict) -> str:
     parts.append("<h2>Files</h2><table>" + "".join(files) + "</table>")
     parts.append(
         "<script>function seek(t){var v=document.getElementById('v');v.currentTime=t;v.play();"
-        "v.scrollIntoView({behavior:'smooth'});}</script>"
+        "v.scrollIntoView({behavior:'smooth'});}"
+        "function cam(b,u){var v=document.getElementById('v'),t=v.currentTime,p=!v.paused;"
+        "document.querySelectorAll('button.cam').forEach(function(x){x.classList.remove('on')});"
+        "b.classList.add('on');v.src=u;v.addEventListener('loadedmetadata',function f(){"
+        "v.removeEventListener('loadedmetadata',f);v.currentTime=t;if(p)v.play();});}</script>"
     )
     return page(name, "".join(parts))
 

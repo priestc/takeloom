@@ -11,20 +11,29 @@ and the clip is cut out when someone actually wants to watch it:
 - locally, by Backend.get_take_video_path via clip_take_video below, for a
   session still on this machine.
 
-A ref is stored in two places: in the session's session_log.json "takes"
-snapshot (where the vault server finds it), and as a tiny sidecar next to
-the take's audio, completed_takes/<stem>.video.json (so this machine knows
-a take has video, and which session to cut it from, without reading
-every session log). Both hold the same dict:
+A take's video info is stored in two places: in the session's
+session_log.json "takes" snapshot (where the vault server finds it), and as
+a tiny sidecar next to the take's audio, completed_takes/<stem>.video.json
+(so this machine knows a take has video, and which session to cut it from,
+without reading every session log). Both hold the same dict. Every camera
+recorded the take (cameras are a set: each one makes its own whole-session
+video), so there's a ref per camera, and the one that was on the program
+feed when the take started is the one to show first:
 
-    {"session": <session dir name>, "start_s": float, "instrument_start_s": float,
-     "duration_s": float}
+    {"session": <session dir name>, "default": <camera label>,
+     "cameras": [{"camera": <label>, "file": <video in the session dir>,
+                  "start_s": float, "instrument_start_s": float, "duration_s": float}, ...]}
 
-start_s is where the take starts in session_video.mp4's video and Mix
-tracks; instrument_start_s is the same moment in its Instrument Only track,
-which runs on session.flac's own timeline rather than the mix's (see
-mux_video_audio). Both already include the camera-latency offset that was
-applied when the session video was muxed, so a clip is a plain seek.
+A take processed before cameras were a set has a single ref for its
+session's session_video.mp4 instead — {"session", "start_s",
+"instrument_start_s", "duration_s"} — which camera_refs() reads as one
+camera.
+
+start_s is where the take starts in that video's video and Mix tracks;
+instrument_start_s is the same moment in its Instrument Only track, which
+runs on session.flac's own timeline rather than the mix's (see
+mux_video_audio). Both already include that camera's latency offset,
+applied when its video was muxed, so a clip is a plain seek.
 
 Older takes may still have a real <stem>.mp4; that's preferred when present.
 """
@@ -55,6 +64,31 @@ def take_video_ref(
         "instrument_start_s": round(start_frame / sample_rate + audio_delay_s, 6),
         "duration_s": round((end_frame - start_frame) / sample_rate, 6),
     }
+
+
+LEGACY_SESSION_VIDEO = "session_video.mp4"
+
+
+def camera_refs(info: dict) -> list[dict]:
+    """Every camera's ref in a take's video info, each with "camera" and
+    "file" (a legacy single ref: one, for session_video.mp4)."""
+    if isinstance(info.get("cameras"), list):
+        return [c for c in info["cameras"] if isinstance(c, dict) and c.get("file")]
+    if "start_s" in info:
+        return [{"camera": "", "file": LEGACY_SESSION_VIDEO, **info}]
+    return []
+
+
+def choose_camera(info: dict, camera: str | None = None) -> dict | None:
+    """The ref to show: `camera`'s (by label), else the take's default
+    (the program camera when it started), else the first."""
+    refs = camera_refs(info)
+    for wanted in (camera, info.get("default")):
+        if wanted:
+            match = next((r for r in refs if r.get("camera") == wanted), None)
+            if match is not None:
+                return match
+    return refs[0] if refs else None
 
 
 def sidecar_path(take_audio_path: Path) -> Path:

@@ -1,5 +1,6 @@
-"""video-ui's Settings › Cameras: every camera ever seen (its name, Hide,
-which one is the main camera) and where session videos are encoded.
+"""video-ui's Settings › Cameras: every camera ever seen (its name, Hide)
+and where session videos are encoded. Cameras are a set: every connected one
+that isn't hidden records its own video, and none is special.
 
 Moved here from the main window's Recording Devices and Studio Setup tabs:
 every video/camera setting lives in video-ui now, the main window is for
@@ -71,14 +72,11 @@ class CameraSettingsFrame(ttk.Frame):
         row += 1
         self._camera_vars = {}
         cameras = [c for c in self.config_obj.known_cameras if c.key not in self._forgotten]
-        self.main_camera_var = tk.StringVar(
-            value=next((c["key"] for c in self._inventory if c["main"]), self.config_obj.main_camera),
-        )
         if not cameras:
             ttk.Label(table, text="No cameras seen yet. Connect one, or open Takeloom Camera on a phone, "
                                   "then Reload.", foreground="#666666").grid(row=0, column=0, sticky="w")
         else:
-            for col, heading in enumerate(("Name", "Detected as", "", "Main", "Hide", "")):
+            for col, heading in enumerate(("Name", "Detected as", "", "Hide", "")):
                 ttk.Label(table, text=heading, foreground="#666666").grid(row=0, column=col, sticky="w", padx=(0, 10))
         connected = {c["key"]: c["connected"] for c in self._inventory}
         for r, camera in enumerate(cameras, start=1):
@@ -93,16 +91,15 @@ class CameraSettingsFrame(ttk.Frame):
                 text="● connected" if is_connected else f"last seen {camera.last_seen or 'never'}",
                 foreground="#2a7d2a" if is_connected else "#888888",
             ).grid(row=r, column=2, sticky="w", padx=(0, 10))
-            ttk.Radiobutton(table, variable=self.main_camera_var, value=camera.key).grid(row=r, column=3)
-            ttk.Checkbutton(table, variable=hidden_var).grid(row=r, column=4)
+            ttk.Checkbutton(table, variable=hidden_var).grid(row=r, column=3)
             if not is_connected:
                 ttk.Button(table, text="Forget", command=lambda k=camera.key: self._forget(k)).grid(
-                    row=r, column=5, sticky="w")
+                    row=r, column=4, sticky="w")
         ttk.Label(
             self,
             text="Every connected camera that isn't hidden is shown and recorded each session, under the "
-                 "name given here (blank: the name it reports). Per-take videos come from the main camera. "
-                 "Hide anything that isn't really a camera, like a screen capture.",
+                 "name given here (blank: the name it reports), and every take can be watched from any of "
+                 "them. Hide anything that isn't really a camera, like a screen capture.",
             foreground="#666666", wraplength=620, justify="left",
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(6, 4))
         row += 1
@@ -160,12 +157,10 @@ class CameraSettingsFrame(ttk.Frame):
             if fields is not None:
                 camera.name = fields["name"].get().strip()
                 camera.hidden = fields["hidden"].get()
-        self.config_obj.main_camera = self.main_camera_var.get()
 
     def _save(self) -> None:
         self._keep_form_edits()
         edits = {c.key: (c.name, c.hidden) for c in self.config_obj.known_cameras}
-        main_camera = "" if self.config_obj.main_camera in self._forgotten else self.config_obj.main_camera
         forgotten = set(self._forgotten)
         encoding = next((value for value, label in _VIDEO_ENCODING_LABELS
                          if label == self.video_encoding_var.get()), "local")
@@ -179,7 +174,6 @@ class CameraSettingsFrame(ttk.Frame):
                 for camera in config.known_cameras:
                     if camera.key in edits:
                         camera.name, camera.hidden = edits[camera.key]
-                config.main_camera = main_camera
                 config.video_encoding = encoding
                 errors = config.validate()
                 if errors:

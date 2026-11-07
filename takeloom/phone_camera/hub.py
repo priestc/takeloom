@@ -371,10 +371,10 @@ class PhoneCameraHub:
             data = json.loads((session_dir / "session_log.json").read_text())
         except (OSError, ValueError):
             return None
-        if (session_dir / "session_video.mp4").exists():
-            return None  # already processed
         phone = data.get("phone_camera") or {}
         if phone.get("device_id") == device_id:
+            if (session_dir / "session_video.mp4").exists():
+                return None  # already processed
             file_name = UPLOAD_FILE_NAME
         else:
             extra = next(
@@ -384,6 +384,8 @@ class PhoneCameraHub:
             )
             if extra is None or not extra.get("upload_file"):
                 return None
+            if (session_dir / extra["final_file"]).exists():
+                return None  # already processed
             file_name = extra["upload_file"]
         with self._lock:
             return self._uploads.setdefault(

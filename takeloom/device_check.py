@@ -46,15 +46,6 @@ def check_configured_devices(backend: Backend, include_streamdeck: bool = True) 
                 if not _device_present(audio_devices, il.device):
                     warnings.append(f"Audio: configured input device '{il.device}' (for '{il.label}') not connected.")
 
-    if config.main_camera:
-        try:
-            inventory = backend.camera_inventory()
-        except Exception:
-            inventory = []
-        main = next((c for c in inventory if c["key"] == config.main_camera), None)
-        if main is not None and not main["connected"] and not main["hidden"]:
-            warnings.append(f"Video: main camera '{main['label']}' not connected.")
-
     if include_streamdeck and config.streamdeck_id:
         from .streamdeck_controller import list_streamdecks
         decks = list_streamdecks()

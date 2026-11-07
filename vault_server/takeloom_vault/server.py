@@ -14,7 +14,9 @@ API — every route except /api/pair* needs `Authorization: Bearer <token>`:
     GET    /api/list/<dir>              -> {"files": [{"name", "size"}]}
     GET    /api/files/<vault path>      -> raw bytes
     GET    /api/takes/<filename>/video  -> a completed take's video, cut from its session video
-                                           on first request and cached (see takes.py)
+                                           on first request and cached (see takes.py);
+                                           ?camera=<label>: from that camera (none: the
+                                           camera on the program feed when it started)
     PUT    /api/files/<vault path>      <- raw bytes, X-Content-SHA256 header required
     POST   /api/delete                  {"paths": [...]} -> {}
 
@@ -40,7 +42,7 @@ import socket
 import sys
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import web
 from .auth import Auth
@@ -320,8 +322,10 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(result)
 
     def _send_take_video(self, take_filename: str) -> None:
+        # ?camera=<label>: that camera's view of the take; none: its default.
+        camera = (parse_qs(urlsplit(self.path).query).get("camera") or [""])[0]
         try:
-            path = self.server.take_videos.path_for(take_filename)
+            path = self.server.take_videos.path_for(take_filename, camera)
         except TakeVideoError as e:
             raise _HTTPError(HTTPStatus.NOT_FOUND, str(e)) from e
         self._send_file(path)

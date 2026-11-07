@@ -368,7 +368,7 @@ class _ClientHandler(socketserver.StreamRequestHandler):
             elif op == "fetch_take_video":
                 # Same as fetch_take_file, for a take's video — cut from its
                 # session video on this end first (see get_take_video_path).
-                path = self._owner.backend.get_take_video_path(args["filename"])
+                path = self._owner.backend.get_take_video_path(args["filename"], str(args.get("camera") or ""))
                 self.send_file("take_file", Path(path), extra={"filename": Path(path).name})
                 result = {"filename": Path(path).name}
             elif op == "fetch_backing_file":

@@ -257,6 +257,22 @@ def filter_draw_for_track(data: dict, track_index: int, track_name: str) -> dict
     return (data.get("filter_slot_draws") or {}).get(str(track_index))
 
 
+def program_camera_at(data: dict, frame: int, camera_videos: list[dict]) -> str:
+    """The label of the camera on the program feed at `frame` (the session
+    log's "program_camera" events), among the cameras that have a video;
+    else the first of them."""
+    labels = {cam["device"]: cam["camera"] for cam in camera_videos if cam.get("device")}
+    current = ""
+    for e in data.get("events", []):
+        if e.get("event_type") != "program_camera" or e.get("frame") is None:
+            continue
+        if e["frame"] > frame:
+            break
+        if e.get("camera") in labels:
+            current = labels[e["camera"]]
+    return current or camera_videos[0]["camera"]
+
+
 def _copy_flac_segment(src: sf.SoundFile, start: int, end: int, out_path: Path) -> None:
     """Write src's [start, end) frame range to out_path, block-wise — a
     session recording can be hours long, so it's never loaded whole."""
@@ -321,9 +337,10 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
         if (session_dir / c["file"]).exists() or (c.get("upload_file") and (session_dir / c["upload_file"]).exists())
     ]
     if extra_cameras and session_mix_flac.exists():
-        # Every other camera recorded this session (see backend.py's
-        # session_cameras) — each lined up the same way as the main one,
-        # which also turns a phone's upload into its "file".
+        # Every camera that recorded this session ("extra_cameras" is all of
+        # them since cameras became a set; see backend.py's
+        # session_cameras), each lined up against the mix, which also
+        # turns a phone's upload into its "file".
         from ..phone_camera.sync import align_extra_cameras
         align_extra_cameras(session_dir, data, log_path, config.video_latency_compensation_ms)
         extra_cameras = [c for c in extra_cameras if (session_dir / c["file"]).exists()]
@@ -375,9 +392,20 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
             watermark_schedule=watermark_schedule(data, video_offset_ms),
         )
 
-    # Each extra camera becomes its own finished whole-session video, same
-    # audio and watermarking as session_video.mp4 — no per-take cuts, those
-    # still come from the main camera only.
+    # Every camera's finished whole-session video (made here, or by the
+    # vault): what each take's video refs point into, one per camera.
+    camera_videos: list[dict] = []
+    if session_video_ok:
+        # A session from before cameras were a set: its one special camera.
+        phone = data.get("phone_camera") or {}
+        camera_videos.append({
+            "camera": phone.get("label") or data.get("camera_label") or "Camera", "file": "session_video.mp4",
+            "offset_ms": video_offset_ms,
+            "device": f"takeloom-camera:{phone['device_id']}" if phone.get("device_id") else "",
+        })
+
+    # Each camera becomes its own finished whole-session video: the
+    # session's audio, watermarked, lined up with that camera's offset.
     extra_videos_ok = True
     if extra_cameras and session_mix_flac.exists():
         from ..video.capture import mux_spec, mux_video_audio
@@ -401,6 +429,11 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
                 raw.unlink(missing_ok=True)
             else:
                 extra_videos_ok = False
+                continue
+            camera_videos.append({
+                "camera": entry.get("label") or entry["final_file"], "file": entry["final_file"],
+                "offset_ms": offset_ms, "device": entry.get("device", ""),
+            })
 
     saved = 0
     videos = 0
@@ -488,10 +521,19 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
                 )
 
                 video_ref = None
-                if session_video_ok:
-                    video_ref = take_video_ref(
-                        session_dir.name, start, end, mix_start_frame, sample_rate, video_offset_ms,
-                    )
+                if camera_videos:
+                    # Every camera's view of this take, opening on whichever
+                    # was on the program feed when it started.
+                    video_ref = {
+                        "session": session_dir.name,
+                        "default": program_camera_at(data, start, camera_videos),
+                        "cameras": [{
+                            "camera": cam["camera"], "file": cam["file"],
+                            **{k: v for k, v in take_video_ref(
+                                session_dir.name, start, end, mix_start_frame, sample_rate, cam["offset_ms"],
+                            ).items() if k != "session"},
+                        } for cam in camera_videos],
+                    }
                     write_take_video_ref(completed_dir / flac_name, video_ref)
                     videos += 1
                 has_video = video_ref is not None
@@ -569,20 +611,21 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
         atomic_write_text(log_path, json.dumps(data, indent=2))
 
     # Only now that every take has been spliced out of session.flac above —
-    # and every extra camera has its own copy of the audio muxed in.
+    # and every camera has its own copy of the audio muxed in.
     if render_jobs:
         # The vault deletes these once its encodes succeed (render_jobs.py).
         if have_video:
-            render_cleanup += [session_video_raw.name, session_mix_flac.name, session_flac.name]
+            render_cleanup.append(session_video_raw.name)
+        render_cleanup += [session_mix_flac.name, session_flac.name]
         write_jobs(session_dir, render_jobs, render_cleanup)
-    elif session_video_ok and extra_videos_ok:
+    elif camera_videos and extra_videos_ok and (session_video_ok or not have_video):
         session_video_raw.unlink(missing_ok=True)
         session_mix_flac.unlink(missing_ok=True)
-        # The instrument-only track muxed into session_video.mp4 above is a
-        # lossless, bit-identical copy of session.flac's samples, so once
-        # the mux succeeds this standalone file is pure redundancy. Kept
-        # only for audio-only sessions (no camera), where it's the sole
-        # recording.
+        # The instrument-only track muxed into every camera's video above
+        # is a lossless, bit-identical copy of session.flac's samples, so
+        # once those muxes succeed this standalone file is pure
+        # redundancy. Kept only for audio-only sessions (no camera), where
+        # it's the sole recording, or if any camera's video failed.
         session_flac.unlink(missing_ok=True)
 
     take_word = "take" if saved == 1 else "takes"
@@ -593,8 +636,8 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
         summary += f"; {len(render_jobs)} session video{'s' if len(render_jobs) != 1 else ''} left for the vault to encode"
     if have_video and not session_video_ok:
         summary += "; session video mux failed, raw files kept"
-    if extra_cameras:
-        summary += f"; {len(extra_cameras)} extra camera video{'s' if len(extra_cameras) != 1 else ''} saved"
+    if extra_cameras and not render_jobs:
+        summary += f"; {len(extra_cameras)} camera video{'s' if len(extra_cameras) != 1 else ''} saved"
         if not extra_videos_ok:
             summary += " (some failed to mux, raw files kept)"
     return summary + "."

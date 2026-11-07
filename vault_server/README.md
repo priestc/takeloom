@@ -52,10 +52,15 @@ No login: anyone on the local network can browse. The API needs a paired token.
 
 ## Take videos
 
-Completed takes don't get their own video file. Each session log's `takes` snapshot
-records where each take sits in `session_video.mp4` (see `takeloom/take_video.py`). The
-first request for a take's video (`/takes/<take filename>/video` in the browser,
-`/api/takes/<take filename>/video` for takeloom) cuts it out with ffmpeg and caches it. An
+Completed takes don't get their own video file. Cameras are a set: every camera records its
+own whole-session video (`camera1_<name>.mp4`, `camera2_<name>.mp4`, ...), and each session
+log's `takes` snapshot records where each take sits in every one of them, plus which camera
+was on the program feed when the take started (see `takeloom/take_video.py`). The first
+request for a take's video (`/takes/<take filename>/video` in the browser,
+`/api/takes/<take filename>/video` for takeloom) cuts it out with ffmpeg and caches it:
+from the camera named by `?camera=<label>`, or by default the program camera. The session
+page has a button per camera to switch the session video, and a link per camera for each
+take. Sessions from before this have a single `session_video.mp4`, which works as before. An
 hourly sweep evicts clips nobody has requested for `--cache-max-age-days` (default 14), and
 the least recently used ones once the cache passes `--cache-max-gb` (default 20). The cache
 lives in `~/.cache/takeloom-vault/take-videos` unless `--cache-dir` says otherwise.

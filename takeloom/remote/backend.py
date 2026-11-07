@@ -279,12 +279,15 @@ class RemoteBackend(Backend):
             cache_key=f"backing:{take_filename}", local_name="backing_{filename}",
         ))
 
-    def get_take_video_path(self, filename: str) -> str:
+    def get_take_video_path(self, filename: str, camera: str = "") -> str:
         # The studio end produces the clip (see LocalBackend.get_take_video_path)
         # and streams it back the same way as a take's audio.
+        args = {"filename": filename, **({"camera": camera} if camera else {})}
+        import hashlib
+        suffix = "." + hashlib.sha1(camera.encode()).hexdigest()[:8] if camera else ""
         return str(self._fetch_file(
-            "fetch_take_video", {"filename": filename}, cache_key=f"video:{filename}",
-            local_name=Path(filename).stem + ".mp4",
+            "fetch_take_video", args, cache_key=f"video:{filename}:{camera}",
+            local_name=Path(filename).stem + suffix + ".mp4",
         ))
 
     def _fetch_take_file(self, project_name: str, filename: str) -> Path:
