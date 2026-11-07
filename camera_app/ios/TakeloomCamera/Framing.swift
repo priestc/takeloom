@@ -38,21 +38,42 @@ struct ZoomCaps {
     var dictionary: [String: Any] { ["min": min, "max": max, "lenses": lenses, "pan": true] }
 
     /// Split a framing into what the camera does (a centered zoom, optical
-    /// where a lens allows) and a crop of its frames for the rest: as much
-    /// zoom as possible from the camera, while the requested region still
-    /// fits in its centered view. Returns (videoZoomFactor, crop) — the
-    /// crop's size and middle as fractions of the camera's frame.
-    func plan(_ framing: Framing) -> (factor: CGFloat, crop: CropRect) {
+    /// where a lens allows) and a crop of its frames for the rest.
+    /// `previous` is the plan in force: a pan alone keeps the camera's zoom
+    /// whenever the new region still fits in its view, so panning is a crop
+    /// only, instant and smooth, instead of the camera re-zooming (a few
+    /// frames late, so the picture jumps) on every step. When it no longer
+    /// fits, the camera zooms out with room to spare for the next steps. A
+    /// zoom change, or a centered shot, sets the camera's zoom to fit
+    /// exactly: all optical. Same rule as the Android app's ZoomCaps.plan.
+    func plan(_ framing: Framing, previous: FramingPlan?) -> FramingPlan {
         let zoom = Swift.min(Swift.max(framing.zoom, min), max)
         let visible = min / zoom  // of the widest view
         let limit = (1 - visible) / 2
         let dx = Swift.min(Swift.max(framing.x - 0.5, -limit), limit)
         let dy = Swift.min(Swift.max(framing.y - 0.5, -limit), limit)
-        let cameraView = Swift.min(1, visible + 2 * Swift.max(abs(dx), abs(dy)))
+        let need = Swift.min(1, visible + 2 * Swift.max(abs(dx), abs(dy)))
+        let centered = abs(dx) < 1e-6 && abs(dy) < 1e-6
+        let cameraView: Double
+        if let previous, abs(previous.zoom - zoom) < 1e-9, !centered {
+            cameraView = need <= previous.cameraView + 1e-9 ? previous.cameraView : Swift.min(1, need + visible)
+        } else {
+            cameraView = need
+        }
         let factor = CGFloat(min / cameraView * mainFactor)
-        let size = visible / cameraView
-        return (factor, CropRect(size: size, x: 0.5 + dx / cameraView, y: 0.5 + dy / cameraView))
+        let crop = CropRect(size: visible / cameraView, x: 0.5 + dx / cameraView, y: 0.5 + dy / cameraView)
+        return FramingPlan(factor: factor, crop: crop, cameraView: cameraView, zoom: zoom)
     }
+}
+
+/// How a framing is carried out (ZoomCaps.plan): the camera's
+/// videoZoomFactor, the crop of its frames, and how much of the widest view
+/// the camera itself shows.
+struct FramingPlan: Equatable {
+    var factor: CGFloat
+    var crop: CropRect
+    var cameraView: Double
+    var zoom: Double
 }
 
 struct CropRect: Equatable {

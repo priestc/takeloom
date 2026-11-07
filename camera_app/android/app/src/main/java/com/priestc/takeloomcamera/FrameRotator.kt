@@ -34,6 +34,10 @@ import java.util.concurrent.CountDownLatch
  */
 class FrameRotator(width: Int, height: Int, outputs: List<Triple<Surface, Int, Int>>) {
     @Volatile var rotate180 = false
+    /** Zoom/pan beyond what the camera does itself (ZoomCaps.plan). */
+    @Volatile var crop = GlCrop()
+    private val coords: FloatBuffer =
+        ByteBuffer.allocateDirect(8 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
 
     private val thread = HandlerThread("frame-rotator").apply { start() }
     private val handler = Handler(thread.looper)
@@ -124,7 +128,7 @@ class FrameRotator(width: Int, height: Int, outputs: List<Triple<Surface, Int, I
         // video 90° off. The encoders always got the sensor's frames as
         // they are, so all that's needed is GL's bottom-up rows flipped.
         val timestampNs = surfaceTexture.timestamp
-        val coords = if (rotate180) ROTATED_COORDS else UPRIGHT_COORDS
+        fillCoords()
         for (t in targets) {
             if (!EGL14.eglMakeCurrent(display, t.egl, t.egl, context)) continue
             GLES20.glViewport(0, 0, t.width, t.height)
@@ -142,6 +146,27 @@ class FrameRotator(width: Int, height: Int, outputs: List<Triple<Surface, Int, I
             EGLExt.eglPresentationTimeANDROID(display, t.egl, timestampNs)
             EGL14.eglSwapBuffers(display, t.egl)
         }
+    }
+
+    /**
+     * Texture coordinates for the quad's corners (bottom-left, bottom-right,
+     * top-left, top-right of the picture sent): each corner's place in the
+     * picture, turned 180° into the sensor's orientation if need be, then
+     * into the crop. The t written is 1 - y because FLIP_ROWS turns it
+     * back round into the buffer's top-down rows.
+     */
+    private fun fillCoords() {
+        val c = crop
+        val turn = rotate180
+        coords.position(0)
+        for ((px, py) in CORNERS) {
+            val rx = if (turn) 1 - px else px
+            val ry = if (turn) 1 - py else py
+            val sx = c.x + (rx - 0.5) * c.size
+            val sy = c.y + (ry - 0.5) * c.size
+            coords.put(sx.toFloat()).put((1 - sy).toFloat())
+        }
+        coords.position(0)
     }
 
     /** Blocks until the GL side is torn down. Call before the encoders' surfaces go. */
@@ -221,8 +246,7 @@ class FrameRotator(width: Int, height: Int, outputs: List<Triple<Surface, Int, I
 
         // Full-screen triangle strip: bottom-left, bottom-right, top-left, top-right.
         val QUAD = floats(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
-        val UPRIGHT_COORDS = floats(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
-        // The same corners, 180° round: (s, t) -> (1 - s, 1 - t).
-        val ROTATED_COORDS = floats(1f, 1f, 0f, 1f, 1f, 0f, 0f, 0f)
+        /** The same corners in the picture: x from the left, y from the top. */
+        val CORNERS = listOf(0.0 to 1.0, 1.0 to 1.0, 0.0 to 0.0, 1.0 to 0.0)
     }
 }

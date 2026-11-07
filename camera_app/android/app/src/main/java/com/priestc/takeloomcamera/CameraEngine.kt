@@ -105,6 +105,11 @@ class CameraEngine(context: Context) {
     @Volatile var zoomCaps: ZoomCaps? = null
         private set
     private var request: CaptureRequest.Builder? = null
+    private var framingPlan: FramingPlan? = null
+    /** What [FrameRotator] cuts out, in the picture as the server sees it
+     *  (for the preview JPEGs, which come from the uncropped TextureView). */
+    @Volatile var pictureCrop = GlCrop()
+        private set
 
     fun nowNs(): Long = if (useBootTime) SystemClock.elapsedRealtimeNanos() else System.nanoTime()
 
@@ -228,6 +233,7 @@ class CameraEngine(context: Context) {
                     set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
                 }
                 this@CameraEngine.request = request
+                framingPlan = null  // a new request: everything gets set
                 applyFraming()
             }
 
@@ -345,11 +351,17 @@ class CameraEngine(context: Context) {
         // The server's x/y are in the picture as it sees it; with the
         // frames turned 180°, that's the opposite side of the sensor.
         val f = if (upsideDown) framing.copy(x = 1 - framing.x, y = 1 - framing.y) else framing
-        val (ratio, crop) = caps.plan(f)
-        if (ratio != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            r.set(CaptureRequest.CONTROL_ZOOM_RATIO, ratio)
+        val plan = caps.plan(f, framingPlan)
+        val cameraChanged = plan.ratio != framingPlan?.ratio || plan.crop != framingPlan?.crop
+        framingPlan = plan
+        rotator?.crop = plan.glCrop
+        val g = plan.glCrop
+        pictureCrop = if (upsideDown) g.copy(x = 1 - g.x, y = 1 - g.y) else g
+        if (!cameraChanged) return  // a pan inside the camera's view: the crop alone
+        if (plan.ratio != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            r.set(CaptureRequest.CONTROL_ZOOM_RATIO, plan.ratio)
         }
-        r.set(CaptureRequest.SCALER_CROP_REGION, crop)
+        r.set(CaptureRequest.SCALER_CROP_REGION, plan.crop)
         runCatching { s.setRepeatingRequest(r.build(), null, handler) }
     }
 

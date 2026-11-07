@@ -8,8 +8,11 @@ backend.py's PreviewSubscription), so it's sharp, and over Remote only that
 one camera costs full-resolution bandwidth.
 
 A Takeloom Camera phone in the program view can be zoomed and panned
-(Backend.set_camera_framing; phone_camera/framing.py): scroll to zoom, drag
-to pan, the lens buttons below it, or +/-, 0 (reset) and the arrow keys.
+(Backend.set_camera_framing; phone_camera/framing.py): scroll to zoom, the
+lens buttons and +/- below it, the pan pad (click or hold an arrow; the
+middle re-centers), or +/-, 0 (reset) and the arrow keys. Panning moves in
+steps rather than following a mouse drag, which lagged behind over the
+network.
 The phone zooms optically where it can and crops for the rest, and the
 server remembers each camera's framing for the next time it connects. Click a thumbnail, or press its number key, to make it the program
 camera (Backend.set_program_camera): the stream switches to it, and during a
@@ -37,6 +40,9 @@ THUMB_W, THUMB_H = 224, 126
 RENDER_INTERVAL_MS = 50  # at most ~20 redraws a second, whatever the cameras send
 FRAMING_SEND_INTERVAL_S = 0.1  # while dragging/scrolling: at most 10 framing updates a second
 ZOOM_STEP = 1.15  # per scroll notch / +/- press
+PAN_STEP = 0.1  # per arrow press: this fraction of what's in view
+PAN_REPEAT_DELAY_MS = 400  # holding a pan arrow: first repeat after this,
+PAN_REPEAT_MS = 250        # then one step every this long
 PROGRAM_COLOR = "#d32f2f"
 IDLE_COLOR = "#3a3a3a"
 BG = "#111111"
@@ -77,7 +83,6 @@ class VideoUIFrame(tk.Frame):
         self._framing: dict | None = None
         self._framing_pending: dict | None = None  # newest change not yet sent
         self._framing_sender_busy = False
-        self._drag_start: tuple[int, int, float, float] | None = None
 
         self.strip = tk.Frame(self, background=BG)
         self.strip.pack(side="top", fill="x", padx=12, pady=(12, 8))
@@ -95,9 +100,6 @@ class VideoUIFrame(tk.Frame):
         self.program_view.bind("<MouseWheel>", self._on_wheel)
         self.program_view.bind("<Button-4>", lambda _e: self._zoom_by(ZOOM_STEP))  # X11 scroll
         self.program_view.bind("<Button-5>", lambda _e: self._zoom_by(1 / ZOOM_STEP))
-        self.program_view.bind("<ButtonPress-1>", self._on_drag_start)
-        self.program_view.bind("<B1-Motion>", self._on_drag)
-        self.program_view.bind("<ButtonRelease-1>", lambda _e: setattr(self, "_drag_start", None))
 
         self.app_state.add_listener(self._on_app_state_changed)
         self.bind("<Destroy>", self._on_destroy)
@@ -173,7 +175,7 @@ class VideoUIFrame(tk.Frame):
             self._set_program(data.get("camera", ""))
         elif event == "camera_framing_changed":
             if data.get("camera") == self._program and "zoom" in data:
-                if self._drag_start is None and self._framing_pending is None:
+                if self._framing_pending is None:
                     self._show_framing(data)  # someone else's change (or the server's clamp)
             elif not data.get("camera"):
                 self._refresh_framing()  # a phone's zoom abilities changed
@@ -234,11 +236,8 @@ class VideoUIFrame(tk.Frame):
             self._zoom_by(1 / ZOOM_STEP)
         elif event.char == "0":
             self._change_framing(zoom=1.0, x=0.5, y=0.5)
-        elif event.keysym in ("Left", "Right", "Up", "Down") and self._framing is not None:
-            step = self._visible_fraction() * 0.1
-            dx = {"Left": -step, "Right": step}.get(event.keysym, 0.0)
-            dy = {"Up": -step, "Down": step}.get(event.keysym, 0.0)
-            self._change_framing(x=self._framing["x"] + dx, y=self._framing["y"] + dy)
+        elif event.keysym in ("Left", "Right", "Up", "Down"):
+            self._pan({"Left": -1, "Right": 1}.get(event.keysym, 0), {"Up": -1, "Down": 1}.get(event.keysym, 0))
 
     # --- framing (zoom/pan) ---
 
@@ -254,28 +253,46 @@ class VideoUIFrame(tk.Frame):
         self._run(lambda: backend.get_camera_framing(device), done)
 
     def _show_framing(self, framing: dict | None) -> None:
-        """Rebuild the bar under the program view for `framing`."""
+        """Show `framing` in the bar under the program view. Only rebuilt
+        when what the camera can do changes; a zoom/pan just updates the
+        zoom readout and lens highlight in place, so a held pan arrow
+        (a repeating button) isn't destroyed under the mouse."""
         self._framing = framing
+        layout = None if framing is None else (
+            tuple(framing.get("lenses") or []), framing.get("min"), framing.get("max"), bool(framing.get("pan")))
+        if layout != getattr(self, "_framing_layout", None):
+            self._framing_layout = layout
+            self._build_framing_bar(framing)
+        if framing is None:
+            return
+        self._zoom_label.configure(text=f"{framing['zoom']:.1f}×")
+        for lens, b in self._lens_buttons:
+            active = abs(framing["zoom"] - lens) < 0.01
+            b.configure(highlightbackground=PROGRAM_COLOR if active else BG,
+                        foreground="white" if active else "black")
+
+    def _build_framing_bar(self, framing: dict | None) -> None:
         for child in self.framing_bar.winfo_children():
             child.destroy()
+        self._lens_buttons: list[tuple[float, tk.Button]] = []
         if framing is None:
             return
 
-        def button(text, command, active=False) -> None:
-            tk.Button(self.framing_bar, text=text, command=command, takefocus=False,
-                      highlightbackground=PROGRAM_COLOR if active else BG,
-                      foreground="white" if active else "black").pack(side="left", padx=(0, 4))
+        def button(text, command) -> tk.Button:
+            b = tk.Button(self.framing_bar, text=text, command=command, takefocus=False,
+                          highlightbackground=BG, foreground="black")
+            b.pack(side="left", padx=(0, 4))
+            return b
 
         for lens in framing.get("lenses") or []:
-            label = f"{lens:g}×"
-            button(label, lambda z=lens: self._change_framing(zoom=z), active=abs(framing["zoom"] - lens) < 0.01)
+            self._lens_buttons.append((lens, button(f"{lens:g}×", lambda z=lens: self._change_framing(zoom=z))))
         button("−", lambda: self._zoom_by(1 / ZOOM_STEP))
-        tk.Label(self.framing_bar, text=f"{framing['zoom']:.1f}×", width=6, background=BG,
-                 foreground="white").pack(side="left")
+        self._zoom_label = tk.Label(self.framing_bar, width=6, background=BG, foreground="white")
+        self._zoom_label.pack(side="left")
         button("+", lambda: self._zoom_by(ZOOM_STEP))
         if framing.get("pan"):
-            button("Center", lambda: self._change_framing(x=0.5, y=0.5))
-        hint = "Scroll to zoom" + (", drag to pan" if framing.get("pan") else "") + "; remembered for this camera"
+            self._pan_pad()
+        hint = "Scroll to zoom" + (", arrows to pan" if framing.get("pan") else "") + "; remembered for this camera"
         tk.Label(self.framing_bar, text=hint, background=BG, foreground="#888888").pack(side="left", padx=12)
 
     def _visible_fraction(self) -> float:
@@ -291,21 +308,25 @@ class VideoUIFrame(tk.Frame):
         if event.delta:
             self._zoom_by(ZOOM_STEP if event.delta > 0 else 1 / ZOOM_STEP)
 
-    def _on_drag_start(self, event) -> None:
-        if self._framing is not None and self._framing.get("pan"):
-            self._drag_start = (event.x, event.y, self._framing["x"], self._framing["y"])
+    def _pan_pad(self) -> None:
+        """A joystick-style pad in the framing bar: ▲ ◀ ▶ ▼ step the view
+        (held, they keep stepping), ● re-centers."""
+        pad = tk.Frame(self.framing_bar, background=BG)
+        pad.pack(side="left", padx=(8, 0))
+        for text, row, col, dx, dy in (("▲", 0, 1, 0, -1), ("◀", 1, 0, -1, 0), ("▶", 1, 2, 1, 0), ("▼", 2, 1, 0, 1)):
+            tk.Button(pad, text=text, width=2, takefocus=False, highlightbackground=BG,
+                      repeatdelay=PAN_REPEAT_DELAY_MS, repeatinterval=PAN_REPEAT_MS,
+                      command=lambda dx=dx, dy=dy: self._pan(dx, dy)).grid(row=row, column=col)
+        tk.Button(pad, text="●", width=2, takefocus=False, highlightbackground=BG,
+                  command=lambda: self._change_framing(x=0.5, y=0.5)).grid(row=1, column=1)
 
-    def _on_drag(self, event) -> None:
-        if self._drag_start is None or self._framing is None:
+    def _pan(self, dx: int, dy: int) -> None:
+        """One step: PAN_STEP of what's in view, so it's the same feel at
+        any zoom. Moves the view, so ▶ shows what's to the right."""
+        if self._framing is None or not self._framing.get("pan"):
             return
-        x0, y0, fx, fy = self._drag_start
-        # The picture moves with the mouse, like a map: dragging right shows
-        # what's to the left.
-        width = self._program_imgtk.width() if self._program_imgtk else self.program_view.winfo_width()
-        height = self._program_imgtk.height() if self._program_imgtk else self.program_view.winfo_height()
-        visible = self._visible_fraction()
-        self._change_framing(x=fx - (event.x - x0) / max(width, 1) * visible,
-                             y=fy - (event.y - y0) / max(height, 1) * visible)
+        step = self._visible_fraction() * PAN_STEP
+        self._change_framing(x=self._framing["x"] + dx * step, y=self._framing["y"] + dy * step)
 
     def _change_framing(self, **changes) -> None:
         """Apply locally at once (clamped like the server will), and queue

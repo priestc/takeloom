@@ -45,6 +45,8 @@ final class CameraPipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     /// Zoom/pan from the server, and what this camera can do (status).
     private(set) var framing = Framing()
     private(set) var zoomCaps: ZoomCaps?
+    /// sessionQueue: the plan in force (ZoomCaps.plan keeps pans crop-only).
+    private var framingPlan: FramingPlan?
     /// videoQueue: the crop that framing needs beyond the camera's own zoom.
     private var crop = CropRect()
     private let cropper = FrameCropper()
@@ -180,6 +182,7 @@ final class CameraPipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         }
         applyRotation()
         zoomCaps = ZoomCaps(device: device)
+        framingPlan = nil  // a new camera: its zoom gets set
         applyFraming()
         return nil
     }
@@ -230,12 +233,14 @@ final class CameraPipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     /// sessionQueue: the camera's zoom, and the crop for the rest.
     private func applyFraming() {
         guard let device = videoInput?.device, let caps = zoomCaps else { return }
-        let plan = caps.plan(framing)
-        if (try? device.lockForConfiguration()) != nil {
+        let plan = caps.plan(framing, previous: framingPlan)
+        // A pan inside the camera's view leaves its zoom alone: the crop only.
+        if plan.factor != framingPlan?.factor, (try? device.lockForConfiguration()) != nil {
             device.videoZoomFactor = min(max(plan.factor, device.minAvailableVideoZoomFactor),
                                          device.maxAvailableVideoZoomFactor)
             device.unlockForConfiguration()
         }
+        framingPlan = plan
         videoQueue.async { self.crop = plan.crop }
     }
 
