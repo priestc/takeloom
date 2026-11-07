@@ -259,8 +259,9 @@ class VideoUIFrame(tk.Frame):
         self._zoom_label.configure(text=f"{framing['zoom']:.1f}×")
         for lens, b in self._lens_buttons:
             active = abs(framing["zoom"] - lens) < 0.01
-            b.configure(highlightbackground=PROGRAM_COLOR if active else BG,
-                        foreground="white" if active else "black")
+            # Only the red ring marks it: macOS draws Tk buttons white, so
+            # white text on the active one vanished.
+            b.configure(highlightbackground=PROGRAM_COLOR if active else BG)
 
     def _build_framing_bar(self, framing: dict | None) -> None:
         for child in self.framing_bar.winfo_children():

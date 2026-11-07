@@ -3,7 +3,10 @@ package com.priestc.takeloomcamera
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.ActivityInfo
+import android.graphics.Bitmap
+import android.graphics.PixelFormat
 import android.graphics.SurfaceTexture
+import android.media.ImageReader
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
@@ -82,6 +85,14 @@ class CameraEngine(context: Context) {
     private var liveSurface: Surface? = null
     private var previewSurface: Surface? = null
     private var rotator: FrameRotator? = null
+    /** A small copy of every frame the encoders get (FrameRotator's third
+     *  output), for the server's preview JPEGs: the same turn and crop as
+     *  the video. Only the newest is kept ([latestPreview]), so the GL
+     *  thread never waits on it. */
+    private var previewReader: ImageReader? = null
+    private val previewThread = HandlerThread("preview-frames").apply { start() }
+    private var latestPreview: android.media.Image? = null
+    private val previewLock = Object()
     /** What the phone's orientation asks for; applied whenever not recording. */
     @Volatile private var wantUpsideDown = false
     /** What the encoders are actually getting (frozen during a recording). */
@@ -123,10 +134,6 @@ class CameraEngine(context: Context) {
     private var openId: String? = null
     private var request: CaptureRequest.Builder? = null
     private var framingPlan: FramingPlan? = null
-    /** What [FrameRotator] cuts out, in the picture as the server sees it
-     *  (for the preview JPEGs, which come from the uncropped TextureView). */
-    @Volatile var pictureCrop = GlCrop()
-        private set
 
     fun nowNs(): Long = if (useBootTime) SystemClock.elapsedRealtimeNanos() else System.nanoTime()
 
@@ -194,9 +201,21 @@ class CameraEngine(context: Context) {
             liveWidth = width
             liveHeight = height
         }
+        val previewHeight = PREVIEW_WIDTH * height / maxOf(width, 1) / 2 * 2
+        val reader = ImageReader.newInstance(PREVIEW_WIDTH, previewHeight, PixelFormat.RGBA_8888, 3).apply {
+            setOnImageAvailableListener({ r ->
+                val image = runCatching { r.acquireLatestImage() }.getOrNull() ?: return@setOnImageAvailableListener
+                synchronized(previewLock) {
+                    latestPreview?.close()
+                    latestPreview = image
+                }
+            }, Handler(previewThread.looper))
+        }
+        previewReader = reader
         val outputs = listOfNotNull(
             Triple(encoderSurface!!, width, height),
             liveSurface?.let { Triple(it, liveWidth, liveHeight) },
+            Triple(reader.surface, PREVIEW_WIDTH, previewHeight),
         )
         try {
             rotator = FrameRotator(width, height, outputs).also { it.rotate180 = upsideDown }
@@ -470,8 +489,6 @@ class CameraEngine(context: Context) {
         val cameraChanged = plan.ratio != framingPlan?.ratio || plan.crop != framingPlan?.crop
         framingPlan = plan
         rotator?.crop = plan.glCrop
-        val g = plan.glCrop
-        pictureCrop = if (upsideDown) g.copy(x = 1 - g.x, y = 1 - g.y) else g
         if (!cameraChanged) return  // a pan inside the camera's view: the crop alone
         if (plan.ratio != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             r.set(CaptureRequest.CONTROL_ZOOM_RATIO, plan.ratio)
@@ -509,6 +526,25 @@ class CameraEngine(context: Context) {
         requestKeyframe()  // the live decoder gets a clean picture straight away
     }
 
+    /** The newest small frame as a bitmap (null: none yet), for the
+     *  server's preview JPEGs. Exactly what the encoders got. */
+    fun takePreview(): Bitmap? = synchronized(previewLock) {
+        val image = latestPreview ?: return null
+        latestPreview = null
+        try {
+            val plane = image.planes[0]
+            val rowPixels = plane.rowStride / plane.pixelStride
+            val padded = Bitmap.createBitmap(rowPixels, image.height, Bitmap.Config.ARGB_8888)
+            padded.copyPixelsFromBuffer(plane.buffer)
+            if (rowPixels == image.width) padded
+            else Bitmap.createBitmap(padded, 0, 0, image.width, image.height).also { padded.recycle() }
+        } catch (_: Exception) {
+            null
+        } finally {
+            image.close()
+        }
+    }
+
     fun stop() = handler.post { stopLocked() }
 
     private fun stopLocked() {
@@ -520,6 +556,12 @@ class CameraEngine(context: Context) {
         openId = null
         rotator?.release()  // before the encoder surfaces it draws into go
         rotator = null
+        synchronized(previewLock) {
+            latestPreview?.close()
+            latestPreview = null
+        }
+        previewReader?.close()
+        previewReader = null
         draining = false
         drainThreads.forEach { it.join(500) }
         drainThreads.clear()
@@ -562,6 +604,10 @@ class CameraEngine(context: Context) {
             }
             done(result)
         }.start()
+    }
+
+    private companion object {
+        const val PREVIEW_WIDTH = 320
     }
 
     private fun bytesOf(buffer: ByteBuffer): ByteArray {

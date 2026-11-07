@@ -77,7 +77,9 @@ class FrameRotator(width: Int, height: Int, outputs: List<Triple<Surface, Int, I
         val version = IntArray(2)
         check(EGL14.eglInitialize(display, version, 0, version, 1)) { "eglInitialize failed" }
         val attribs = intArrayOf(
-            EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8,
+            // Alpha too: the preview ImageReader's buffers are RGBA_8888, and
+            // an RGBX surface would be refused there as the wrong format.
+            EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_ALPHA_SIZE, 8,
             EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
             EGLExt.EGL_RECORDABLE_ANDROID, 1,
             EGL14.EGL_NONE,

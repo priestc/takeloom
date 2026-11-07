@@ -253,25 +253,12 @@ class MainActivity : Activity() {
             val s = (SystemClock.elapsedRealtime() - recordingSince) / 1000
             recordingText.text = String.format("● REC %d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
         }
-        if (!previewBusy && textureView.isAvailable) {
-            val crop = engine.pictureCrop
-            val outW = 320
-            val outH = 320 * engine.height / maxOf(engine.width, 1)
-            // The TextureView shows the camera's whole view; the video sent
-            // is cut down to `crop` (zoom/pan on the GPU), so cut the
-            // preview the same way, from a bigger grab so it stays sharp.
-            val grabScale = (1.0 / crop.size).coerceIn(1.0, 4.0)
-            val full = textureView.getBitmap((outW * grabScale).toInt(), (outH * grabScale).toInt()) ?: return
+        if (!previewBusy) {
+            // From the video pipeline, not the TextureView: getBitmap()
+            // leaves out the view's rotation, so those came out sideways.
+            val bitmap = engine.takePreview() ?: return
             previewBusy = true
             previewExecutor.execute {
-                val bitmap = if (crop.size > 0.999) full else {
-                    val w = (full.width * crop.size).toInt().coerceIn(1, full.width)
-                    val h = (full.height * crop.size).toInt().coerceIn(1, full.height)
-                    val left = (full.width * crop.x - w / 2.0).toInt().coerceIn(0, full.width - w)
-                    val top = (full.height * crop.y - h / 2.0).toInt().coerceIn(0, full.height - h)
-                    Bitmap.createScaledBitmap(Bitmap.createBitmap(full, left, top, w, h), outW, outH, true)
-                        .also { full.recycle() }
-                }
                 val out = ByteArrayOutputStream()
                 bitmap.compress(Bitmap.CompressFormat.JPEG, 60, out)
                 bitmap.recycle()
@@ -507,6 +494,8 @@ class MainActivity : Activity() {
         sleepCover = View(this).apply {
             setBackgroundColor(Color.BLACK)
             visibility = View.GONE
+            // Buttons are raised (elevation), so they'd show through a flat cover.
+            elevation = dp(100).toFloat()
         }
         root.addView(sleepCover, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
