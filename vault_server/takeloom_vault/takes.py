@@ -90,6 +90,9 @@ class TakeVideoCache:
             raise TakeVideoError(f"No video is recorded for take {take_filename!r}.")
         session_video = self.vault.session_dir(ref["session"]) / "session_video.mp4"
         if not session_video.is_file():
+            if (session_video.parent / "render_jobs.json").is_file():
+                raise TakeVideoError(f"The session video for {take_filename!r} is still being encoded "
+                                     f"on the vault ({ref['session']}); try again in a few minutes.")
             raise TakeVideoError(f"Session video for {take_filename!r} is missing ({ref['session']}).")
         # Keyed by the ref and the session video's size/mtime too, not just
         # the name: a corrected ref or a rebuilt session video must never

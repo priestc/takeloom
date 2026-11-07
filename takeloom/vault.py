@@ -236,7 +236,36 @@ def remote_vault(config: StudioConfig, log: LogFn | None = None) -> "VaultClient
     return VaultClient(config.vault_server, config.vault_server_token)
 
 
-def sync_and_maybe_prune(config: StudioConfig, session_dir: Path, log: LogFn | None = None) -> None:
+def vault_encodes_videos(config: StudioConfig, log: LogFn | None = None) -> bool:
+    """Whether a just-ended session's videos should be left for the vault
+    server to encode (StudioConfig.video_encoding; video/render_jobs.py):
+    only asked for "vault", only with "remote" storage (with "both" the
+    local copy would never get its videos), and only if the vault says
+    it can right now. Anything else: this machine encodes."""
+    if config.video_encoding != "vault":
+        return False
+    if config.session_vault_mode != "remote":
+        if log:
+            log("Encoding the session videos here: the vault only encodes with \"Remote only\" storage.")
+        return False
+    client = remote_vault(config, log)
+    if client is None:
+        return False
+    try:
+        info = client.ping()
+    except Exception as e:  # noqa: BLE001 — any failure: encode here
+        if log:
+            log(f"Encoding the session videos here: couldn't reach the vault at {client.url} ({e}).")
+        return False
+    if not info.get("encode"):
+        if log:
+            log(f"Encoding the session videos here: the vault at {client.url} can't encode "
+                "(it needs takeloom-vault 0.2 or later, and ffmpeg with libx264).")
+        return False
+    return True
+
+
+def sync_and_maybe_prune(config: StudioConfig, session_dir: Path, log: LogFn | None = None) -> bool:
     """Best-effort: upload `session_dir` (already inside the vault) to the
     remote vault server if session_vault_mode is "remote" or "both", and
     — only for "remote" mode, and only once every file's upload was
@@ -250,16 +279,17 @@ def sync_and_maybe_prune(config: StudioConfig, session_dir: Path, log: LogFn | N
     log = log or (lambda msg: None)
     client = remote_vault(config, log)
     if client is None:
-        return
+        return False
     name = session_dir.name
     log(f"Uploading session '{name}' to the vault at {client.url}...")
     if not client.upload_session(session_dir, name, log=log):
         log(f"Vault upload failed for '{name}' — kept locally.")
-        return
+        return False
     log(f"Uploaded '{name}' to the vault.")
     if config.session_vault_mode == "remote":
         shutil.rmtree(session_dir, ignore_errors=True)
         log(f"Removed local copy of '{name}' (remote-only vault mode).")
+    return True
 
 
 def _files_used_by_track(project: Project, track: TrackEntry, config: StudioConfig) -> set[tuple[Path, str]]:

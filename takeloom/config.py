@@ -275,6 +275,14 @@ class StudioConfig:
     # and then deletes the local copy once that's verified; "both" uploads
     # but keeps the local copy too; "local" never syncs.
     session_vault_mode: str = "local"
+    # Where a session's videos get encoded after it ends (the heavy part of
+    # processing: every camera's whole-session video, re-encoded with its
+    # watermark). "local" | "vault": "vault" leaves them to the vault
+    # server's CPU (video/render_jobs.py), for a vault that's a capable
+    # computer rather than a low-powered NAS. Only used with "remote"
+    # vault storage, and only when the vault says it can (ffmpeg with
+    # libx264); otherwise this machine encodes as usual.
+    video_encoding: str = "local"
     session_vault_path: str = str(Path.home() / "Documents" / "Takeloom Studio Vault")
     # The remote vault: a `takeloom-vault` server (this repo's vault_server/
     # folder), e.g. "http://tank2:51824" — see takeloom/vault_client.py.
@@ -358,6 +366,8 @@ class StudioConfig:
             errors.append("Streaming is enabled but no YouTube stream key is set.")
         if self.session_vault_mode not in ("local", "remote", "both"):
             errors.append(f"Invalid vault mode: {self.session_vault_mode}. Must be 'local', 'remote', or 'both'.")
+        if self.video_encoding not in ("local", "vault"):
+            errors.append(f"Invalid video encoding place: {self.video_encoding}. Must be 'local' or 'vault'.")
         if self.session_vault_mode in ("remote", "both") and not self.vault_server.strip():
             errors.append(f"Vault mode is '{self.session_vault_mode}' but no remote vault server is set.")
         for inst in self.instruments:

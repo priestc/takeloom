@@ -274,14 +274,22 @@ def _copy_flac_segment(src: sf.SoundFile, start: int, end: int, out_path: Path) 
             remaining -= len(block)
 
 
-def process_session(session_dir: Path, config: StudioConfig) -> str:
+def process_session(session_dir: Path, config: StudioConfig, defer_video: bool = False) -> str:
     """Turn a finished session directory (session.flac + session_log.json,
     plus the raw video/mix pair when a camera ran) into completed take files
     and setlist updates. Returns a one-line human-readable summary.
 
     Also finalizes the whole-session video (session_video.mp4) and removes
     any inspiration tracks this session added to the setlist that ended up
-    with no take at all."""
+    with no take at all.
+
+    With defer_video, the session videos aren't encoded here: their ffmpeg
+    commands go into render_jobs.json for the vault server to run
+    (video/render_jobs.py), and their inputs stay in place for it. Takes
+    are filed exactly as if the videos had been made."""
+    from ..video.render_jobs import encoding_name, write_jobs
+    render_jobs: list[dict] = []
+    render_cleanup: list[str] = []
     log_path = session_dir / "session_log.json"
     data = json.loads(log_path.read_text())
 
@@ -346,7 +354,19 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
     # on demand only when someone actually wants to watch it (the vault
     # server's take-video endpoint / Backend.get_take_video_path).
     session_video_ok = False
-    if have_video:
+    if have_video and defer_video:
+        from ..video.capture import mux_spec
+        spec, pngs = mux_spec(
+            session_video_raw, session_mix_flac, session_flac,
+            session_dir / encoding_name("session_video.mp4"),
+            video_offset_ms=video_offset_ms,
+            watermark_schedule=watermark_schedule(data, video_offset_ms),
+            relative_to=session_dir,
+        )
+        render_jobs.append({"output": "session_video.mp4", "spec": spec})
+        render_cleanup += [png.name for png in pngs]
+        session_video_ok = True  # once the vault has run it
+    elif have_video:
         from ..video.capture import mux_video_audio
         session_video_ok = mux_video_audio(
             session_video_raw, session_mix_flac, session_flac,
@@ -360,13 +380,21 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
     # still come from the main camera only.
     extra_videos_ok = True
     if extra_cameras and session_mix_flac.exists():
-        from ..video.capture import mux_video_audio
+        from ..video.capture import mux_spec, mux_video_audio
         for entry in extra_cameras:
             raw = session_dir / entry["file"]
             offset_ms = entry.get("video_offset_ms")
             if offset_ms is None:
                 offset_ms = config.video_latency_compensation_ms
-            if mux_video_audio(
+            if defer_video:
+                spec, pngs = mux_spec(
+                    raw, session_mix_flac, session_flac, session_dir / encoding_name(entry["final_file"]),
+                    video_offset_ms=offset_ms, watermark_schedule=watermark_schedule(data, offset_ms),
+                    relative_to=session_dir,
+                )
+                render_jobs.append({"output": entry["final_file"], "spec": spec})
+                render_cleanup += [raw.name, *(png.name for png in pngs)]
+            elif mux_video_audio(
                 raw, session_mix_flac, session_flac, session_dir / entry["final_file"],
                 video_offset_ms=offset_ms, watermark_schedule=watermark_schedule(data, offset_ms),
             ):
@@ -542,7 +570,12 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
 
     # Only now that every take has been spliced out of session.flac above —
     # and every extra camera has its own copy of the audio muxed in.
-    if session_video_ok and extra_videos_ok:
+    if render_jobs:
+        # The vault deletes these once its encodes succeed (render_jobs.py).
+        if have_video:
+            render_cleanup += [session_video_raw.name, session_mix_flac.name, session_flac.name]
+        write_jobs(session_dir, render_jobs, render_cleanup)
+    elif session_video_ok and extra_videos_ok:
         session_video_raw.unlink(missing_ok=True)
         session_mix_flac.unlink(missing_ok=True)
         # The instrument-only track muxed into session_video.mp4 above is a
@@ -556,6 +589,8 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
     summary = f"Session processed: {saved} completed {take_word} saved"
     if videos:
         summary += f" ({videos} with video)"
+    if render_jobs:
+        summary += f"; {len(render_jobs)} session video{'s' if len(render_jobs) != 1 else ''} left for the vault to encode"
     if have_video and not session_video_ok:
         summary += "; session video mux failed, raw files kept"
     if extra_cameras:

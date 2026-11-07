@@ -163,6 +163,11 @@ def session_page(vault: Vault, name: str, data: dict) -> str:
     has_video = (directory / "session_video.mp4").exists()
     if has_video:
         parts.append(f"<video id='v' controls preload='metadata' src='{_media_url(rel + '/session_video.mp4')}'></video>")
+    elif (directory / "render_jobs.json").exists():
+        parts.append(
+            "<p class='banner'>This session's videos are being encoded on this machine "
+            "(takeloom left them for the vault). Refresh in a few minutes.</p>"
+        )
     elif (directory / "session_video_raw.mp4").exists():
         parts.append(
             "<p class='banner'>This session's video was never processed into a playable file "

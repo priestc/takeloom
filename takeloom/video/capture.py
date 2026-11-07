@@ -279,6 +279,41 @@ def mux_video_audio(
     """Combine a silent video file with two audio tracks: a compressed mix
     (backing track + instrument, for easy playback/sharing) and a lossless
     instrument-only track (for anyone who wants to remix or isolate it).
+    See mux_spec for the options. Runs here; the vault server can make the
+    same video from the same spec instead (video/render_jobs.py)."""
+    if not ffmpeg_available():
+        return False
+    spec, watermark_pngs = mux_spec(video_path, mix_audio_path, instrument_audio_path, output_path,
+                                    watermark_text=watermark_text, video_offset_ms=video_offset_ms,
+                                    watermark_schedule=watermark_schedule)
+    result = subprocess.run([FFMPEG, *mux_args(spec)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for png in watermark_pngs:
+        png.unlink(missing_ok=True)
+    return result.returncode == 0
+
+
+def mux_spec(
+    video_path: Path,
+    mix_audio_path: Path,
+    instrument_audio_path: Path,
+    output_path: Path,
+    watermark_text: str | None = None,
+    video_offset_ms: float = 0.0,
+    watermark_schedule: list[tuple[float, str]] | None = None,
+    relative_to: Path | None = None,
+) -> tuple[dict, list[Path]]:
+    """What mux_video_audio's ffmpeg run needs, as data — the files, the
+    offsets and the watermark timings — plus the watermark PNGs rendered
+    for it (beside output_path; the caller deletes them afterwards). Turned
+    into ffmpeg arguments by mux_args. With `relative_to`, the paths are
+    relative to that directory: a render job's spec, which the vault server
+    builds its own ffmpeg command from (video/render_jobs.py) — a
+    description, never a command line, so a job file can't make it run
+    anything else.
+
+        {"video", "mix", "instrument", "output": paths,
+         "video_delay_s", "audio_delay_s": seconds (one of them 0),
+         "watermarks": [{"png": path, "start": s, "end": s|None}, ...]}
 
     If watermark_text is given, burns it into a small translucent bar along
     the bottom of the video. Rendered as a PNG overlay via Pillow rather than
@@ -297,8 +332,8 @@ def mux_video_audio(
     positive ffmpeg -itsoffset on whichever side needs delaying, since
     negative -itsoffset isn't reliably supported across demuxers.
     """
-    if not ffmpeg_available():
-        return False
+    def name(path: Path) -> str:
+        return str(path.relative_to(relative_to)) if relative_to is not None else str(path)
 
     if watermark_schedule is None and watermark_text:
         watermark_schedule = [(0.0, watermark_text)]
@@ -315,27 +350,42 @@ def mux_video_audio(
                 png.unlink(missing_ok=True)
             watermark_pngs = []
 
-    video_delay_s = max(0.0, video_offset_ms / 1000.0)
-    audio_delay_s = max(0.0, -video_offset_ms / 1000.0)
+    watermarks = []
+    for i, png in enumerate(watermark_pngs):
+        end = watermark_schedule[i + 1][0] if i + 1 < len(watermark_pngs) else None
+        watermarks.append({"png": name(png), "start": float(watermark_schedule[i][0]),
+                           "end": float(end) if end is not None else None})
+    spec = {
+        "video": name(video_path), "mix": name(mix_audio_path), "instrument": name(instrument_audio_path),
+        "output": name(output_path),
+        "video_delay_s": max(0.0, video_offset_ms / 1000.0),
+        "audio_delay_s": max(0.0, -video_offset_ms / 1000.0),
+        "watermarks": watermarks,
+    }
+    return spec, watermark_pngs
 
-    cmd = [FFMPEG, "-y"]
-    if video_delay_s:
-        cmd += ["-itsoffset", f"{video_delay_s:.6f}"]
-    cmd += ["-i", str(video_path)]
-    if audio_delay_s:
-        cmd += ["-itsoffset", f"{audio_delay_s:.6f}"]
-    cmd += ["-i", str(mix_audio_path)]
-    if audio_delay_s:
-        cmd += ["-itsoffset", f"{audio_delay_s:.6f}"]
-    cmd += ["-i", str(instrument_audio_path)]
-    if watermark_pngs:
+
+def mux_args(spec: dict) -> list[str]:
+    """ffmpeg's arguments (without the binary) for a mux_spec. The vault
+    server has a copy of this (vault_server/takeloom_vault/render.py's
+    mux_args): keep the two in step."""
+    cmd = ["-y"]
+    if spec["video_delay_s"]:
+        cmd += ["-itsoffset", f"{spec['video_delay_s']:.6f}"]
+    cmd += ["-i", spec["video"]]
+    if spec["audio_delay_s"]:
+        cmd += ["-itsoffset", f"{spec['audio_delay_s']:.6f}"]
+    cmd += ["-i", spec["mix"]]
+    if spec["audio_delay_s"]:
+        cmd += ["-itsoffset", f"{spec['audio_delay_s']:.6f}"]
+    cmd += ["-i", spec["instrument"]]
+    watermarks = spec["watermarks"]
+    if watermarks:
         chain, label = [], "0:v"
-        for i, png in enumerate(watermark_pngs):
-            cmd += ["-i", str(png)]
-            start = watermark_schedule[i][0]
-            end = watermark_schedule[i + 1][0] if i + 1 < len(watermark_pngs) else None
-            enable = f"gte(t,{start:.3f})" + (f"*lt(t,{end:.3f})" if end is not None else "")
-            out = "outv" if i == len(watermark_pngs) - 1 else f"wm{i}"
+        for i, wm in enumerate(watermarks):
+            cmd += ["-i", wm["png"]]
+            enable = f"gte(t,{wm['start']:.3f})" + (f"*lt(t,{wm['end']:.3f})" if wm["end"] is not None else "")
+            out = "outv" if i == len(watermarks) - 1 else f"wm{i}"
             chain.append(f"[{label}][{3 + i}:v]overlay=0:main_h-overlay_h:enable='{enable}'[{out}]")
             label = out
         cmd += [
@@ -354,13 +404,9 @@ def mux_video_audio(
         "-disposition:a:1", "default",
         "-shortest",
         "-movflags", "+faststart",
-        str(output_path),
+        spec["output"],
     ]
-
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for png in watermark_pngs:
-        png.unlink(missing_ok=True)
-    return result.returncode == 0
+    return cmd
 
 
 def open_in_default_player(path: Path) -> None:

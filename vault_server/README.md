@@ -66,6 +66,29 @@ Takes recorded before this have their own `.mp4`. Running `takeloom vault migrat
 on the studio machine records the refs for them, and adding `--delete` removes those `.mp4`
 duplicates.
 
+## Encoding session videos here
+
+Encoding a session's videos (every camera's whole-session video, re-encoded to burn in its
+watermark) is the heavy part of processing a session. If this vault runs on a capable
+computer, takeloom can leave that to it: in takeloom's Studio Setup, set **Encode session
+videos on** to **Vault server** (it only applies with **Remote only** vault storage).
+
+The studio machine then files the takes as usual but uploads the raw videos and audio with a
+`render_jobs.json` describing each encode, and this server makes the videos in the background,
+one session at a time, with ffmpeg at low priority. When they're done it deletes the raw
+inputs. The session's page says so while it's working, and a take's video can't be cut from
+it until it's finished. Sessions still pending when the server stops are picked up again at
+startup.
+
+It needs `ffmpeg` with the `libx264` encoder on this machine (`apt install ffmpeg` has it).
+`GET /api/ping` reports `"encode": true` when it's available; takeloom checks that, and
+encodes on the studio machine instead when it isn't (a NAS without ffmpeg, an older vault, or
+the vault being unreachable).
+
+A job file is a description (file names, offsets, watermark timings), never a command line:
+this server builds the ffmpeg command itself and only accepts plain file names inside the
+session's own folder.
+
 ## API
 
 See the docstring at the top of `takeloom_vault/server.py`. Uploads are `PUT

@@ -6614,8 +6614,11 @@ class LocalBackend(Backend):
                         "phase": "idle",
                         "status": f"{label}'s recording didn't arrive — using the live feed's video instead.",
                     })
+        from .vault import vault_encodes_videos
+        status = lambda msg: self._emit("recording_status", {"phase": "idle", "status": msg})  # noqa: E731
+        defer_video = vault_encodes_videos(config, log=status)
         try:
-            summary = process_session(session_dir=session.session_dir, config=config)
+            summary = process_session(session_dir=session.session_dir, config=config, defer_video=defer_video)
         except Exception as e:
             self._emit("recording_status", {
                 "phase": "idle",
@@ -6629,10 +6632,16 @@ class LocalBackend(Backend):
         # entirely in "remote" vault mode, which splicing still needs to
         # read from above.
         from .vault import sync_and_maybe_prune
-        sync_and_maybe_prune(
-            config, session.session_dir,
-            log=lambda msg: self._emit("recording_status", {"phase": "idle", "status": msg}),
-        )
+        uploaded = sync_and_maybe_prune(config, session.session_dir, log=status)
+        from .video import render_jobs
+        if not uploaded and render_jobs.pending(session.session_dir):
+            # Left for the vault, but it never got the session: this
+            # machine has the only copy, so its videos get made here after all.
+            status("The vault didn't get this session, so its videos are being encoded here instead...")
+            if render_jobs.run_locally(session.session_dir):
+                status("Session videos encoded.")
+            else:
+                status(f"Session video encoding failed — raw files kept in {session.session_dir}")
 
     def is_session_active(self) -> bool:
         return self._active_session is not None

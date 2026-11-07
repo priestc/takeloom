@@ -54,6 +54,7 @@ VAULT_FIELDS = [
 ]
 
 _VAULT_MODE_LABELS = [("local", "Local only"), ("remote", "Remote only"), ("both", "Both")]
+_VIDEO_ENCODING_LABELS = [("local", "This machine"), ("vault", "Vault server")]
 
 # How a USB MIDI device is shown among the ordinary input labels in an
 # instrument row's single Input dropdown (see _InstrumentRow): a MIDI
@@ -666,6 +667,25 @@ class StudioSetupFrame(ttk.Frame):
             foreground="#666666", wraplength=440, justify="left",
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 10))
         row += 1
+
+        ttk.Label(self.content, text="Encode session videos on").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        current = next((label for value, label in _VIDEO_ENCODING_LABELS
+                        if value == self.config_obj.video_encoding), _VIDEO_ENCODING_LABELS[0][1])
+        self.video_encoding_var = tk.StringVar(value=current)
+        ttk.Combobox(
+            self.content, textvariable=self.video_encoding_var,
+            values=[label for _v, label in _VIDEO_ENCODING_LABELS], state="readonly", width=16,
+        ).grid(row=row, column=1, sticky="w", pady=4)
+        row += 1
+        ttk.Label(
+            self.content,
+            text="Encoding every camera's session video is the heavy part of processing a session. "
+                 "\"Vault server\" leaves it to the vault's CPU: for a vault that's a capable computer, "
+                 "not a low-powered NAS. Needs \"Remote only\" storage and a vault that can encode "
+                 "(takeloom-vault 0.2 or later, with ffmpeg); otherwise this machine encodes.",
+            foreground="#666666", wraplength=440, justify="left",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        row += 1
         return row
 
     # --- remote vault pairing ---
@@ -1016,6 +1036,10 @@ class StudioSetupFrame(ttk.Frame):
         for value, label in _VAULT_MODE_LABELS:
             if label == self.vault_mode_var.get():
                 self.config_obj.session_vault_mode = value
+                break
+        for value, label in _VIDEO_ENCODING_LABELS:
+            if label == self.video_encoding_var.get():
+                self.config_obj.video_encoding = value
                 break
         self.config_obj.input_labels = [il for row in self._input_rows if (il := row.to_input_label())]
         self.config_obj.instruments = [inst for row in self._instrument_rows if (inst := row.to_instrument())]

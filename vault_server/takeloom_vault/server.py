@@ -5,7 +5,9 @@ API — every route except /api/pair* needs `Authorization: Bearer <token>`:
 
     POST   /api/pair                    {"client_name"} -> {"request_id", "code"}
     GET    /api/pair/<id>               -> {"status": "pending"|"approved"|"denied"|"expired", "token"?}
-    GET    /api/ping                    -> {"ok", "hostname", "client"}
+    GET    /api/ping                    -> {"ok", "hostname", "client", "encode"}
+                                           ("encode": this server makes session videos
+                                           from render_jobs.json — render.py)
     GET    /api/sessions                -> {"sessions": {name: session_log, ...}}
     GET    /api/sessions/<name>/log     -> session_log.json
     PUT    /api/sessions/<name>/log     <- session_log.json (existing session only)
@@ -42,6 +44,7 @@ from urllib.parse import unquote, urlsplit
 
 from . import web
 from .auth import Auth
+from .render import Renderer
 from .store import Vault, VaultPathError
 from .takes import TakeVideoCache, TakeVideoError
 
@@ -89,10 +92,11 @@ class _HTTPError(Exception):
 class VaultHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, vault: Vault, auth: Auth, take_videos: TakeVideoCache) -> None:
+    def __init__(self, address, vault: Vault, auth: Auth, take_videos: TakeVideoCache, renderer: Renderer) -> None:
         self.vault = vault
         self.auth = auth
         self.take_videos = take_videos
+        self.renderer = renderer
         super().__init__(address, _Handler)
 
 
@@ -253,7 +257,8 @@ class _Handler(BaseHTTPRequestHandler):
     def _route_api(self, method: str, path: str, label: str) -> None:
         vault = self.server.vault
         if path == "/ping" and method == "GET":
-            return self._json({"ok": True, "hostname": socket.gethostname(), "client": label})
+            return self._json({"ok": True, "hostname": socket.gethostname(), "client": label,
+                               "encode": self.server.renderer.available})
         if path == "/sessions" and method == "GET":
             return self._json({"sessions": vault.all_session_logs()})
         if m := re.fullmatch(r"/sessions/([^/]+)/log", path):
@@ -308,6 +313,10 @@ class _Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             raise _HTTPError(HTTPStatus.UNPROCESSABLE_ENTITY, str(e)) from e
         log(f"{label} ({self.ip}) uploaded {relative} ({result['size']:,} bytes)")
+        # session_log.json is the last file of a session's upload: if it
+        # left its videos to be encoded here, start on them.
+        if m := re.fullmatch(r"sessions/([^/]+)/session_log\.json", relative):
+            self.server.renderer.enqueue(m.group(1))
         self._json(result)
 
     def _send_take_video(self, take_filename: str) -> None:
@@ -358,7 +367,9 @@ class _Handler(BaseHTTPRequestHandler):
 
 def serve(vault: Vault, auth: Auth, take_videos: TakeVideoCache, host: str, port: int) -> None:
     take_videos.start_sweeper()
-    httpd = VaultHTTPServer((host, port), vault, auth, take_videos)
+    renderer = Renderer(vault, log)
+    renderer.start()
+    httpd = VaultHTTPServer((host, port), vault, auth, take_videos, renderer)
     log(f"takeloom-vault serving {vault.root} on http://{socket.gethostname()}:{port} (pid {os.getpid()})")
     try:
         httpd.serve_forever()
