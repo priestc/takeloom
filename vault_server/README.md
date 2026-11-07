@@ -97,8 +97,8 @@ takes about as long as encoding one camera's session video. See `takeloom_vault/
 
 A session whose phones' mics were archived (takeloom saves each as `<camera>_mic.flac`, on the
 session's timeline) also gets an **Audio** switch: **Processed** is the audio interface's sound
-(the main camera's tracks), **Acoustic** is the phones' mics played together, the room as the
-phones heard it. The player previews either, and the render uses the one chosen: for Acoustic,
+(the main camera's tracks), **Atmospheric** is the phones' mics played together, the room as the
+phones heard it. The player previews either, and the render uses the one chosen: for Atmospheric,
 the mics summed and limited as the soundtrack, with the processed mix kept as a second track.
 
 ## Publishing to YouTube

@@ -717,7 +717,7 @@ class Mp4Recorder(
 }
 
 /**
- * The mic, for the room's own "acoustic" sound: besides lining the video up
+ * The mic, for the room's own "atmospheric" sound: besides lining the video up
  * (takeloom/phone_camera/sync.py), the server keeps each phone's mic track,
  * aligned to the session, in the vault. So it's recorded as plainly as the
  * phone allows: unprocessed where supported, else VOICE_RECOGNITION (which

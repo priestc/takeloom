@@ -217,7 +217,7 @@ def _stage_player(rel: str, videos: list[tuple[str, str, str]], shifts: list[flo
     the videos carry their own): the footer, drawn over the picture with
     the camera showing, as the render will draw it. `mics` (URLs of the
     phones' mic tracks, on the session timeline): an Audio switch between
-    Processed (the main camera's, from the audio interface) and Acoustic
+    Processed (the main camera's, from the audio interface) and Atmospheric
     (those played together, the videos muted). Exposes STAGE for the
     editor."""
     import json as _json
@@ -249,8 +249,8 @@ def _stage_player(rel: str, videos: list[tuple[str, str, str]], shifts: list[flo
         + "</div>"
         + (("<p class='small'>Audio: <label><input type='radio' name='st-audio' value='processed' checked "
             "onchange='STAGE.setAudio(this.value)'> Processed (audio interface)</label> "
-            "<label><input type='radio' name='st-audio' value='acoustic' onchange='STAGE.setAudio(this.value)'> "
-            f"Acoustic ({len(mics)} phone mic{'s' if len(mics) != 1 else ''})</label></p>"
+            "<label><input type='radio' name='st-audio' value='atmospheric' onchange='STAGE.setAudio(this.value)'> "
+            f"Atmospheric ({len(mics)} phone mic{'s' if len(mics) != 1 else ''})</label></p>"
             "<div id='stage-mics' hidden>"
             + "".join(f"<audio src='{url}' preload='auto'></audio>" for url in mics) + "</div>")
            if mics else "")
@@ -263,12 +263,12 @@ def _stage_player(rel: str, videos: list[tuple[str, str, str]], shifts: list[flo
         "function dur(){return Math.max(0,(V[master].duration||0)-SH[master]);}"
         "function show(i){if(i===shown)return;V[shown].style.opacity=0;V[i].style.opacity=1;shown=i;"
         "document.querySelectorAll('button.cam').forEach(function(b,j){b.classList.toggle('on',j===i);});}"
-        "function setMaster(i){master=i;V.forEach(function(v,j){v.muted=mode==='acoustic'||j!==i;});}"
-        "function setAudio(m){mode=m;setMaster(master);if(m!=='acoustic')A.forEach(function(a){a.pause();});else if(playing)align();"
+        "function setMaster(i){master=i;V.forEach(function(v,j){v.muted=mode==='atmospheric'||j!==i;});}"
+        "function setAudio(m){mode=m;setMaster(master);if(m!=='atmospheric')A.forEach(function(a){a.pause();});else if(playing)align();"
         "document.querySelectorAll('input[name=st-audio]').forEach(function(r){r.checked=r.value===m;});}"
         "function align(){var T=now();V.forEach(function(v,j){if(j===master)return;var w=T+SH[j];"
         "if(Math.abs(v.currentTime-w)>0.2)v.currentTime=Math.max(0,w);if(playing&&v.paused)v.play().catch(function(){});});"
-        "if(mode==='acoustic')A.forEach(function(a){if(Math.abs(a.currentTime-T)>0.25)a.currentTime=Math.max(0,T);"
+        "if(mode==='atmospheric')A.forEach(function(a){if(Math.abs(a.currentTime-T)>0.25)a.currentTime=Math.max(0,T);"
         "if(playing&&a.paused)a.play().catch(function(){});});}"
         "function seek(T){V.forEach(function(v,j){v.currentTime=Math.max(0,T+SH[j]);});A.forEach(function(a){a.currentTime=Math.max(0,T);});}"
         "function play(){playing=true;document.getElementById('st-play').textContent='❚❚';"

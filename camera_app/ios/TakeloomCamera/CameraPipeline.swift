@@ -170,7 +170,7 @@ final class CameraPipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
 
         if session.inputs.count < 2, let mic = AVCaptureDevice.default(for: .audio),
            let micInput = try? AVCaptureDeviceInput(device: mic), session.canAddInput(micInput) {
-            // The mic track is archived as the room's "acoustic" sound
+            // The mic track is archived as the room's "atmospheric" sound
             // (takeloom/phone_camera/sync.py's extract_mic), not just used to
             // line the video up: measurement mode turns off the voice
             // processing (automatic gain, noise reduction) iOS otherwise

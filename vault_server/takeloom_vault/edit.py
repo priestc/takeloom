@@ -14,7 +14,7 @@ web.session_videos' list, resolved here (a plan never names a file).
 Rendering makes edit.mp4: each stretch of picture from its camera's own
 session video, and the audio unbroken start to finish, so a cut never
 breaks the sound. "audio" picks it: "processed" is the main camera's
-(the audio interface's mix, plus its Instrument Only track); "acoustic" is
+(the audio interface's mix, plus its Instrument Only track); "atmospheric" is
 the phones' own mics (takeloom archives each as <camera>_mic.flac, already
 on the session's timeline), summed and limited, with the processed mix
 kept as a second track.
@@ -198,8 +198,10 @@ def checked_plan(plan: dict, cameras: int) -> dict:
         priority = [primary] + [c for c in range(cameras) if c != primary]
     primary = priority[0]
     audio = plan.get("audio") or "processed"
-    if audio not in ("processed", "acoustic"):
-        raise ValueError("audio must be processed or acoustic")
+    if audio == "acoustic":
+        audio = "atmospheric"  # its first name
+    if audio not in ("processed", "atmospheric"):
+        raise ValueError("audio must be processed or atmospheric")
     raw = plan.get("cuts")
     if not isinstance(raw, list) or not raw or len(raw) > MAX_CUTS:
         raise ValueError("the timeline is empty")
@@ -330,9 +332,9 @@ class EditRenderer:
             (work / "parts.txt").write_text("".join(f"file '{n}'\n" for n in names))
             self._set(name, state="rendering", progress=1.0)
             out = directory / (OUTPUT_FILE + ".partial.mp4")
-            mics = mic_files(directory, data) if plan["audio"] == "acoustic" else []
-            if plan["audio"] == "acoustic" and not mics:
-                raise RuntimeError("this session has no phone mic tracks for acoustic audio")
+            mics = mic_files(directory, data) if plan["audio"] == "atmospheric" else []
+            if plan["audio"] == "atmospheric" and not mics:
+                raise RuntimeError("this session has no phone mic tracks for atmospheric audio")
             cmd = [*nice, "ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", "parts.txt",
                    "-ss", f"{main_shift:.6f}", "-i", str(main_file)]
             if mics:
@@ -344,7 +346,7 @@ class EditRenderer:
                 cmd += ["-filter_complex", f"{inputs}amix=inputs={len(mics)}:normalize=0,alimiter=limit=0.95[ac]",
                         "-map", "0:v:0", "-map", "[ac]", "-map", "1:a:0",
                         "-c:v", "copy", "-c:a:0", "aac", "-b:a:0", "192k", "-c:a:1", "aac", "-b:a:1", "192k",
-                        "-metadata:s:a:0", "title=Acoustic", "-metadata:s:a:1", "title=Mix"]
+                        "-metadata:s:a:0", "title=Atmospheric", "-metadata:s:a:1", "title=Mix"]
             else:
                 # The main camera's two audio tracks (Mix, Instrument Only).
                 cmd += ["-map", "0:v:0", "-map", "1:a:0", "-map", "1:a:1?",

@@ -37,7 +37,7 @@ acoustic in the room), the clock-sync estimate is used as-is.
 
 The same fit also places the phone's mic track: extract_mic writes it out
 as <camera file>_mic.flac on the mix's own timeline (sample 0 = the mix's
-first sample, drift corrected, as long as the mix), the room's "acoustic"
+first sample, drift corrected, as long as the mix), the room's "atmospheric"
 version of the session, archived with it in the vault.
 """
 
