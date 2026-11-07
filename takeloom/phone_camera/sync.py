@@ -34,6 +34,11 @@ Alignment of the uploaded file, coarse to fine:
 
 If too few windows agree (a silent session, headphones-only with nothing
 acoustic in the room), the clock-sync estimate is used as-is.
+
+The same fit also places the phone's mic track: extract_mic writes it out
+as <camera file>_mic.flac on the mix's own timeline (sample 0 = the mix's
+first sample, drift corrected, as long as the mix), the room's "acoustic"
+version of the session, archived with it in the vault.
 """
 
 from __future__ import annotations
@@ -225,6 +230,35 @@ def _normalize_video(src: Path, dest: Path, scale: float) -> bool:
     return True
 
 
+def extract_mic(uploaded: Path, out: Path, file_zero_s: float, scale: float, mix_flac: Path,
+                sample_rate: int) -> bool:
+    """The phone recording's mic track as FLAC, on the mix's timeline:
+    sample n is the same moment as the mix's sample n, over exactly the
+    mix's length (silence where the phone wasn't recording).
+
+    The phone file's time t is mix time file_zero_s + t * scale (_align_
+    uploaded's fit). -itsscale applies the scale to the timestamps, and
+    aresample's async mode resamples the audio to fit them (soft
+    compensation: the drift is tens of ppm, far too small to hear) with
+    silence before the first sample (first_pts=0, as in _decode_mono);
+    then it's shifted by file_zero_s and cut to the mix's length."""
+    import soundfile as sf
+    duration = sf.info(str(mix_flac)).duration
+    shift = (f"adelay=delays={file_zero_s * 1000:.3f}:all=1" if file_zero_s >= 0
+             else f"atrim=start={-file_zero_s:.6f},asetpts=PTS-STARTPTS")
+    chain = f"aresample={sample_rate}:async=1000:first_pts=0,{shift},apad,atrim=end={duration:.6f}"
+    tmp = out.with_name(out.stem + ".partial.flac")
+    cmd = [FFMPEG, "-v", "error", "-y", "-itsscale", f"{scale:.9f}", "-copyts", "-i", str(uploaded),
+           "-map", "0:a:0", "-af", chain, "-c:a", "flac", str(tmp)]
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0 or not tmp.exists():
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"couldn't extract the mic from {uploaded.name}: "
+                           f"{result.stderr.decode(errors='replace')[-300:]}")
+    tmp.replace(out)
+    return True
+
+
 def align_phone_video(session_dir: Path, data: dict, log_path: Path) -> float | None:
     """Make session_video_raw.mp4 the best available phone video and return
     its offset in ms (positive = video starts that long after the mix), also
@@ -247,8 +281,10 @@ def align_extra_cameras(session_dir: Path, data: dict, log_path: Path, local_off
             continue  # already aligned by an earlier, interrupted run
         phone = entry.get("phone_camera")
         if phone and entry.get("upload_file"):
+            stem = Path(entry.get("final_file") or entry["file"]).stem
             entry["video_offset_ms"] = _align_camera(
                 session_dir, entry, phone, entry["upload_file"], session_dir / entry["file"], data,
+                mic_file=f"{stem}_mic.flac",
             )
         else:
             entry["video_offset_ms"] = local_offset_ms
@@ -257,10 +293,13 @@ def align_extra_cameras(session_dir: Path, data: dict, log_path: Path, local_off
 
 def _align_camera(
     session_dir: Path, record: dict, phone: dict, upload_file: str, raw: Path, data: dict,
+    mic_file: str | None = None,
 ) -> float | None:
     """Make `raw` the best available video from one phone and return its
     offset in ms, recording how it was measured into `record`
-    ("video_offset_ms"/"video_sync"). None if nothing usable."""
+    ("video_offset_ms"/"video_sync"). With `mic_file`, the phone's mic
+    track is saved under that name too, lined up with the mix (extract_mic;
+    record["mic_file"]). None if nothing usable."""
     uploaded, _part, meta_path = upload_paths(session_dir, upload_file)
     mix_flac = session_dir / "session_mix.flac"
     session_flac = session_dir / "session.flac"
@@ -279,6 +318,13 @@ def _align_camera(
             sync = None
             record["video_sync_error"] = str(e)
         if sync is not None:
+            if mic_file:
+                try:
+                    if extract_mic(uploaded, session_dir / mic_file, sync["file_zero_s"], 1.0 + sync.get("drift", 0.0),
+                                   mix_flac, sample_rate):
+                        record["mic_file"] = mic_file
+                except Exception as e:  # the video matters more: never lose it over the mic
+                    record["mic_error"] = str(e)
             uploaded.unlink(missing_ok=True)
             meta_path.unlink(missing_ok=True)
 
@@ -327,6 +373,9 @@ def _align_uploaded(
         result = {
             "source": "phone upload", "method": "audio",
             "offset_ms": round(video_start * 1000, 3),
+            # Where the file's own time zero falls on the mix's timeline,
+            # and its clock's rate against the mix's: what extract_mic needs.
+            "file_zero_s": fit["a0_s"], "drift": fit["drift"],
             "drift_ppm": round(fit["drift"] * 1e6, 2),
             "windows_matched": fit["inliers"], "windows_tried": fit["windows"],
             "residual_ms": fit["residual_ms"],
@@ -335,7 +384,8 @@ def _align_uploaded(
             result["clock_offset_ms"] = round(clock_v * 1000, 3)
     elif clock_v is not None:
         scale = 1.0
-        result = {"source": "phone upload", "method": "clock", "offset_ms": round(clock_v * 1000, 3)}
+        result = {"source": "phone upload", "method": "clock", "offset_ms": round(clock_v * 1000, 3),
+                  "file_zero_s": clock_v - first_video_pts, "drift": 0.0}
     else:
         return None
     if not _normalize_video(uploaded, raw, scale):

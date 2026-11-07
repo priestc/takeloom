@@ -40,7 +40,7 @@ struct ContentView: View {
                     Spacer()
                     VStack(alignment: .trailing, spacing: 8) {
                         if let since = model.recordingSince {
-                            RecordingPill(since: since)
+                            RecordingPill(since: since, micLevelDb: model.micLevelDb)
                         }
                         if let level = model.batteryLevel {
                             BatteryPill(level: level, charging: model.charging, minutesLeft: model.batteryMinutesLeft)
@@ -261,6 +261,8 @@ struct ConnectionPill: View {
 
 struct RecordingPill: View {
     let since: Date
+    /// The mic's level (its track is archived: worth seeing it hears the room).
+    var micLevelDb: Float?
 
     var body: some View {
         TimelineView(.periodic(from: since, by: 1)) { context in
@@ -269,6 +271,12 @@ struct RecordingPill: View {
                 Circle().fill(.red).frame(width: 12, height: 12)
                 Text(String(format: "REC %d:%02d:%02d", elapsed / 3600, elapsed / 60 % 60, elapsed % 60))
                     .monospacedDigit().bold()
+                if let db = micLevelDb {
+                    // -60...0 dB as five bars.
+                    let bars = max(0, min(5, Int((Double(db) + 60) / 12)))
+                    Text("🎙 " + String(repeating: "▮", count: bars) + String(repeating: "▯", count: 5 - bars))
+                        .monospacedDigit()
+                }
             }
             .pillStyle()
         }

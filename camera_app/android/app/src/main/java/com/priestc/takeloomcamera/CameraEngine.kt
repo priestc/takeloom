@@ -71,6 +71,8 @@ data class FinishedRecording(
  * frame's capture time into its own clock.
  */
 class CameraEngine(context: Context) {
+    /** The mic source recordings use: see [MicLevel.archivalSource]. */
+    private val micSource = MicLevel.archivalSource(context)
     var onEncodedFrame: (Long, Boolean, ByteArray) -> Unit = { _, _, _ -> }
     var onError: (String) -> Unit = {}
 
@@ -597,7 +599,7 @@ class CameraEngine(context: Context) {
         if (recorder != null) return onFailed("Already recording another session.")
         if (format == null) return onFailed("The camera isn't running.")
         try {
-            recorder = Mp4Recorder(sessionId, file, format, useBootTime, onStarted) { requestRecordingKeyframe() }
+            recorder = Mp4Recorder(sessionId, file, format, useBootTime, micSource, onStarted) { requestRecordingKeyframe() }
         } catch (e: Exception) {
             onFailed("Couldn't start recording: ${e.message}")
         }
@@ -640,6 +642,7 @@ class Mp4Recorder(
     val file: File,
     videoFormat: MediaFormat,
     private val bootTime: Boolean,
+    micSource: Int,
     private val onStarted: (Long) -> Unit,
     private val requestKeyframe: () -> Unit,
 ) {
@@ -651,7 +654,7 @@ class Mp4Recorder(
     var videoStartNs: Long? = null
         private set
     private var lastVideoNs: Long? = null
-    private val audio = AudioCapture(bootTime) { format -> onAudioFormat(format) }
+    private val audio = AudioCapture(bootTime, micSource) { format -> onAudioFormat(format) }
 
     val duration: Double
         get() {
@@ -713,8 +716,51 @@ class Mp4Recorder(
     }
 }
 
+/**
+ * The mic, for the room's own "acoustic" sound: besides lining the video up
+ * (takeloom/phone_camera/sync.py), the server keeps each phone's mic track,
+ * aligned to the session, in the vault. So it's recorded as plainly as the
+ * phone allows: unprocessed where supported, else VOICE_RECOGNITION (which
+ * Android specifies as minimally processed, no automatic gain), with any
+ * gain control / noise suppression / echo cancelling it offers switched
+ * off. [peak] is the newest chunk's level, for the screen's meter.
+ */
+object MicLevel {
+    @Volatile var peak = 0f
+    @Volatile var at = 0L  // SystemClock.elapsedRealtime() of [peak]
+
+    fun archivalSource(context: Context): Int {
+        val manager = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+        val unprocessed = manager.getProperty(android.media.AudioManager.PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED) == "true"
+        return if (unprocessed) MediaRecorder.AudioSource.UNPROCESSED else MediaRecorder.AudioSource.VOICE_RECOGNITION
+    }
+
+    /** The phone's own effects on this recording, off (where it has them). */
+    fun disableEffects(sessionId: Int) {
+        runCatching {
+            if (android.media.audiofx.AutomaticGainControl.isAvailable()) {
+                android.media.audiofx.AutomaticGainControl.create(sessionId)?.enabled = false
+            }
+        }
+        runCatching {
+            if (android.media.audiofx.NoiseSuppressor.isAvailable()) {
+                android.media.audiofx.NoiseSuppressor.create(sessionId)?.enabled = false
+            }
+        }
+        runCatching {
+            if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
+                android.media.audiofx.AcousticEchoCanceler.create(sessionId)?.enabled = false
+            }
+        }
+    }
+}
+
 /** Mic -> AAC, each buffer stamped with when its first sample was captured. */
-class AudioCapture(private val bootTime: Boolean, private val onFormat: (MediaFormat) -> Unit) {
+class AudioCapture(
+    private val bootTime: Boolean,
+    private val source: Int,
+    private val onFormat: (MediaFormat) -> Unit,
+) {
     var onSample: (ByteBuffer, MediaCodec.BufferInfo) -> Unit = { _, _ -> }
     private val sampleRate = 48_000
     @Volatile private var running = false
@@ -733,14 +779,18 @@ class AudioCapture(private val bootTime: Boolean, private val onFormat: (MediaFo
     @SuppressLint("MissingPermission")
     private fun run() {
         val minBuffer = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        val record = AudioRecord(
+        val record = runCatching {
+            AudioRecord(source, sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuffer, 8192) * 4)
+        }.getOrNull()?.takeIf { it.state == AudioRecord.STATE_INITIALIZED } ?: AudioRecord(
+            // A phone that refuses the archival source: the old, processed one.
             MediaRecorder.AudioSource.CAMCORDER, sampleRate, AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuffer, 8192) * 4,
         )
+        MicLevel.disableEffects(record.audioSessionId)
         val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
         codec.configure(MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, 1).apply {
             setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-            setInteger(MediaFormat.KEY_BIT_RATE, 128_000)
+            setInteger(MediaFormat.KEY_BIT_RATE, 192_000)  // archived, not just for sync
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
         }, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         codec.start()
@@ -757,6 +807,13 @@ class AudioCapture(private val bootTime: Boolean, private val onFormat: (MediaFo
                 val n = record.read(pcm, 0, pcm.size)
                 if (n <= 0) continue
                 val frames = n / 2
+                var peak = 0
+                for (i in 0 until frames) {
+                    val v = Math.abs((pcm[2 * i].toInt() and 0xff) or (pcm[2 * i + 1].toInt() shl 8))
+                    if (v > peak) peak = v
+                }
+                MicLevel.peak = minOf(1f, peak / 32768f)
+                MicLevel.at = SystemClock.elapsedRealtime()
                 // Capture time of this chunk's first sample, from the
                 // device's own (frame position, time) pairing when it has
                 // one; otherwise "now, minus how long the chunk is".

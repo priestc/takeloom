@@ -258,7 +258,9 @@ class MainActivity : Activity() {
         recordingText.visibility = if (recordingSession != null) View.VISIBLE else View.GONE
         if (recordingSession != null) {
             val s = (SystemClock.elapsedRealtime() - recordingSince) / 1000
-            recordingText.text = String.format("● REC %d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
+            // The mic's level too: its track is archived (MicLevel), so it's
+            // worth seeing that it's hearing the room.
+            recordingText.text = String.format("● REC %d:%02d:%02d", s / 3600, s / 60 % 60, s % 60) + micMeter()
         }
         if (!previewBusy) {
             // From the video pipeline, not the TextureView: getBitmap()
@@ -273,6 +275,14 @@ class MainActivity : Activity() {
                 previewBusy = false
             }
         }
+    }
+
+    /** "   🎙 ▮▮▮▯▯": the newest mic level on a -60..0 dB scale ("" if stale). */
+    private fun micMeter(): String {
+        if (SystemClock.elapsedRealtime() - MicLevel.at > 1000) return ""
+        val db = 20 * Math.log10(maxOf(MicLevel.peak, 1e-6f).toDouble())
+        val bars = ((db + 60) / 12).toInt().coerceIn(0, 5)
+        return "   🎙 " + "▮".repeat(bars) + "▯".repeat(5 - bars)
     }
 
     private fun startCamera() {

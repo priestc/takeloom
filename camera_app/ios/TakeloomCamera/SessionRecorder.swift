@@ -70,7 +70,7 @@ final class SessionRecorder {
             AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVSampleRateKey: 48_000,
             AVNumberOfChannelsKey: 1,
-            AVEncoderBitRateKey: 128_000,
+            AVEncoderBitRateKey: 192_000,  // archived (the room's sound), not just for sync
         ])
         audio.expectsMediaDataInRealTime = true
         guard writer.canAdd(video), writer.canAdd(audio) else {

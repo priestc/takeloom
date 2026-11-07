@@ -170,6 +170,17 @@ final class CameraPipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
 
         if session.inputs.count < 2, let mic = AVCaptureDevice.default(for: .audio),
            let micInput = try? AVCaptureDeviceInput(device: mic), session.canAddInput(micInput) {
+            // The mic track is archived as the room's "acoustic" sound
+            // (takeloom/phone_camera/sync.py's extract_mic), not just used to
+            // line the video up: measurement mode turns off the voice
+            // processing (automatic gain, noise reduction) iOS otherwise
+            // applies. If the session won't take it, the default stays.
+            session.automaticallyConfiguresApplicationAudioSession = false
+            let audio = AVAudioSession.sharedInstance()
+            if (try? audio.setCategory(.playAndRecord, mode: .measurement, options: [.mixWithOthers, .defaultToSpeaker])) == nil
+                || (try? audio.setActive(true)) == nil {
+                session.automaticallyConfiguresApplicationAudioSession = true
+            }
             session.addInput(micInput)
         }
         if !session.outputs.contains(audioOutput), session.canAddOutput(audioOutput) {
@@ -232,6 +243,11 @@ final class CameraPipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             self.guide = on
             self.applyFraming()
         }
+    }
+
+    /// The mic's current level in dB (nil: no mic), for the screen's meter.
+    var micLevelDb: Float? {
+        audioOutput.connection(with: .audio)?.audioChannels.first?.averagePowerLevel
     }
 
     /// Zoom and pan from the server (framing message).

@@ -29,6 +29,8 @@ final class AppModel: ObservableObject {
     @Published var batteryLevel: Float?
     @Published var charging = false
     @Published var batteryMinutesLeft: Int?
+    /// The mic's level in dB, for the meter beside REC (nil: no mic).
+    @Published var micLevelDb: Float?
 
     nonisolated let pipeline = CameraPipeline()
     private let link = ServerLink()
@@ -83,6 +85,7 @@ final class AppModel: ObservableObject {
         let state = UIDevice.current.batteryState
         let isCharging = state == .charging || state == .full
         if isCharging != charging { charging = isCharging }
+        micLevelDb = pipeline.micLevelDb
     }
 
     func toggleGuide() {
