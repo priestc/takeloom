@@ -4515,10 +4515,19 @@ class LocalBackend(Backend):
                     other_takes.setdefault(inst_name, take_info)
 
         trim = int(config.latency_compensation_ms / 1000.0 * config.sample_rate)
+        from .audio.synth import DEFAULT_SYNTH_VOICE, SYNTH_VOICES
+        # A MIDI take is filed under its synth voice ("piano"/"organ"),
+        # not the instrument's "midi-keyboard" label — see
+        # _log_session_event's synth_voice and splicer.py — so a MIDI
+        # session's *own* key here is the voice it's about to record with.
+        own_key = (
+            (session.inst.synth_voice or DEFAULT_SYNTH_VOICE) if session.inst.is_midi
+            else session.inst.label
+        )
         for other_inst, take_info in other_takes.items():
-            if other_inst.lower() == session.inst.label.lower():
+            if other_inst.lower() in (session.inst.label.lower(), own_key.lower()):
                 continue
-            if other_inst not in INSTRUMENT_LABELS:
+            if other_inst not in INSTRUMENT_LABELS and other_inst not in SYNTH_VOICES:
                 # A stale/orphaned key — e.g. a bare "bass"/"acoustic"/
                 # "electric" from before instrument labels were
                 # standardized to the current vocabulary (see
