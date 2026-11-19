@@ -64,7 +64,7 @@ The remote vault is a separate small server, `takeloom-vault` (this repo's
 [`vault_server/`](vault_server/README.md) folder), running on the storage machine. It also
 serves a web page for browsing sessions and watching their videos. Takeloom pairs with it
 the same way Remote mode pairs: click **Pair...** next to "Remote vault server" in Studio
-Setup (or run `takeloom vault pair tank2`), then approve the code shown on the vault's web
+Setup (or run `takeloom vault pair tank2.lan`), then approve the code shown on the vault's web
 page. `takeloom vault status` checks the connection. If you have projects from before the vault existed, run
 `takeloom migrate-sessions-to-vault` once to move everything in — safe to re-run,
 already-migrated projects are skipped.

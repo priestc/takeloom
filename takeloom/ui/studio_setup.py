@@ -641,7 +641,7 @@ class StudioSetupFrame(ttk.Frame):
                 row += 1
                 self.vault_pair_var = tk.StringVar(
                     value="Paired." if self.config_obj.vault_server_token else
-                    "Not paired — enter the vault server's address (e.g. tank2) and click Pair."
+                    "Not paired — enter the vault server's address (e.g. tank2.lan) and click Pair."
                 )
                 ttk.Label(
                     self.content, textvariable=self.vault_pair_var, foreground="#666666", wraplength=440,

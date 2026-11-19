@@ -65,7 +65,7 @@ def setup_studio() -> None:
     existing.studio_name = click.prompt("Studio name", default=existing.studio_name, show_default=bool(existing.studio_name))
     existing.studio_location = click.prompt("Studio location", default=existing.studio_location, show_default=bool(existing.studio_location))
     existing.studio_musician = click.prompt("Studio musician (default performer)", default=existing.studio_musician, show_default=bool(existing.studio_musician))
-    existing.vault_server = click.prompt("Remote vault server (e.g. http://tank2:51824, or empty to skip)", default=existing.vault_server, show_default=bool(existing.vault_server))
+    existing.vault_server = click.prompt("Remote vault server (e.g. http://tank2.lan:51824, or empty to skip)", default=existing.vault_server, show_default=bool(existing.vault_server))
     existing.inspiration_server = click.prompt("Inspiration server URL (or empty to skip)", default=existing.inspiration_server, show_default=bool(existing.inspiration_server))
     existing.inspiration_api_key = click.prompt("Inspiration API key (or empty to skip)", default=existing.inspiration_api_key, show_default=bool(existing.inspiration_api_key))
 
@@ -947,7 +947,7 @@ def vault_pair(address: str | None) -> None:
     config = StudioConfig.load()
     url = normalize_vault_url(address or config.vault_server)
     if not url:
-        click.echo("Error: give the vault server's address, e.g. 'takeloom vault pair tank2'.", err=True)
+        click.echo("Error: give the vault server's address, e.g. 'takeloom vault pair tank2.lan'.", err=True)
         raise SystemExit(1)
     client = VaultClient(url)
     try:

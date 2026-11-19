@@ -28,7 +28,7 @@ from urllib.parse import quote, urlsplit
 from .net import terse_source_note
 
 # Same number as vault_server/takeloom_vault/__init__.py's DEFAULT_PORT —
-# lets a vault address be entered as just "tank2" or "http://tank2".
+# lets a vault address be entered as just "tank2.lan" or "http://tank2.lan".
 DEFAULT_VAULT_PORT = 51824
 
 _TIMEOUT = 20
@@ -48,7 +48,7 @@ class VaultError(Exception):
 
 
 def normalize_vault_url(address: str) -> str:
-    """"tank2", "tank2:51824", "http://tank2" -> "http://tank2:51824"
+    """"tank2.lan", "tank2.lan:51824", "http://tank2.lan" -> "http://tank2.lan:51824"
     style base URL with no trailing slash; "" stays ""."""
     address = address.strip().rstrip("/")
     if not address:

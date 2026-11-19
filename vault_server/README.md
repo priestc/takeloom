@@ -29,10 +29,10 @@ no TLS. It's LAN-trust, the same as takeloom's own Remote mode.
 
 ## Pairing
 
-1. In takeloom's Studio Setup tab, enter the vault's address (e.g. `tank2`) next to
-   "Remote vault server" and click **Pair...** (or run `takeloom vault pair tank2`). Takeloom
+1. In takeloom's Studio Setup tab, enter the vault's address (e.g. `tank2.lan`) next to
+   "Remote vault server" and click **Pair...** (or run `takeloom vault pair tank2.lan`). Takeloom
    shows a 6-digit code.
-2. Open `http://tank2:51824` in a browser. The pending request is listed at the top with the
+2. Open `http://tank2.lan:51824` in a browser. The pending request is listed at the top with the
    same code. Click **Approve**.
 3. Takeloom receives its token and stores it in `~/studio_config.json`. Requests expire after
    5 minutes.

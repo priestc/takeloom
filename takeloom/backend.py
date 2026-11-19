@@ -2357,7 +2357,7 @@ class LocalBackend(Backend):
         from .vault_client import VaultClient, VaultError, normalize_vault_url
         url = normalize_vault_url(address)
         if not url:
-            raise BackendError("Enter the remote vault server's address first (e.g. tank2).")
+            raise BackendError("Enter the remote vault server's address first (e.g. tank2.lan).")
         try:
             req = VaultClient(url).begin_pairing()
         except VaultError as e:

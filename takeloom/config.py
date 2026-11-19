@@ -307,7 +307,7 @@ class StudioConfig:
     video_encoding: str = "local"
     session_vault_path: str = str(Path.home() / "Documents" / "Takeloom Studio Vault")
     # The remote vault: a `takeloom-vault` server (this repo's vault_server/
-    # folder), e.g. "http://tank2:51824" — see takeloom/vault_client.py.
+    # folder), e.g. "http://tank2.lan:51824" — see takeloom/vault_client.py.
     # vault_server_token is what pairing with it issued ("" = not paired).
     vault_server: str = ""
     vault_server_token: str = ""
