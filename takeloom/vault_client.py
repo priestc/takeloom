@@ -227,11 +227,14 @@ class VaultClient:
             f"/api/takes/{quote(take_filename, safe='')}/video{query}", local_path, _CLIP_TIMEOUT,
         )
 
-    def download_take_original(self, take_filename: str, local_path: Path) -> bool:
+    def download_take_original(self, take_filename: str, local_path: Path, legacy: bool = True) -> bool:
         """A lossless FLAC of completed take `take_filename`, which the
-        server cuts back out of its session (see take_original.py)."""
+        server cuts back out of its session (see take_original.py). With
+        legacy=False, never a legacy .flac take file itself, only a cut from
+        the session (migrate_takes.py checks one against the other)."""
         return self._download(
-            f"/api/takes/{quote(take_filename, safe='')}/original", local_path, _CLIP_TIMEOUT,
+            f"/api/takes/{quote(take_filename, safe='')}/original" + ("" if legacy else "?legacy=0"),
+            local_path, _CLIP_TIMEOUT,
         )
 
     def _download(self, path: str, local_path: Path, timeout: float) -> bool:

@@ -5,7 +5,7 @@ API — every route except /api/pair* needs `Authorization: Bearer <token>`:
 
     POST   /api/pair                    {"client_name"} -> {"request_id", "code"}
     GET    /api/pair/<id>               -> {"status": "pending"|"approved"|"denied"|"expired", "token"?}
-    GET    /api/ping                    -> {"ok", "hostname", "client", "encode"}
+    GET    /api/ping                    -> {"ok", "hostname", "client", "encode", "version"}
                                            ("encode": this server makes session videos
                                            from render_jobs.json — render.py)
     GET    /api/sessions                -> {"sessions": {name: session_log, ...}}
@@ -18,7 +18,8 @@ API — every route except /api/pair* needs `Authorization: Bearer <token>`:
                                            ?camera=<label>: from that camera (none: the
                                            camera on the program feed when it started)
     GET    /api/takes/<filename>/original -> a completed take's lossless FLAC, cut from its
-                                           session (takes.py's original_for), for an exported mix
+                                           session (takes.py's original_for), for an exported mix;
+                                           ?legacy=0: never a legacy .flac take file itself
     PUT    /api/files/<vault path>      <- raw bytes, X-Content-SHA256 header required
     POST   /api/delete                  {"paths": [...]} -> {}
     PUT    /api/youtube                 {"client_id", "client_secret", "refresh_token",
@@ -303,7 +304,7 @@ class _Handler(BaseHTTPRequestHandler):
         vault = self.server.vault
         if path == "/ping" and method == "GET":
             return self._json({"ok": True, "hostname": socket.gethostname(), "client": label,
-                               "encode": self.server.renderer.available})
+                               "encode": self.server.renderer.available, "version": _version()})
         if path == "/sessions" and method == "GET":
             return self._json({"sessions": vault.all_session_logs()})
         if m := re.fullmatch(r"/sessions/([^/]+)/log", path):
@@ -326,7 +327,10 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send_take_video(m.group(1))
         if (m := re.fullmatch(r"/takes/([^/]+)/original", path)) and method in ("GET", "HEAD"):
             try:
-                original = self.server.take_videos.original_for(m.group(1))
+                # ?legacy=0: never a legacy .flac take file itself — takeloom's
+                # migration (vault compress-takes) checks a cut against it.
+                legacy = (parse_qs(urlsplit(self.path).query).get("legacy") or ["1"])[0] != "0"
+                original = self.server.take_videos.original_for(m.group(1), use_legacy=legacy)
             except TakeVideoError as e:
                 raise _HTTPError(HTTPStatus.NOT_FOUND, str(e)) from e
             return self._send_file(original)
@@ -439,6 +443,14 @@ class _Handler(BaseHTTPRequestHandler):
                     break
                 self.wfile.write(chunk)
                 remaining -= len(chunk)
+
+
+def _version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("takeloom-vault")
+    except Exception:
+        return ""
 
 
 def serve(vault: Vault, auth: Auth, take_videos: TakeVideoCache, host: str, port: int) -> None:

@@ -85,27 +85,74 @@ def find_take_entry(vault: Vault, take_filename: str) -> dict | None:
     return None
 
 
-def original_cmd(entry: dict, vault: Vault) -> tuple[list[str], str] | None:
-    """The ffmpeg command (minus the output path) that cuts `entry`'s take
-    losslessly out of its session, and a description of where from; or
-    None if the session has nothing lossless left to cut it from. A
-    retuned MIDI take's session audio is at the wrong pitch, so it never
-    comes from here (takeloom re-renders it from the take's MIDI)."""
+def instrument_track_offset(video: Path, sample_rate: int) -> int:
+    """Where session.flac's frame 0 sits in `video`'s Instrument Only track
+    (its second audio stream), in samples: that track's first timestamp.
+    A camera muxed with its audio delayed (a negative sync offset) has it
+    late by the delay — rounded by the muxer to whole ms, which is why a
+    take is found in a camera video from its frames plus this, never from
+    its video ref's seconds (those assume the unrounded delay). Same as
+    takeloom/take_original.py's — keep in step."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a:1", "-show_entries", "stream=start_pts,time_base",
+         "-of", "json", str(video)], capture_output=True, text=True,
+    )
+    stream = (json.loads(result.stdout or "{}").get("streams") or [{}])[0]
+    num, _, den = str(stream.get("time_base") or "1/1").partition("/")
+    return round(int(stream.get("start_pts") or 0) * int(num) * sample_rate / int(den or 1))
+
+
+def exact_video_cut_cmd(video: Path, offset: int, start_frame: int, end_frame: int, sample_rate: int) -> list[str]:
+    """ffmpeg (minus the output path) cutting session.flac's frames
+    [start_frame, end_frame) out of `video`'s Instrument Only track, to the
+    sample. Seeked to a whole second a little before — after which ffmpeg
+    counts samples from that point in the file, where the track is late by
+    `offset` — or, for a take in the session's first seconds, not seeked at
+    all, when ffmpeg counts them from the track's own first sample. Same as
+    takeloom/take_original.py's exact_video_cut_args — keep in step."""
+    n = end_frame - start_frame
+    seek = max(0, (start_frame + offset) // sample_rate - 2)
+    first = start_frame + offset - seek * sample_rate if seek else start_frame
+    return [
+        "ffmpeg", "-y", "-v", "error", *(["-ss", str(seek)] if seek else []), "-i", str(video),
+        "-map", "0:a:1", "-af", f"atrim=start_sample={first}:end_sample={first + n},asetpts=PTS-STARTPTS",
+        "-c:a", "flac",
+    ]
+
+
+def original_cmd(entry: dict, vault: Vault, use_legacy: bool = True) -> tuple[list[str] | Path, str] | None:
+    """How to get `entry`'s take losslessly — an ffmpeg command (minus the
+    output path) cutting it out of its session, or the path of a file that
+    already is it — plus a description of where from; or None if nothing
+    lossless is left. In order: session.flac at the take's frames (its
+    "source" ref); a legacy .flac take file (exact, as it was cut from
+    session.flac; skipped without `use_legacy`, which is how takeloom's
+    migration checks a video cut against it); a camera video's Instrument
+    Only track, at the take's frames (exact), else at its video ref (from
+    before takes had frames: can be off by under a ms). A retuned MIDI
+    take's session audio is at the wrong pitch, so only its legacy file
+    will do (takeloom re-renders a newer one from its MIDI)."""
     source = entry.get("source") or {}
-    if source.get("retuned"):
-        return None
     session = str(source.get("session") or entry.get("session_dir") or "")
     try:
         directory = vault.session_dir(session) if session else None
     except Exception:
         directory = None
-    if directory is not None and "start_frame" in source and (directory / "session.flac").is_file():
+    frames = "start_frame" in source and "end_frame" in source
+    sample_rate = int(source.get("sample_rate") or 48000)
+    if not source.get("retuned") and directory is not None and frames and (directory / "session.flac").is_file():
         start, end = int(source["start_frame"]), int(source["end_frame"])
         return ([
             "ffmpeg", "-y", "-v", "error", "-i", str(directory / "session.flac"),
             "-af", f"atrim=start_sample={start}:end_sample={end},asetpts=PTS-STARTPTS",
             "-c:a", "flac",
         ], f"{session}/session.flac")
+    filename = str(entry.get("filename") or "")
+    legacy = vault.root / "completed_takes" / (Path(filename).stem + ".flac")
+    if use_legacy and filename and legacy.is_file():
+        return legacy, f"completed_takes/{legacy.name}"
+    if source.get("retuned"):
+        return None
     info = entry.get("video") or {}
     video_session = str(info.get("session") or session)
     for ref in camera_refs(info):
@@ -116,12 +163,17 @@ def original_cmd(entry: dict, vault: Vault) -> tuple[list[str], str] | None:
             video = vault.session_dir(video_session) / video_file
         except Exception:
             continue
-        if video.is_file():
-            return ([
-                "ffmpeg", "-y", "-v", "error",
-                "-ss", f"{max(0.0, ref['instrument_start_s']):.6f}", "-i", str(video),
-                "-map", "0:a:1", "-t", f"{ref['duration_s']:.6f}", "-c:a", "flac",
-            ], f"{video_session}/{video_file}")
+        if not video.is_file():
+            continue
+        if frames:
+            offset = instrument_track_offset(video, sample_rate)
+            return (exact_video_cut_cmd(video, offset, int(source["start_frame"]), int(source["end_frame"]),
+                                        sample_rate), f"{video_session}/{video_file}")
+        return ([
+            "ffmpeg", "-y", "-v", "error",
+            "-ss", f"{max(0.0, ref['instrument_start_s']):.6f}", "-i", str(video),
+            "-map", "0:a:1", "-t", f"{ref['duration_s']:.6f}", "-c:a", "flac",
+        ], f"{video_session}/{video_file}")
     return None
 
 
@@ -214,20 +266,19 @@ class TakeVideoCache:
                       f"({ref['duration_s']:.0f}s of video in {time.monotonic() - started:.0f}s)")
             return out
 
-    def original_for(self, take_filename: str) -> Path:
-        """A lossless FLAC of `take_filename` as recorded (see the module
-        docstring), cut on first request and cached. Raises TakeVideoError
-        if its session has nothing lossless left to cut it from."""
+    def original_for(self, take_filename: str, use_legacy: bool = True) -> Path:
+        """A lossless FLAC of `take_filename` as recorded (see original_cmd),
+        cut on first request and cached. Raises TakeVideoError if nothing
+        lossless is left of it."""
         if "/" in take_filename or "\\" in take_filename or take_filename.startswith("."):
             raise TakeVideoError(f"Invalid take name {take_filename!r}")
-        legacy = self.vault.root / "completed_takes" / (Path(take_filename).stem + ".flac")
-        entry = find_take_entry(self.vault, take_filename)
-        found = original_cmd(entry, self.vault) if entry is not None else None
+        entry = find_take_entry(self.vault, take_filename) or {"filename": take_filename}
+        found = original_cmd(entry, self.vault, use_legacy)
         if found is None:
-            if legacy.is_file():
-                return legacy
             raise TakeVideoError(f"No lossless original is left for take {take_filename!r}.")
         cmd, where = found
+        if isinstance(cmd, Path):
+            return cmd
         src = Path(cmd[cmd.index("-i") + 1])
         st = src.stat()
         key = hashlib.sha256(json.dumps(

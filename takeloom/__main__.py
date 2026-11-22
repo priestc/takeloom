@@ -1140,6 +1140,35 @@ def vault_sync(no_prune: bool) -> None:
         raise SystemExit(1)
 
 
+@vault_group.command(name="compress-takes")
+@click.option("--dry-run", is_flag=True, help="Only report which takes would be converted; change nothing.")
+def vault_compress_takes(dry_run: bool) -> None:
+    """Convert completed takes still stored as lossless FLAC to MP3 (LAME
+    V2), each only once its lossless original has been found in its
+    session, to the sample, and the vault's own cut of it checked
+    bit-identical to the FLAC — so an exported mix still uses the lossless
+    audio. A take whose session has nothing lossless left stays FLAC (it's
+    the only lossless copy). Safe to stop and re-run. See migrate_takes.py."""
+    from .migrate_takes import MigrationError, compress_takes
+    from .vault import sync_vault_files
+    config = StudioConfig.load()
+    try:
+        counts = compress_takes(config, log=click.echo, dry_run=dry_run)
+    except MigrationError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+    if dry_run:
+        click.echo(f"Dry run: {counts['would_convert']} would be converted, {counts['kept']} kept as FLAC, "
+                   f"{counts['leftovers_removed']} leftover .flac(s) would be removed, {counts['failed']} failed.")
+        return
+    click.echo(f"{counts['converted']} converted to MP3, {counts['kept']} kept as FLAC, "
+               f"{counts['leftovers_removed']} leftover .flac(s) removed, {counts['failed']} failed.")
+    # The renamed setlists and inspiration-take index, up to the vault.
+    sync_vault_files(config, log=click.echo)
+    if counts["failed"]:
+        raise SystemExit(1)
+
+
 @vault_group.command(name="status")
 def vault_status() -> None:
     """Check that the remote vault server is reachable and accepts this

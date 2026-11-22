@@ -72,6 +72,11 @@ LAME's `alt-preset-standard` (VBR `-V 2`, about 190 kbps): completed takes, loss
 tracks (on import), and exported mixes. An exported mix never uses the MP3 takes. Each take
 is cut back out of its session's lossless recording.
 
+Takes recorded before this were FLAC. `takeloom vault compress-takes` (try `--dry-run` first)
+converts each one to MP3 only after finding it, sample for sample, in its session video and
+having the vault confirm its own cut is bit-identical. A FLAC take whose session has nothing
+lossless left stays FLAC, since it's the only lossless copy. It needs takeloom-vault 0.10.1 or later.
+
 The remote vault is a separate small server, `takeloom-vault` (this repo's
 [`vault_server/`](vault_server/README.md) folder), running on the storage machine. It also
 serves a web page for browsing sessions and watching their videos. Takeloom pairs with it
