@@ -120,6 +120,9 @@ class ServerLink(private val settings: Settings) {
     // --- lifecycle, on executor ---
 
     private fun open() {
+        // A reconnect still pending from an earlier drop would otherwise
+        // close this new connection 2 s from now.
+        reconnect?.cancel(false)
         socket?.close()
         helloDone = false
         clock.reset()

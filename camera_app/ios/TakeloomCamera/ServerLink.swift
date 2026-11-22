@@ -124,7 +124,18 @@ final class ServerLink {
     // MARK: - Connection lifecycle (on queue)
 
     private func open() {
-        connection?.close()
+        // Detach the old connection *before* closing it: close() runs its
+        // onClose right away, and while it was still self.connection that
+        // handler took it for a failure and scheduled a reconnect, which 2 s
+        // later closed this new, working connection the same way — a phone
+        // that reconnected every 2 s forever, once anything (Settings'
+        // Connect, a retry) called connect() while it was already connected.
+        reconnectWork?.cancel()
+        stopTimer()
+        if let old = connection {
+            connection = nil
+            old.close()
+        }
         helloDone = false
         clock.reset()
         clockOffset = nil
