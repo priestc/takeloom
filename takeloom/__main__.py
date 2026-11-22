@@ -1142,7 +1142,8 @@ def vault_sync(no_prune: bool) -> None:
 
 @vault_group.command(name="compress-takes")
 @click.option("--dry-run", is_flag=True, help="Only report which takes would be converted; change nothing.")
-def vault_compress_takes(dry_run: bool) -> None:
+@click.option("--workers", default=6, show_default=True, help="Takes processed at once.")
+def vault_compress_takes(dry_run: bool, workers: int) -> None:
     """Convert completed takes still stored as lossless FLAC to MP3 (LAME
     V2), each only once its lossless original has been found in its
     session, to the sample, and the vault's own cut of it checked
@@ -1153,7 +1154,7 @@ def vault_compress_takes(dry_run: bool) -> None:
     from .vault import sync_vault_files
     config = StudioConfig.load()
     try:
-        counts = compress_takes(config, log=click.echo, dry_run=dry_run)
+        counts = compress_takes(config, log=click.echo, dry_run=dry_run, workers=workers)
     except MigrationError as e:
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1)

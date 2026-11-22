@@ -23,7 +23,7 @@ video ref:
    source; only then
 5. delete the .flac, here and on the vault.
 
-Safe to stop and run again: a take whose .mp3 is already what its
+Takes are checked `workers` at a time (default 6). Safe to stop and run again: a take whose .mp3 is already what its
 snapshot names just has its leftover .flac deleted. With dry_run, only
 step 1 runs (reading, never writing), reporting what would be converted.
 Needs takeloom-vault 0.10.1+ for step 2 when the vault is remote.
@@ -35,6 +35,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from typing import Callable
 from urllib.parse import quote
@@ -198,7 +199,7 @@ def _rename_references(config: StudioConfig, sessions: _Sessions, old: str, new:
         sessions.write_log(name)
 
 
-def compress_takes(config: StudioConfig, log: LogFn, dry_run: bool = False) -> dict:
+def compress_takes(config: StudioConfig, log: LogFn, dry_run: bool = False, workers: int = 6) -> dict:
     from .audio.formats import encode_mp3
     sessions = _Sessions(config)
     client = sessions.client
@@ -226,78 +227,101 @@ def compress_takes(config: StudioConfig, log: LogFn, dry_run: bool = False) -> d
 
     counts = {"converted": 0, "would_convert": 0, "kept": 0, "leftovers_removed": 0, "failed": 0}
     work = Path(tempfile.mkdtemp(prefix="takeloom_compress_"))
+    # Takes run `workers` at a time (each mostly waits on the network and
+    # the vault's ffmpeg). Everything shared — session logs, setlists, the
+    # inspiration index, the counts, the log — is only touched under this.
+    lock = threading.RLock()
+
+    def say(msg: str) -> None:
+        with lock:
+            log(msg)
+
+    def count(key: str) -> None:
+        with lock:
+            counts[key] += 1
 
     def delete_flac(name: str) -> None:
         if client is not None and name in remote_names and not client.delete_paths([f"completed_takes/{name}"]):
             raise MigrationError(f"Couldn't delete completed_takes/{name} on the vault at {client.url}.")
         (completed / name).unlink(missing_ok=True)
 
-    try:
-        for n, old in enumerate(sorted(flacs), 1):
-            new = Path(old).stem + ".mp3"
-            prefix = f"[{n}/{len(flacs)}] {old}"
+    def process(n: int, old: str) -> None:
+        new = Path(old).stem + ".mp3"
+        prefix = f"[{n}/{len(flacs)}] {old}"
+        with lock:
             # An earlier run already moved every reference over: just the
             # leftover .flac to delete (its check passed before the rename).
-            if not sessions.entries(old) and any(e.get("source") for _, e in sessions.entries(new)):
-                if not dry_run:
-                    delete_flac(old)
-                counts["leftovers_removed"] += 1
-                log(f"{prefix}: already converted; {'would remove' if dry_run else 'removed'} the leftover .flac")
-                continue
+            leftover = not sessions.entries(old) and any(e.get("source") for _, e in sessions.entries(new))
             snapshot = next(((s, e) for s, e in sessions.entries(old) if e.get("video")), None)
-            if snapshot is None:
-                counts["kept"] += 1
-                log(f"{prefix}: kept as FLAC (no session video holds its original)")
-                continue
-            session, entry = snapshot
-            try:
-                take_path = completed / old
-                if not take_path.exists():
-                    take_path = work / "take.flac"
-                    if not client.download_file(f"completed_takes/{old}", take_path):
-                        raise MigrationError(f"couldn't download it from {client.url}")
-                take, sr = sf.read(take_path, dtype="int16", always_2d=True)
-                take = take[:, 0]
-                start = _find_start(take, sr, entry["video"], session, sessions, work)
-                if start is None:
-                    counts["kept"] += 1
-                    log(f"{prefix}: kept as FLAC (couldn't find it exactly in its session video)")
-                    continue
-                source = {"session": session, "start_frame": start, "end_frame": start + len(take), "sample_rate": sr}
-                if dry_run:
-                    counts["would_convert"] += 1
-                    log(f"{prefix}: would convert (found at frame {start} of {session})")
-                    continue
+        if leftover:
+            if not dry_run:
+                delete_flac(old)
+            count("leftovers_removed")
+            say(f"{prefix}: already converted; {'would remove' if dry_run else 'removed'} the leftover .flac")
+            return
+        if snapshot is None:
+            count("kept")
+            say(f"{prefix}: kept as FLAC (no session video holds its original)")
+            return
+        session, entry = snapshot
+        mine = Path(tempfile.mkdtemp(prefix=f"{n}_", dir=work))
+        try:
+            take_path = completed / old
+            if not take_path.exists():
+                take_path = mine / "take.flac"
+                if not client.download_file(f"completed_takes/{old}", take_path):
+                    raise MigrationError(f"couldn't download it from {client.url}")
+            take, sr = sf.read(take_path, dtype="int16", always_2d=True)
+            take = take[:, 0]
+            start = _find_start(take, sr, entry["video"], session, sessions, mine)
+            if start is None:
+                count("kept")
+                say(f"{prefix}: kept as FLAC (couldn't find it exactly in its session video)")
+                return
+            source = {"session": session, "start_frame": start, "end_frame": start + len(take), "sample_rate": sr}
+            if dry_run:
+                count("would_convert")
+                say(f"{prefix}: would convert (found at frame {start} of {session})")
+                return
 
-                # Step 2: the vault's own cut must be the .flac, bit for bit.
-                before = json.loads(json.dumps(sessions.logs[session]))
+            # Step 2: the vault's own cut must be the .flac, bit for bit.
+            with lock:
                 entry["source"] = source
                 sessions.write_log(session)
-                try:
-                    cut = _session_cut(sessions, session, entry, old, start, len(take), sr, work / "check.flac")
-                except Exception:
-                    cut = None
-                if cut is None or len(cut) != len(take) or not np.array_equal(cut, take):
-                    sessions.logs[session] = before
+            try:
+                cut = _session_cut(sessions, session, entry, old, start, len(take), sr, mine / "check.flac")
+            except Exception:
+                cut = None
+            if cut is None or len(cut) != len(take) or not np.array_equal(cut, take):
+                with lock:
+                    entry.pop("source", None)
                     sessions.write_log(session)
-                    counts["kept"] += 1
-                    log(f"{prefix}: kept as FLAC (the session's copy didn't match it exactly)")
-                    continue
+                count("kept")
+                say(f"{prefix}: kept as FLAC (the session's copy didn't match it exactly)")
+                return
 
-                # Steps 3-5.
-                mp3 = ensure_dir(completed) / new
-                encode_mp3(take_path, mp3)
-                if client is not None:
-                    client.upload_file(mp3, f"completed_takes/{new}")
-                    if config.session_vault_mode == "remote":
-                        mp3.unlink(missing_ok=True)
+            # Steps 3-5.
+            mp3 = ensure_dir(completed) / new
+            encode_mp3(take_path, mp3)
+            if client is not None:
+                client.upload_file(mp3, f"completed_takes/{new}")
+                if config.session_vault_mode == "remote":
+                    mp3.unlink(missing_ok=True)
+            with lock:
                 _rename_references(config, sessions, old, new, source)
-                delete_flac(old)
-                counts["converted"] += 1
-                log(f"{prefix}: converted to MP3 (original at frame {start} of {session})")
-            except Exception as e:  # noqa: BLE001 — one take's failure never stops the rest
-                counts["failed"] += 1
-                log(f"{prefix}: FAILED, left as it was: {type(e).__name__}: {e}")
+            delete_flac(old)
+            count("converted")
+            say(f"{prefix}: converted to MP3 (original at frame {start} of {session})")
+        except Exception as e:  # noqa: BLE001 — one take's failure never stops the rest
+            count("failed")
+            say(f"{prefix}: FAILED, left as it was: {type(e).__name__}: {e}")
+        finally:
+            shutil.rmtree(mine, ignore_errors=True)
+
+    from concurrent.futures import ThreadPoolExecutor
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            list(pool.map(lambda item: process(*item), enumerate(sorted(flacs), 1)))
     finally:
         shutil.rmtree(work, ignore_errors=True)
     return counts
