@@ -612,7 +612,11 @@ class _Handler(socketserver.BaseRequestHandler):
         phone = (f"phone reports {st.get('live_width')}x{st.get('live_height')} at "
                  f"{(st.get('live_bitrate') or 0) / 1e6:.1f} Mbps, {st.get('live_frames')} frames encoded"
                  + (f", encoder error {st.get('live_error')}" if st.get("live_error") else "")
-                 if "live_frames" in st else "phone doesn't report its encoder (older app)")
+                 if "live_frames" in st else "phone doesn't report its encoder")
+        camera_state = st.get("camera_state")
+        if camera_state and camera_state != "open":
+            # The Android app says why its camera isn't running (1.5.1+).
+            phone += f"; its camera: {camera_state}"
         if info.video_frames:
             got = (f"{info.video_frames / elapsed:.0f} fps, "
                    f"{info.video_bytes * 8 / elapsed / 1e6:.1f} Mbps over the first {elapsed:.0f} s")

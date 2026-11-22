@@ -70,6 +70,8 @@ data class FinishedRecording(
  * timestamps are taken on it too, which is what lets the server convert a
  * frame's capture time into its own clock.
  */
+private const val REOPEN_DELAY_MS = 3000L
+
 class CameraEngine(context: Context) {
     /** The mic source recordings use: see [MicLevel.archivalSource]. */
     private val micSource = MicLevel.archivalSource(context)
@@ -80,6 +82,11 @@ class CameraEngine(context: Context) {
     private val thread = HandlerThread("camera").apply { start() }
     private val handler = Handler(thread.looper)
     private var device: CameraDevice? = null
+    /** Whether the camera's actually running, for the server's log: "open",
+     *  "opening", or why not (Android took it away, an error), reported in
+     *  every status so a phone with no live video says why. */
+    @Volatile var cameraState: String = "not started"
+        private set
     private var session: CameraCaptureSession? = null
     private var encoder: MediaCodec? = null  // the recording's
     private var encoderSurface: Surface? = null
@@ -245,24 +252,48 @@ class CameraEngine(context: Context) {
         useBootTime = chars.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
             CameraMetadata.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
         openId = id
-        manager.openCamera(id, object : CameraDevice.StateCallback() {
-            override fun onOpened(camera: CameraDevice) {
-                if (openId != id) return camera.close()  // switched again meanwhile
-                device = camera
-                createSession(camera, preview)
-            }
+        cameraState = "opening"
+        try {
+            manager.openCamera(id, object : CameraDevice.StateCallback() {
+                override fun onOpened(camera: CameraDevice) {
+                    if (openId != id) return camera.close()  // switched again meanwhile
+                    device = camera
+                    cameraState = "open"
+                    createSession(camera, preview)
+                }
 
-            override fun onDisconnected(camera: CameraDevice) {
-                camera.close()
-                if (device === camera) device = null
-            }
+                override fun onDisconnected(camera: CameraDevice) {
+                    camera.close()
+                    if (device === camera) device = null
+                    // Android took it away (the app left the foreground, the
+                    // screen went off, a system service wanted a camera).
+                    // It used to stay closed until the app was restarted: no
+                    // live video and no recording, with the phone still
+                    // connected and looking fine.
+                    cameraState = "taken away by Android (screen off or app in the background?)"
+                    reopenLater(id)
+                }
 
-            override fun onError(camera: CameraDevice, error: Int) {
-                camera.close()
-                if (device === camera) device = null
-                onError("Camera error $error.")
-            }
-        }, handler)
+                override fun onError(camera: CameraDevice, error: Int) {
+                    camera.close()
+                    if (device === camera) device = null
+                    cameraState = "camera error $error"
+                    onError("Camera error $error.")
+                    reopenLater(id)
+                }
+            }, handler)
+        } catch (e: Exception) {  // CameraAccessException (disabled: in the background), SecurityException
+            cameraState = "couldn't open: ${e.message ?: e.javaClass.simpleName}"
+            reopenLater(id)
+        }
+    }
+
+    /** On the camera thread: try [id] again in a few seconds, for as long as
+     *  the engine's still running with it and it isn't open. */
+    private fun reopenLater(id: String) {
+        handler.postDelayed({
+            if (device == null && openId == id && previewSurface != null) openCamera(id)
+        }, REOPEN_DELAY_MS)
     }
 
     /** On the camera thread: close the open camera, open [id] in its place. */

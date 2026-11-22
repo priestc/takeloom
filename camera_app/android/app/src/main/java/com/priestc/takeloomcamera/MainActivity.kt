@@ -78,6 +78,13 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Android won't let an app use the camera unless it's in the
+        // foreground, and FLAG_KEEP_SCREEN_ON only holds while it is: a
+        // phone whose screen went off (or that launched with it off) sat
+        // connected with no camera. Coming to the front now turns the
+        // screen on, even over the lock screen.
+        setShowWhenLocked(true)
+        setTurnScreenOn(true)
         settings = Settings(this)
         store = RecordingStore(getExternalFilesDir(null) ?: filesDir)
         engine = CameraEngine(this)
@@ -419,6 +426,7 @@ class MainActivity : Activity() {
             "live_adaptive" to engine.liveAdaptive,
             "live_width" to engine.liveWidth, "live_height" to engine.liveHeight,
             "live_bitrate" to engine.liveBitrate,
+            "camera_state" to engine.cameraState,
             "framing" to engine.framing.json(),
             "zoom_caps" to engine.zoomCapsJson(),
         )
