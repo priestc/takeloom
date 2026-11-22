@@ -2328,12 +2328,11 @@ class LocalBackend(Backend):
                 self._bandwidth_plan = None
                 return
             cameras = self.session_cameras()
-            program = self._resolve_program_camera(cameras)
             budget = self.get_config().camera_wifi_budget_mbps or bandwidth.DEFAULT_BUDGET_MBPS
-            qualities = bandwidth.plan(phones, program, budget)
+            qualities = bandwidth.plan(phones, budget)
             for device, quality in qualities.items():
                 hub.send(phone_device_id(device), quality.message())
-            summary = bandwidth.describe(phones, qualities, dict(cameras), program, budget)
+            summary = bandwidth.describe(phones, qualities, dict(cameras), budget)
             if summary != self._bandwidth_plan:
                 self._bandwidth_plan = summary
                 hub.log(summary)

@@ -252,7 +252,7 @@ def setup_recording_devices() -> None:
         for il in input_labels:
             click.echo(f"  - {il.label} ({il.device} ch{il.channel})")
     else:
-        click.echo("Main camera: whichever connected camera is found first")
+        click.echo("Cameras: every connected camera records (see video-ui's Settings › Cameras)")
 
 
 @main.command(name="ui")

@@ -45,8 +45,9 @@ from .protocol import (
 
 VideoSink = Callable[[int, bool, bytes], None]
 
-# Where the main camera's phone recording lands (sync.py turns it into
-# session_video_raw.mp4). An extra camera's lands at its own path instead —
+# Where a phone recording lands for a session from before cameras were a set
+# (its one camera; sync.py turns it into session_video_raw.mp4). Every camera
+# of a newer session lands at its own path instead —
 # see upload_paths().
 UPLOAD_FILE_NAME = "phone_camera.mp4"
 UPLOAD_META_NAME = "phone_camera_upload.json"

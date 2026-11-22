@@ -274,7 +274,7 @@ def align_phone_video(session_dir: Path, data: dict, log_path: Path) -> float | 
 def align_extra_cameras(session_dir: Path, data: dict, log_path: Path, local_offset_ms: float) -> None:
     """Fill in "video_offset_ms" on each of the session log's
     "extra_cameras" entries (see backend.py's session_cameras): measured,
-    for a phone, exactly as align_phone_video does the main camera (its
+    for a phone, exactly as align_phone_video does an older session's lone camera (its
     raw file replaced by its uploaded recording, when that arrived);
     `local_offset_ms` (the hand-tuned camera offset) for a local camera."""
     for entry in data.get("extra_cameras", []):

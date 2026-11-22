@@ -120,8 +120,8 @@ class RecordFrame(ttk.Frame):
         self._monitoring_mode = "production"  # "production" | "recording" — refreshed in _on_loaded
         self._preview_sub = None
         # camera_device -> {"frame", "image", "caption", "imgtk", "width"}: one
-        # tile per backend.session_cameras() entry, main camera first and
-        # full width — see _rebuild_preview_tiles.
+        # tile per backend.session_cameras() entry, all the same size (the
+        # cameras are a set; none is the main one) — see _rebuild_preview_tiles.
         self._preview_tiles: dict[str, dict] = {}
         self._preview_cameras: list[tuple[str, str]] = []
         # camera_device -> backend.camera_versions() entry, for the
@@ -1411,16 +1411,17 @@ class RecordFrame(ttk.Frame):
         many = len(self._preview_cameras) > 1
         for i, (device, label) in enumerate(self._preview_cameras):
             frame = ttk.Frame(self.preview_area)
-            if i == 0:
-                frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4 if many else 0))
+            if not many:
+                frame.grid(row=0, column=0, columnspan=2, sticky="ew")
             else:
-                frame.grid(row=1 + (i - 1) // 2, column=(i - 1) % 2, sticky="ew",
-                           padx=(0, 2) if (i - 1) % 2 == 0 else (2, 0), pady=(0, 4))
+                # An equal grid, two across: no camera bigger than another.
+                frame.grid(row=i // 2, column=i % 2, sticky="ew",
+                           padx=(0, 2) if i % 2 == 0 else (2, 0), pady=(0, 4))
             image = tk.Label(frame, background="#1a1a1a", foreground="white",
                              text="Waiting for camera preview...", wraplength=280)
             image.pack(fill="x")
             tile = {"frame": frame, "image": image, "imgtk": None, "width": 0}
-            caption = label + (" (main)" if many and i == 0 else "")
+            caption = label
             version = self._camera_versions.get(device)
             if version and version.get("version"):
                 caption += f" · app {version['version']}"
@@ -1428,7 +1429,7 @@ class RecordFrame(ttk.Frame):
                 ttk.Label(frame, text=caption, foreground="#666666").pack(anchor="w")
             if version and version.get("outdated"):
                 ttk.Label(
-                    frame, foreground="#b00020", wraplength=520 if i == 0 else 280, justify="left",
+                    frame, foreground="#b00020", wraplength=280 if many else 520, justify="left",
                     text=f"This phone's Takeloom Camera is out of date: {version['latest']} is available. "
                          "Update the app on the phone.",
                 ).pack(anchor="w")
