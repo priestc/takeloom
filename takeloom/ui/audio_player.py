@@ -297,13 +297,14 @@ class AudioPlayerBar(ttk.Frame):
         if self._stream is None:
             try:
                 import sounddevice as sd
-                self._stream = sd.OutputStream(
+                from ..audio.stream_guard import keep_alive
+                self._stream = keep_alive(sd.OutputStream(
                     samplerate=self._sample_rate, channels=2, dtype="float32",
                     callback=self._callback,
-                )
+                ))
                 self._stream.start()
             except Exception as e:  # noqa: BLE001 — e.g. no output device on this machine
-                self._stream = None
+                self._close_stream()
                 self._title_var.set(f"Could not open audio output: {type(e).__name__}: {e}")
                 return
         self._playing = True
@@ -322,10 +323,10 @@ class AudioPlayerBar(ttk.Frame):
     def _close_stream(self) -> None:
         stream, self._stream = self._stream, None
         if stream is not None:
+            from ..audio.stream_guard import close_stream
             try:
-                stream.stop()
-                stream.close()
-            except Exception:  # noqa: BLE001 — already gone is fine
+                close_stream(stream)
+            except Exception:  # noqa: BLE001 — already gone is fine (and if not, the guard keeps it alive)
                 pass
 
     def _callback(self, outdata: np.ndarray, frames: int, _time, _status) -> None:

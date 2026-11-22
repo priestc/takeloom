@@ -377,7 +377,8 @@ class AudioEngine:
             return
         # Compute latency from buffer size for minimal delay
         latency = self.buffer_size / self.sample_rate
-        self._stream = sd.Stream(
+        from .stream_guard import close_stream, keep_alive
+        self._stream = keep_alive(sd.Stream(
             samplerate=self.sample_rate,
             blocksize=self.buffer_size,
             device=(self.input_device, self.output_device),
@@ -386,8 +387,13 @@ class AudioEngine:
             latency=latency,
             callback=self._callback,
             extra_settings=match_device_rate_settings(sd),
-        )
-        self._stream.start()
+        ))
+        try:
+            self._stream.start()
+        except BaseException:
+            stream, self._stream = self._stream, None
+            close_stream(stream)
+            raise
         self._running = True
         threading.Thread(target=self._report_dropouts, name="audio-dropouts", daemon=True).start()
 
@@ -422,14 +428,19 @@ class AudioEngine:
 
     def stop(self) -> None:
         """Stop the audio stream and all recorders."""
+        from .stream_guard import close_stream
         self._running = False
-        if self._stream:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
-        self.stop_recording()
-        self.stop_session_recording()
-        self.stop_mix_recording()
+        # Taken off self first, so a second stop() (another thread) finds
+        # nothing to do; close_stream keeps its callback alive until
+        # PortAudio has really let go of it (see stream_guard.py).
+        stream, self._stream = self._stream, None
+        try:
+            if stream is not None:
+                close_stream(stream)
+        finally:
+            self.stop_recording()
+            self.stop_session_recording()
+            self.stop_mix_recording()
 
     @property
     def is_running(self) -> bool:

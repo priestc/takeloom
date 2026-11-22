@@ -37,6 +37,12 @@ Server log (the background service's, see `takeloom service`):
 """)
 def main() -> None:
     """Takeloom - Music Recording Session Manager."""
+    # A hard crash (SIGSEGV/SIGBUS — e.g. in an audio callback on CoreAudio's
+    # own thread) otherwise leaves only a native macOS crash report with no
+    # Python in it. This prints every thread's Python stack to stderr (the
+    # server log, under launchd) as the process dies.
+    import faulthandler
+    faulthandler.enable(all_threads=True)
 
 
 def _resolve_project(config: StudioConfig, name: str | None) -> Project:

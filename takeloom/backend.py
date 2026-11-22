@@ -32,6 +32,7 @@ from typing import Callable
 from .audio.filters import CompressorSettings
 from .audio.pitch import effective_tuning, nearest_target
 from .audio.scarlett2_direct_monitor import FOCUSRITE_DEVICE_NAME, set_channel_gains
+from .audio.stream_guard import close_stream, keep_alive
 from .config import DEFAULT_CONFIG_PATH, INSTRUMENT_LABELS, MAX_INSTRUMENT_VOLUME_PERCENT, Instrument, StudioConfig
 from .phone_camera.protocol import DEVICE_PREFIX, is_phone_device, phone_device_id
 from .project import Project, Setlist, TakeInfo, TrackEntry
@@ -5795,18 +5796,17 @@ class LocalBackend(Backend):
                     tap = _EngineInputTap(shared_engine, make_callback(entries))
                     streams.append(tap)
                     continue
-                stream = sd.InputStream(
+                stream = keep_alive(sd.InputStream(
                     device=in_dev, channels=channel_count,
                     samplerate=config.sample_rate, blocksize=config.buffer_size,
                     dtype="float32", callback=make_callback(entries),
                     extra_settings=match_device_rate_settings(sd),
-                )
+                ))
+                streams.append(stream)  # before start(): closed below if that fails
                 stream.start()
-                streams.append(stream)
         except Exception as e:
             for s in streams:
-                s.stop()
-                s.close()
+                close_stream(s)
             raise BackendError(f"Could not open an input device: {e}") from e
 
         # MIDI-driven instruments: a played note (_on_note_on) is the
@@ -5923,8 +5923,7 @@ class LocalBackend(Backend):
             self._active_detect_all = None
             active.stop_event.set()
             for stream in active.streams:
-                stream.stop()
-                stream.close()
+                close_stream(stream)
             self._start_monitoring_locked()
         self._emit("detect_all_status", {"phase": "stopped"})
 
@@ -5966,8 +5965,7 @@ class LocalBackend(Backend):
                     self._active_auto_detect = None
                     active.stop_event.set()
                     for s in active.streams:
-                        s.stop()
-                        s.close()
+                        close_stream(s)
                     inst = config.get_instrument(name)
                     if inst is not None:
                         config.last_selected_instrument = inst.full_name
@@ -6053,8 +6051,7 @@ class LocalBackend(Backend):
             self._active_auto_detect = None
             active.stop_event.set()
             for stream in active.streams:
-                stream.stop()
-                stream.close()
+                close_stream(stream)
             self._start_monitoring_locked()
         self._emit("auto_detect_status", {"phase": "stopped"})
 
