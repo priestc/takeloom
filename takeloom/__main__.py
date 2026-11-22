@@ -530,37 +530,6 @@ def server_command(disable_color: bool) -> None:
 
     backend.on_event(on_streaming_event)
 
-    # Same startup check as ui/app.py's _process_latest_session_if_pending
-    # (see its docstring): if the vault's own most recent session hasn't
-    # been through process_session yet — the ordinary case, or because
-    # the previous run was interrupted by a crash or power loss before it
-    # could finish — process it now. Blocking rather than backgrounded
-    # (unlike the GUI's version): this is a synchronous CLI startup with
-    # no event loop to keep responsive, and it has to finish before
-    # server.start() below so a connecting client never races a still-
-    # pending session. A failure is logged, never fatal to starting the
-    # server — recovering it stays possible later, it just doesn't block
-    # this launch either way.
-    try:
-        sessions = backend.list_sessions()
-    except BackendError as e:
-        log(f"Could not check for a pending session: {e}", err=True)
-    else:
-        latest = sessions[0] if sessions else None
-        if latest is not None and not latest.get("processed", True):
-            log(f"Processing last session ({latest.get('date', '')})...")
-            try:
-                summary = backend.process_pending_session(latest["session_dir"])
-                log(summary)
-            except BackendError as e:
-                log(f"Could not process last session '{latest['session_dir']}': {e}", err=True)
-
-    # A session whose upload to the remote vault failed (the vault down, the
-    # network dropping...) stays here: retried now and every 10 minutes,
-    # whenever no session is open (backend.retry_session_uploads).
-    backend.start_session_upload_retries()
-
-
     def request_authorization(ip: str, client_name: str) -> bool:
         log(f"\nPairing request from '{client_name}' ({ip})")
         if not sys.stdin.isatty():
@@ -603,6 +572,31 @@ def server_command(disable_color: bool) -> None:
     else:
         backend.attach_phone_camera_hub(phone_hub)
         log(f"Takeloom Camera listening on port {phone_hub.port}")
+
+    # Same startup check as ui/app.py's _process_latest_session_if_pending:
+    # if the most recent session hasn't been through process_session yet
+    # (the previous run crashed or lost power before it could finish),
+    # process it now — after the phone listener is up, and in the
+    # background like any session that just ended, so it waits for the
+    # phones' full-quality recordings instead of filing the live feeds and
+    # then refusing the phones' uploads. A failure is logged, never fatal.
+    try:
+        sessions = backend.list_sessions()
+    except BackendError as e:
+        log(f"Could not check for a pending session: {e}", err=True)
+    else:
+        latest = sessions[0] if sessions else None
+        if latest is not None and not latest.get("processed", True):
+            try:
+                backend.start_leftover_session_processing(latest["session_dir"])
+            except BackendError as e:
+                log(f"Could not process last session '{latest['session_dir']}': {e}", err=True)
+
+    # A session whose upload to the remote vault failed (the vault down, the
+    # network dropping...) stays here: retried now and every 10 minutes,
+    # whenever no session is open (backend.retry_session_uploads).
+    backend.start_session_upload_retries()
+
     # Instrument auto-detect is no longer kicked off automatically on every
     # idle transition — that briefly existed here and caused a burst of
     # redundant, overlapping start_auto_detect_instrument() calls every

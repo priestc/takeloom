@@ -109,6 +109,10 @@ class _ExpectedUpload:
     size: int = 0
     last_progress: float = field(default_factory=time.monotonic)
     error: str = ""
+    # For a session already processed and moved to the vault (see
+    # set_callbacks' late_upload_target): nothing waits on it — the
+    # backend is told once it's in (on_late_upload).
+    late: bool = False
 
 
 # Status fields the backend reacts to: whether a phone's live feed can
@@ -151,6 +155,8 @@ class PhoneCameraHub:
         self._on_live_change: Callable[[], None] = lambda: None
         self._on_framing: Callable[[str, dict], None] = lambda _device, _msg: None
         self._on_status: Callable[[str, dict], None] = lambda _device, _status: None
+        self._late_upload_target: Callable[[str, str], tuple[Path, str] | None] = lambda _s, _d: None
+        self._on_late_upload: Callable[[str, str], None] = lambda _s, _d: None
         self._tcp_server: _ThreadingTCPServer | None = None
 
     # --- lifecycle ---
@@ -185,6 +191,8 @@ class PhoneCameraHub:
         on_live_change: Callable[[], None] = lambda: None,
         on_framing: Callable[[str, dict], None] = lambda _device, _msg: None,
         on_status: Callable[[str, dict], None] = lambda _device, _status: None,
+        late_upload_target: Callable[[str, str], tuple[Path, str] | None] = lambda _s, _d: None,
+        on_late_upload: Callable[[str, str], None] = lambda _s, _d: None,
     ) -> None:
         self._on_preview = on_preview
         self._on_change = on_change
@@ -195,6 +203,12 @@ class PhoneCameraHub:
         self._on_framing = on_framing
         # Every status a phone sends (every few seconds): its battery.
         self._on_status = on_status
+        # A recording for a session that's no longer here, already
+        # processed from the live feeds and moved to the vault (e.g. the
+        # server crashed mid-upload): (directory, file name) to take it into
+        # anyway, or None to refuse it. Then on_late_upload once it's in.
+        self._late_upload_target = late_upload_target
+        self._on_late_upload = on_late_upload
 
     def log(self, message: str) -> None:
         self._log(message)
@@ -366,7 +380,18 @@ class PhoneCameraHub:
                 return up
         session_dir = self._session_dir_resolver(session_id)
         if session_dir is None:
-            return None
+            try:
+                late = self._late_upload_target(session_id, device_id)
+            except Exception as e:  # noqa: BLE001 — e.g. the vault unreachable: refuse for now
+                self._log(f"Couldn't check the vault for a late Takeloom Camera recording of {session_id}: {e}")
+                late = None
+            if late is None:
+                return None
+            late_dir, late_file = late
+            with self._lock:
+                return self._uploads.setdefault(
+                    (session_id, device_id), _ExpectedUpload(session_id, late_dir, device_id, late_file, late=True),
+                )
         try:
             data = json.loads((session_dir / "session_log.json").read_text())
         except (OSError, ValueError):
@@ -672,6 +697,10 @@ class _Handler(socketserver.BaseRequestHandler):
             hub._cond.notify_all()
         self._send({"kind": "upload_done", "ok": True})
         hub._log(f"Takeloom Camera recording for {session_id} received in full")
+        if up.late:
+            hub.forget_upload(session_id, device_id)
+            threading.Thread(target=hub._on_late_upload, args=(session_id, device_id),
+                             name="late-camera-upload", daemon=True).start()
 
     def _expect_end_and_ack(self, sock: socket.socket, up: _ExpectedUpload) -> None:
         frame_type, payload = read_frame(sock)

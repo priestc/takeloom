@@ -1854,6 +1854,7 @@ _vault_sync_lock = threading.Lock()
 # One session upload at a time: the background retry (retry_session_uploads)
 # and a just-processed session's own upload never send the same files at once.
 _session_upload_lock = threading.Lock()
+_late_upload_lock = threading.Lock()
 
 
 def _file_signature(path: Path) -> tuple:
@@ -2290,6 +2291,8 @@ class LocalBackend(Backend):
             on_live_change=self._on_phone_status_changed,
             on_framing=self._on_phone_framing,
             on_status=self._on_phone_status,
+            late_upload_target=self._late_upload_target,
+            on_late_upload=self._on_late_upload,
         )
 
     def _on_phone_cameras_changed(self) -> None:
@@ -6737,15 +6740,68 @@ class LocalBackend(Backend):
         session may well be open, and a stale "idle" here used to snap every
         client (and the Stream Deck) back to the idle layout mid-session.
         One last `processing: False` marks it finished."""
+        labels = {phone_device_id(c.device): c.label for c in session.extra_cameras}
+        phones = [(d, labels.get(d, "Takeloom Camera")) for d in self._session_phone_ids(session)]
         try:
-            self._process_session_steps(session)
+            self._process_session_steps(session.session_dir, phones)
         finally:
             self._emit("recording_status", {"processing": False})
+
+    @staticmethod
+    def _logged_phone_uploads(session_dir: Path) -> list[tuple[str, str, str]]:
+        """(device id, label, upload file name) for every phone recording
+        `session_dir`'s session log says is coming whose video hasn't been
+        made yet — what a session left behind by a crash still waits for."""
+        from .phone_camera.hub import UPLOAD_FILE_NAME
+        try:
+            data = json.loads((session_dir / "session_log.json").read_text())
+        except (OSError, ValueError):
+            return []
+        found = []
+        phone = data.get("phone_camera") or {}
+        if phone.get("device_id") and not (session_dir / "session_video.mp4").exists():
+            found.append((phone["device_id"], "Takeloom Camera", UPLOAD_FILE_NAME))
+        for cam in data.get("extra_cameras") or []:
+            device_id = (cam.get("phone_camera") or {}).get("device_id")
+            if device_id and cam.get("upload_file") and not (session_dir / cam.get("final_file", "")).exists():
+                found.append((device_id, cam.get("label") or "Takeloom Camera", cam["upload_file"]))
+        return found
+
+    def start_leftover_session_processing(self, session_dir: str) -> None:
+        """Process a session a previous run left unprocessed (it crashed, or
+        lost power) exactly as if it had just ended here: on the background
+        processing thread, waiting first for every phone recording it was
+        expecting — the phones still have them, and upload once they
+        reconnect. Processing it at once without them (as startup used to)
+        filed the live feeds' video, deleted the session, and then refused
+        the phones' uploads."""
+        path = self._local_session_dir_path(session_dir)
+        if path is None:
+            raise BackendError(f"Session '{session_dir}' isn't available locally to process.")
+        phones = []
+        if self._phone_hub is not None:
+            from .phone_camera.hub import upload_paths
+            for device_id, label, file_name in self._logged_phone_uploads(path):
+                if upload_paths(path, file_name)[0].exists():
+                    continue  # arrived in full before the crash
+                self._phone_hub.expect_upload(path.name, path, device_id, file_name)
+                phones.append((device_id, label))
+
+        def run() -> None:
+            self._processing_status(f"Processing the last session, which didn't get to finish ({path.name})...")
+            try:
+                self._process_session_steps(path, phones)
+            finally:
+                self._emit("recording_status", {"processing": False})
+
+        self._processing_thread = threading.Thread(target=run, name="leftover-session")
+        self._processing_thread.start()
 
     def _processing_status(self, msg: str) -> None:
         self._emit("recording_status", {"status": msg, "processing": True})
 
-    def _process_session_steps(self, session: "_ActiveSession") -> None:
+    def _process_session_steps(self, session_dir: Path, phones: list[tuple[str, str]]) -> None:
+        """`phones`: (device id, label) of every phone upload to wait for."""
         from .processing.splicer import process_session
         config = self.get_config()
         if self._phone_hub is not None:
@@ -6754,10 +6810,8 @@ class LocalBackend(Backend):
             # the app is already idle and a new session can start meanwhile.
             # All of them before processing: in "remote" vault mode the
             # session dir is gone afterwards.
-            session_id = session.session_dir.name
-            labels = {phone_device_id(c.device): c.label for c in session.extra_cameras}
-            for device_id in self._session_phone_ids(session):
-                label = labels.get(device_id, "Takeloom Camera")
+            session_id = session_dir.name
+            for device_id, label in phones:
                 arrived = self._phone_hub.wait_for_upload(
                     session_id, device_id,
                     self._processing_status,
@@ -6770,9 +6824,9 @@ class LocalBackend(Backend):
         status = self._processing_status
         defer_video = vault_encodes_videos(config, log=status)
         try:
-            summary = process_session(session_dir=session.session_dir, config=config, defer_video=defer_video)
+            summary = process_session(session_dir=session_dir, config=config, defer_video=defer_video)
         except Exception as e:
-            status(f"Session take processing failed: {e} — raw files kept in {session.session_dir}")
+            status(f"Session take processing failed: {e} — raw files kept in {session_dir}")
             return
         status(summary)
 
@@ -6782,21 +6836,21 @@ class LocalBackend(Backend):
         # read from above.
         from .vault import sync_and_maybe_prune, sync_vault_files
         with _session_upload_lock:
-            uploaded = sync_and_maybe_prune(config, session.session_dir, log=status)
+            uploaded = sync_and_maybe_prune(config, session_dir, log=status)
         # Then the takes it filed, its backing tracks, the metadata and the
         # setlists — and, under "Remote only", their local media removed,
         # unless a new session has opened meanwhile (it may need them).
         with _vault_sync_lock:
             sync_vault_files(config, log=status, prune=not self.is_session_active())
         from .video import render_jobs
-        if not uploaded and render_jobs.pending(session.session_dir):
+        if not uploaded and render_jobs.pending(session_dir):
             # Left for the vault, but it never got the session: this
             # machine has the only copy, so its videos get made here after all.
             status("The vault didn't get this session, so its videos are being encoded here instead...")
-            if render_jobs.run_locally(session.session_dir):
+            if render_jobs.run_locally(session_dir):
                 status("Session videos encoded.")
             else:
-                status(f"Session video encoding failed — raw files kept in {session.session_dir}")
+                status(f"Session video encoding failed — raw files kept in {session_dir}")
 
     def is_session_active(self) -> bool:
         return self._active_session is not None
@@ -6837,6 +6891,145 @@ class LocalBackend(Backend):
                     sync_vault_files(config, log=log, prune=not self._busy_with_a_session())
         return done
 
+    # --- phone recordings that arrive after their session was processed ---
+
+    def _late_uploads_root(self, config: "StudioConfig") -> Path:
+        from .vault import vault_root
+        return vault_root(config) / "late_camera_uploads"
+
+    @staticmethod
+    def _late_camera_entry(data: dict, device_id: str) -> dict | None:
+        """The session log's camera entry for this phone, if its video was
+        made from the live feed (so the phone's own recording is still
+        worth having)."""
+        for cam in data.get("extra_cameras") or []:
+            if (cam.get("phone_camera") or {}).get("device_id") != device_id or not cam.get("upload_file"):
+                continue
+            if (cam.get("video_sync") or {}).get("source") == "phone upload":
+                return None  # already has it
+            return cam
+        return None
+
+    def _late_upload_target(self, session_id: str, device_id: str) -> tuple[Path, str] | None:
+        """Where a phone's recording goes for a session that's only in the
+        vault now, or None to refuse it (see PhoneCameraHub.set_callbacks).
+        Called on the phone's upload connection."""
+        config = self.get_config()
+        from .vault import remote_vault
+        client = remote_vault(config)
+        if client is None:
+            return None
+        data = client.fetch_session_log(session_id)
+        if not data or self._late_camera_entry(data, device_id) is None:
+            return None
+        entry = self._late_camera_entry(data, device_id)
+        directory = self._late_uploads_root(config) / session_id
+        directory.mkdir(parents=True, exist_ok=True)
+        self._emit("vault_status", {"status": f"{entry.get('label') or 'A phone'} is uploading its recording of "
+                                              f"{session_id}, which was processed without it; it'll replace "
+                                              "the live feed's video in the vault."})
+        return directory, entry["upload_file"]
+
+    def _on_late_upload(self, session_id: str, device_id: str) -> None:
+        self.recover_late_camera_uploads()
+
+    def recover_late_camera_uploads(self) -> int:
+        """Swap every late phone recording that's fully arrived into its
+        session in the vault, in place of the live feed's video (phone_
+        camera/sync.py's realign_late_upload). Only while no session is
+        open or processing — it's gigabytes of network and disk — so it's
+        also retried by the upload-retry loop. Returns how many it did."""
+        if self._busy_with_a_session():
+            return 0
+        config = self.get_config()
+        root = self._late_uploads_root(config)
+        if not root.is_dir():
+            return 0
+        from .vault import remote_vault
+        client = remote_vault(config)
+        if client is None:
+            return 0
+        log = lambda msg: self._emit("vault_status", {"status": msg})  # noqa: E731
+        done = 0
+        with _late_upload_lock:
+            for directory in sorted(d for d in root.iterdir() if d.is_dir()):
+                if self._busy_with_a_session():
+                    break
+                try:
+                    done += self._recover_late_session(client, directory, log)
+                except Exception as e:  # noqa: BLE001 — keep the files; try again next time
+                    log(f"Replacing {directory.name}'s live-feed video failed: {type(e).__name__}: {e} "
+                        f"(the phone's recording is kept in {directory}; it'll be retried)")
+                if not any(directory.iterdir()):
+                    directory.rmdir()
+        return done
+
+    def _recover_late_session(self, client, directory: Path, log) -> int:
+        from .phone_camera.hub import upload_paths
+        from .phone_camera.sync import realign_late_upload
+        session_id = directory.name
+        data = client.fetch_session_log(session_id)
+        if not data:
+            log(f"Late phone recordings for {session_id}: the vault doesn't have that session; kept in {directory}")
+            return 0
+        done = 0
+        for cam in list(data.get("extra_cameras") or []):
+            if not cam.get("upload_file"):
+                continue
+            uploaded, part, meta_path = upload_paths(directory, cam["upload_file"])
+            if not uploaded.exists():
+                continue  # not here, or still arriving
+            label = cam.get("label") or cam["final_file"]
+            if (cam.get("video_sync") or {}).get("source") == "phone upload":
+                uploaded.unlink()
+                meta_path.unlink(missing_ok=True)
+                continue
+            try:
+                meta = json.loads(meta_path.read_text())
+            except (OSError, ValueError):
+                meta = {}
+            old_video = directory / cam["final_file"]
+            if not old_video.exists():
+                log(f"Downloading {session_id}/{cam['final_file']} from the vault to line {label}'s recording up...")
+                if not client.download_file(f"sessions/{session_id}/{cam['final_file']}", old_video):
+                    raise RuntimeError(f"couldn't download {cam['final_file']}")
+            new_video = directory / (Path(cam["final_file"]).stem + ".late.mp4")
+            mic_name = Path(cam["final_file"]).stem + "_mic.flac"
+            log(f"Lining up {label}'s full-quality recording of {session_id}...")
+            audio_delay_s = max(0.0, -float(cam.get("video_offset_ms") or 0.0) / 1000.0)
+            sync = realign_late_upload(
+                uploaded, meta, cam.get("phone_camera") or {}, old_video, new_video, directory / mic_name,
+                audio_delay_s, int(data.get("sample_rate") or 48000),
+            )
+            if sync is None:
+                raise RuntimeError(f"couldn't line {label}'s recording up (no audio match, no clock sync)")
+            log(f"Uploading {label}'s full-quality video of {session_id} to the vault "
+                f"({new_video.stat().st_size / 1e9:.2f} GB, lined up by {sync['method']})...")
+            client.upload_file(new_video, f"sessions/{session_id}/{cam['final_file']}")
+            if sync.get("mic_file"):
+                client.upload_file(directory / mic_name, f"sessions/{session_id}/{mic_name}")
+            # Re-read right before writing: only this one entry changes.
+            # video_offset_ms stays: the audio (what it describes, for the
+            # take refs and the editor) is exactly where it was.
+            fresh = client.fetch_session_log(session_id) or data
+            for entry in fresh.get("extra_cameras") or []:
+                if entry.get("final_file") == cam["final_file"]:
+                    entry["replaced_video_sync"] = entry.get("video_sync")
+                    entry["video_sync"] = {k: v for k, v in sync.items() if k != "mic_file"}
+                    if sync.get("mic_file"):
+                        entry["mic_file"] = sync["mic_file"]
+            if not client.write_session_log(session_id, fresh):
+                raise RuntimeError("the vault didn't take the updated session log")
+            # The half-uploaded leftovers of the attempt that was cut short.
+            stem = Path(cam["upload_file"]).stem
+            client.delete_paths([f"sessions/{session_id}/{cam['upload_file']}.part",
+                                 f"sessions/{session_id}/{stem}.upload.json"])
+            for f in (uploaded, meta_path, old_video, new_video, directory / mic_name):
+                f.unlink(missing_ok=True)
+            log(f"{label}'s full-quality video of {session_id} is in the vault now.")
+            done += 1
+        return done
+
     def start_session_upload_retries(self, interval_seconds: float = 600.0) -> None:
         """Run retry_session_uploads now and then every `interval_seconds`
         on a background thread, for as long as this process runs (takeloom
@@ -6847,6 +7040,10 @@ class LocalBackend(Backend):
                     self.retry_session_uploads()
                 except Exception as e:  # noqa: BLE001 — the loop must never die
                     self._emit("vault_status", {"status": f"Session upload retry failed: {type(e).__name__}: {e}"})
+                try:
+                    self.recover_late_camera_uploads()
+                except Exception as e:  # noqa: BLE001
+                    self._emit("vault_status", {"status": f"Late phone recording check failed: {type(e).__name__}: {e}"})
                 time.sleep(interval_seconds)
 
         threading.Thread(target=loop, daemon=True, name="session-upload-retry").start()

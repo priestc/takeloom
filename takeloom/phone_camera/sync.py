@@ -230,8 +230,8 @@ def _normalize_video(src: Path, dest: Path, scale: float) -> bool:
     return True
 
 
-def extract_mic(uploaded: Path, out: Path, file_zero_s: float, scale: float, mix_flac: Path,
-                sample_rate: int) -> bool:
+def extract_mic(uploaded: Path, out: Path, file_zero_s: float, scale: float, mix_flac: Path | None,
+                sample_rate: int, duration: float | None = None) -> bool:
     """The phone recording's mic track as FLAC, on the mix's timeline:
     sample n is the same moment as the mix's sample n, over exactly the
     mix's length (silence where the phone wasn't recording).
@@ -242,8 +242,9 @@ def extract_mic(uploaded: Path, out: Path, file_zero_s: float, scale: float, mix
     compensation: the drift is tens of ppm, far too small to hear) with
     silence before the first sample (first_pts=0, as in _decode_mono);
     then it's shifted by file_zero_s and cut to the mix's length."""
-    import soundfile as sf
-    duration = sf.info(str(mix_flac)).duration
+    if duration is None:
+        import soundfile as sf
+        duration = sf.info(str(mix_flac)).duration
     shift = (f"adelay=delays={file_zero_s * 1000:.3f}:all=1" if file_zero_s >= 0
              else f"atrim=start={-file_zero_s:.6f},asetpts=PTS-STARTPTS")
     chain = f"aresample={sample_rate}:async=1000:first_pts=0,{shift},apad,atrim=end={duration:.6f}"
@@ -390,4 +391,115 @@ def _align_uploaded(
         return None
     if not _normalize_video(uploaded, raw, scale):
         return None
+    return result
+
+
+def _probe_streams(path: Path) -> list[dict]:
+    result = subprocess.run(
+        [FFPROBE, "-v", "error", "-show_entries", "stream=index,codec_type,start_pts,time_base,duration",
+         "-of", "json", str(path)], capture_output=True, text=True,
+    )
+    return json.loads(result.stdout or "{}").get("streams") or []
+
+
+def realign_late_upload(
+    uploaded: Path, meta: dict, phone: dict, camera_video: Path, out: Path, mic_out: Path,
+    audio_delay_s: float, sample_rate: int,
+) -> dict | None:
+    """A phone recording that arrived after its session was processed (and
+    the session's video made from the phone's live feed instead): swap its
+    video into `camera_video`, writing `out`.
+
+    The finished camera video's two audio tracks (Mix, Instrument Only)
+    are copied over untouched — every take's video ref and the editor's
+    offsets point at their timing — so only the video track moves. It's
+    lined up exactly as a normal upload is (_align_uploaded), but against
+    those audio tracks, on the camera video's own timeline: the vault
+    doesn't keep session.flac/session_mix.flac once the videos are made.
+    `audio_delay_s` is where the mix starts in `camera_video` (the
+    negative-offset delay it was muxed with), only needed for the clock
+    estimate and the mic track. Also writes the phone's mic track to
+    `mic_out` on the mix's timeline. Returns the sync record (as
+    _align_uploaded's, plus "video_start_in_file_s"), or None if neither
+    the audio nor the clock could place it."""
+    video_start_pts = meta.get("video_start_pts_ns") or phone.get("phone_video_start_pts_ns")
+    clock_offset = meta.get("clock_offset_ns")
+    if clock_offset is None:
+        clock_offset = phone.get("clock_offset_ns")
+    clock_v = _clock_video_start(phone, video_start_pts, clock_offset)
+    clock_file = clock_v + audio_delay_s if clock_v is not None else None
+
+    first_video_pts = _probe_first_video_pts(uploaded)
+    phone_audio = _decode_mono(uploaded, ["-copyts"], "0:a:0", pad_from_zero=True)
+    references = [
+        ("mix", _decode_mono(camera_video, ["-copyts"], "0:a:0", pad_from_zero=True), 0.0),
+        ("instrument", _decode_mono(camera_video, ["-copyts"], "0:a:1", pad_from_zero=True), 0.0),
+    ]
+    if clock_file is not None:
+        fit = measure_alignment(phone_audio, references, clock_file - first_video_pts, SEARCH_S)
+    else:
+        fit = measure_alignment(phone_audio, references, -first_video_pts, NO_CLOCK_SEARCH_S)
+    if fit is not None:
+        scale = 1.0 + fit["drift"]
+        file_zero = fit["a0_s"]  # the upload's time 0, on camera_video's timeline
+        result = {
+            "source": "phone upload", "method": "audio", "late": True,
+            "drift": fit["drift"], "drift_ppm": round(fit["drift"] * 1e6, 2),
+            "windows_matched": fit["inliers"], "windows_tried": fit["windows"],
+            "residual_ms": fit["residual_ms"],
+        }
+        if clock_file is not None:
+            result["clock_offset_ms"] = round(clock_v * 1000, 3)
+    elif clock_file is not None:
+        scale = 1.0
+        file_zero = clock_file - first_video_pts
+        result = {"source": "phone upload", "method": "clock", "late": True, "drift": 0.0}
+    else:
+        return None
+    video_start = file_zero + first_video_pts * scale
+    result["video_start_in_file_s"] = round(video_start, 6)
+    result["offset_ms"] = round((video_start - audio_delay_s) * 1000, 3)
+    result["file_zero_s"] = file_zero - audio_delay_s  # on the mix's timeline, as extract_mic wants
+
+    normalized = out.with_name(out.stem + ".video-only.mp4")
+    if not _normalize_video(uploaded, normalized, scale):
+        raise RuntimeError(f"couldn't rescale {uploaded.name}'s video timestamps")
+    try:
+        cmd = [FFMPEG, "-y", "-v", "error"]
+        if video_start >= 0:
+            # A stream copy: the video just starts a little into the file.
+            cmd += ["-itsoffset", f"{video_start:.6f}", "-i", str(normalized), "-i", str(camera_video),
+                    "-map", "0:v:0", "-map", "1:a:0", "-map", "1:a:1", "-c", "copy"]
+        else:
+            # It starts before the file's zero, and a stream copy can't
+            # start mid-GOP (ffmpeg quietly snaps it to 0 instead): cut it
+            # exactly, which means re-encoding.
+            cmd += ["-ss", f"{-video_start:.6f}", "-i", str(normalized), "-i", str(camera_video),
+                    "-map", "0:v:0", "-map", "1:a:0", "-map", "1:a:1",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "copy"]
+        cmd += ["-disposition:a:0", "0", "-disposition:a:1", "default", "-movflags", "+faststart", str(out)]
+        done = subprocess.run(cmd, capture_output=True)
+        if done.returncode != 0 or not out.exists():
+            raise RuntimeError(f"couldn't mux {out.name}: {done.stderr.decode(errors='replace')[-300:]}")
+    finally:
+        normalized.unlink(missing_ok=True)
+
+    # The audio must have come through bit-for-bit where it was.
+    before = [(st.get("codec_type"), st.get("start_pts")) for st in _probe_streams(camera_video)
+              if st.get("codec_type") == "audio"]
+    after_streams = _probe_streams(out)
+    after = [(st.get("codec_type"), st.get("start_pts")) for st in after_streams if st.get("codec_type") == "audio"]
+    if before != after or not any(st.get("codec_type") == "video" for st in after_streams):
+        out.unlink(missing_ok=True)
+        raise RuntimeError(f"{out.name}'s audio tracks didn't come through unchanged ({before} -> {after})")
+
+    mix_duration = next((float(st["duration"]) for st in _probe_streams(camera_video)
+                         if st.get("codec_type") == "audio" and st.get("duration")), None)
+    if mix_duration:
+        try:
+            extract_mic(uploaded, mic_out, result["file_zero_s"], scale, None, sample_rate,
+                        duration=mix_duration - audio_delay_s)
+            result["mic_file"] = mic_out.name
+        except Exception as e:  # the video matters more: never lose it over the mic
+            result["mic_error"] = str(e)
     return result
