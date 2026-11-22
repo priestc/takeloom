@@ -4,17 +4,19 @@ Always push every commit to `origin` (`main`) right after making it — no need 
 
 There are two machines running `takeloom`, installed differently:
 
-- The laptop ("Framework"), reachable via `ssh framework` (non-interactive/key-auth works). Installed via `pipx` directly from this GitHub repo (`takeloom @ git+https://github.com/priestc/takeloom.git`) — not an editable clone, so picking up new code requires a reinstall, not a `git pull`.
+- The laptop ("Framework"), reachable via `ssh framework-laptop` (the `~/.ssh/config` alias for `framework-laptop.lan`; non-interactive/key-auth works). Installed via `pipx` directly from this GitHub repo (`takeloom @ git+https://github.com/priestc/takeloom.git`) — not an editable clone, so picking up new code requires a reinstall, not a `git pull`.
 - The Mac Mini — the studio hub machine with the Scarlett 4i4 attached (see `studio_hardware_scarlett_4i4` memory), and normally the machine Claude Code itself is already running on (`hostname` reports `Mac.local`). Installed via `pipx install --editable ~/Documents/GitHub/takeloom` — an editable install pointing straight at this working copy (confirm with `cat ~/.local/pipx/venvs/takeloom/lib/python*/site-packages/takeloom*.dist-info/direct_url.json`, should show `"editable": true`). Any commit — or even an uncommitted local edit — takes effect the next time `takeloom` is launched there; no reinstall step needed. (If a dependency is ever added/changed in `pyproject.toml`, that *does* still need `pipx install --editable --force ~/Documents/GitHub/takeloom` to pick up the new package.)
 
 Any change **except code that only affects server mode** (i.e. changes confined to the headless `takeloom server` path — see `takeloom/__main__.py`'s `server_command` and anything only reachable from it) should be automatically deployed once committed:
 
-1. Push to `origin` (`main`). That's the only step to take here — do not `ssh framework` to reinstall.
+1. Push to `origin` (`main`). That's the only step to take here — do not `ssh framework-laptop` to reinstall.
 2. The laptop no longer gets deployed to manually. `takeloom ui` checks GitHub's `main` on launch and self-updates (reinstalls + restarts) if it's behind — see `takeloom/update_check.py`. The user's habit is to close and reopen the app on the laptop before testing, which is what actually picks up the new commit; nothing needs to happen on the laptop from this side beyond the push.
 3. Nothing further needed for the Mac Mini — just make sure `takeloom` (or `takeloom server`) is restarted there to pick up the change.
 
+The remote vault server (`takeloom-vault`, this repo's `vault_server/`) runs on **tank2**, reachable via `ssh tank2` — the `~/.ssh/config` alias (user `chris`, key `~/.ssh/id_rsa`). Use the alias: a bare `ssh tank2.lan` skips it and is refused. It's not auto-deployed: after a `vault_server/` change, upgrade it with `ssh tank2 'export PATH="$HOME/.local/bin:$PATH"; pipx install --force "git+https://github.com/priestc/takeloom.git#subdirectory=vault_server" && systemctl --user restart takeloom-vault'` (ask first; it's a shared service).
+
 Manual laptop reinstall (reference only — for troubleshooting if auto-update ever fails or misbehaves, not part of the normal flow above):
-`ssh framework "pipx install --force git+https://github.com/priestc/takeloom.git"`
+`ssh framework-laptop "pipx install --force git+https://github.com/priestc/takeloom.git"`
 
 # Testing setup
 
