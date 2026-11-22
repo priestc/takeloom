@@ -7,6 +7,7 @@ dependencies, same as the rest of this package."""
 from __future__ import annotations
 
 import datetime
+import json
 import re
 import time
 from html import escape
@@ -168,6 +169,121 @@ def session_videos(directory: Path, data: dict) -> list[tuple[str, str, str]]:
     return videos
 
 
+_CAMERA_STATE_STYLE = {
+    "full": ("#2e9d4f", "Full quality"),
+    "stream": ("#e0a800", "Stream quality only"),
+    "encoding": ("#2a6db0", "Encoding"),
+    "missing": ("#c44f6d", "No video"),
+}
+
+_probe_cache: dict[tuple[str, int], str] = {}
+
+
+def _video_resolution(path: Path) -> str:
+    """"1920×1080" (cached per file version), or "" if it can't be read."""
+    try:
+        key = (str(path), path.stat().st_mtime_ns)
+    except OSError:
+        return ""
+    if key not in _probe_cache:
+        import subprocess
+        try:
+            out = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+                 "-of", "csv=p=0:s=x", str(path)], capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        _probe_cache[key] = out.replace("x", "×") if out else ""
+    return _probe_cache[key]
+
+
+def camera_statuses(directory: Path, data: dict) -> list[dict]:
+    """Where each camera's video for this session stands, for showing on
+    the session pages: {"title", "state", "detail", "resolution"}, state
+    one of "full" (a phone's own recording, or a local camera's capture),
+    "stream" (a phone's video made from its live preview feed, because its
+    full-quality recording never reached takeloom — see takeloom's
+    phone_camera/sync.py), "encoding" (left for this vault to encode and
+    not done yet) or "missing"."""
+    jobs_pending = set()
+    if (directory / "render_jobs.json").is_file():
+        try:
+            jobs = json.loads((directory / "render_jobs.json").read_text()).get("jobs") or []
+            jobs_pending = {j.get("output") for j in jobs if not j.get("done")}
+        except (OSError, ValueError):
+            pass
+
+    def status(title: str, file: str, sync: dict, is_phone: bool, upload_file: str = "") -> dict:
+        exists = bool(file) and "/" not in file and (directory / file).is_file()
+        source = (sync or {}).get("source")
+        if not exists:
+            if file in jobs_pending:
+                state, detail = "encoding", "Left for this vault to encode; not done yet."
+            else:
+                state, detail = "missing", "There's no video file for this camera."
+        elif is_phone and source == "live feed":
+            state = "stream"
+            detail = ("Made from the phone's live preview stream: its full-quality recording never reached "
+                      "takeloom. If it's still on the phone, open Takeloom Camera there and it'll upload, "
+                      "then replace this.")
+            part = directory / (upload_file + ".part") if upload_file else None
+            if part is not None and part.is_file():
+                detail += f" (A cut-off upload of {_format_size(part.stat().st_size)} is also here.)"
+        else:
+            state = "full"
+            if not is_phone:
+                detail = "Recorded by takeloom from a camera attached to the studio machine."
+            elif (sync or {}).get("late"):
+                detail = "The phone's own recording (it arrived after the session was processed)."
+            else:
+                detail = "The phone's own recording."
+            if is_phone and sync.get("method") == "clock":
+                detail += " Lined up by clock sync only (no audio match), so sync may be off by a frame or two."
+        return {"title": title, "state": state, "detail": detail,
+                "resolution": _video_resolution(directory / file) if exists else ""}
+
+    found = []
+    phone = data.get("phone_camera") or {}
+    if phone or (directory / "session_video.mp4").exists():
+        label = phone.get("label") or data.get("camera_label") or ""
+        found.append(status(camera_title(label, phone, data), "session_video.mp4", data.get("video_sync") or {},
+                            bool(phone)))
+    for cam in data.get("extra_cameras") or []:
+        cam_phone = cam.get("phone_camera") or {}
+        found.append(status(camera_title(cam.get("label") or "", cam_phone, data), cam.get("final_file") or "",
+                            cam.get("video_sync") or {}, bool(cam_phone), cam.get("upload_file") or ""))
+    return found
+
+
+def _camera_status_table(statuses: list[dict]) -> str:
+    rows = []
+    for st in statuses:
+        color, word = _CAMERA_STATE_STYLE[st["state"]]
+        rows.append(
+            f"<tr><td>{escape(st['title'])}</td>"
+            f"<td><span class='pill' style='border-color:{color};color:{color}'>{word}</span></td>"
+            f"<td class='muted small'>{escape(st['resolution'])}</td>"
+            f"<td class='small'>{escape(st['detail'])}</td></tr>"
+        )
+    return "<h2>Cameras</h2><table>" + "".join(rows) + "</table>"
+
+
+def _video_column(statuses: list[dict], has_video: bool) -> str:
+    """The sessions list's Video cell: ▶, plus what's not right yet."""
+    states = [st["state"] for st in statuses]
+    marks = []
+    if "stream" in states:
+        n = states.count("stream")
+        marks.append(f"<span class='pill' style='border-color:#e0a800;color:#e0a800' "
+                     f"title='{n} camera(s) only have the live preview stream'>stream quality</span>")
+    if "encoding" in states:
+        marks.append("<span class='pill' style='border-color:#2a6db0;color:#2a6db0'>encoding</span>")
+    if "missing" in states and has_video:
+        marks.append("<span class='pill' style='border-color:#c44f6d;color:#c44f6d'>camera missing</span>")
+    return ("▶ " if has_video else "") + "".join(marks)
+
+
 def sessions_page(vault: Vault, logs: dict[str, dict], pending: list[PairingRequest]) -> str:
     rows = []
     for name, data in sorted(
@@ -176,6 +292,7 @@ def sessions_page(vault: Vault, logs: dict[str, dict], pending: list[PairingRequ
         events = data.get("events") or []
         directory = vault.session_dir(name)
         has_video = bool(session_videos(directory, data))
+        statuses = camera_statuses(directory, data)
         takes = _take_count(data)
         tracks = _track_names(data)
         rows.append(
@@ -188,7 +305,7 @@ def sessions_page(vault: Vault, logs: dict[str, dict], pending: list[PairingRequ
                 duration=_format_duration(events[-1]["timestamp"]) if events else "",
                 songs=len(tracks),
                 takes="<span class='muted'>pending</span>" if takes is None else takes,
-                video="▶" if has_video else "",
+                video=_video_column(statuses, has_video),
                 size=_format_size(vault.session_size(name)),
             )
         )
@@ -435,6 +552,15 @@ def session_page(vault: Vault, name: str, data: dict, editor=None, publisher=Non
 
     videos = session_videos(directory, data)
     has_video = bool(videos)
+    statuses = camera_statuses(directory, data)
+    stream_only = [st["title"] for st in statuses if st["state"] == "stream"]
+    if stream_only:
+        parts.append(
+            "<p class='banner'><b>Not full quality yet:</b> " + escape(", ".join(stream_only)) +
+            (" only has" if len(stream_only) == 1 else " only have") +
+            " the phone's live preview stream — its full-quality recording never reached takeloom. "
+            "Open Takeloom Camera on that phone; if the recording's still there it'll upload and replace this.</p>"
+        )
     if has_video:
         from . import footer
         if editor is not None and (len(videos) > 1 or footer.wanted(data)):
@@ -461,6 +587,9 @@ def session_page(vault: Vault, name: str, data: dict, editor=None, publisher=Non
             "<p class='banner'>This session's video was never processed into a playable file "
             "(only <code>session_video_raw.mp4</code> exists — the capture likely wasn't finalized).</p>"
         )
+
+    if statuses:
+        parts.append(_camera_status_table(statuses))
 
     # One row per play-through of a song: where its recording started, in
     # the session video's own timeline. session_video.mp4 is muxed against
