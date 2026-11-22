@@ -115,8 +115,9 @@ def clip_cmd(ffmpeg: str, session_video: Path, ref: dict, out_path: Path) -> lis
     """The ffmpeg command that cuts `ref`'s take out of `session_video`.
     Re-encodes the video (input seeking + re-encode is frame-accurate; a
     stream copy could only start on a keyframe) and keeps both audio tracks
-    in the same Mix (AAC) + Instrument Only (FLAC) layout a session video
-    has. The vault server runs this same command — keep
+    in the same Mix + Instrument Only layout a session video has, the
+    Instrument Only one lossy here (LAME V2: audio/formats.py) — a clip is
+    for watching; only the session's own recording stays lossless. The vault server runs this same command — keep
     vault_server/takeloom_vault/takes.py's copy in step with it."""
     return [
         ffmpeg, "-y", "-v", "error",
@@ -125,7 +126,7 @@ def clip_cmd(ffmpeg: str, session_video: Path, ref: dict, out_path: Path) -> lis
         "-map", "0:v:0", "-map", "0:a:0", "-map", "1:a:1",
         "-t", f"{ref['duration_s']:.6f}",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-c:a:0", "aac", "-c:a:1", "flac",
+        "-c:a:0", "aac", "-c:a:1", "libmp3lame", "-q:a:1", "2",
         "-metadata:s:a:0", "title=Mix", "-metadata:s:a:1", "title=Instrument Only",
         "-disposition:a:0", "0", "-disposition:a:1", "default",
         "-movflags", "+faststart",

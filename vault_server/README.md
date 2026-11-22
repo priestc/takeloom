@@ -50,6 +50,21 @@ stored (in `~/.config/takeloom-vault/clients.json`).
 
 No login: anyone on the local network can browse. The API needs a paired token.
 
+## What it stores
+
+Everything takeloom keeps in its vault: `sessions/`, `completed_takes/`, `backing_tracks/`,
+`mixes/` (the Completed Takes mixer's saved mixes), `final_mixes/` (exported song mixes),
+`projects/` (setlists), and the root files `inspiration_takes.json` and `backing_tuning.json`.
+Takeloom keeps them in sync after each session (`takeloom vault sync`).
+
+Only a session's raw recording is lossless. A completed take's file is an MP3 (LAME V2), so
+`/api/takes/<take filename>/original` cuts the take's lossless original back out of its
+session for an exported mix. It cuts from `session.flac` by sample when the session still has
+it, and otherwise from a camera video's Instrument Only (FLAC) track. A legacy `.flac` take
+is served as it is. The result is cached with the take videos. Take video clips and edits get
+an MP3 Instrument Only track, so this server's ffmpeg needs `libmp3lame`. Debian's and
+Ubuntu's ffmpeg packages include it.
+
 ## Take videos
 
 Completed takes don't get their own video file. Cameras are a set: every camera records its

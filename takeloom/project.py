@@ -47,6 +47,15 @@ class TakeInfo:
     # been renamed or removed from config entirely — see that method's
     # docstring.
     input_label: str = ""
+    # Where this take's lossless original is: the take's own file is lossy
+    # (LAME V2 .mp3, audio/formats.py), and only its session's raw
+    # recording is kept lossless. {"session": <session dir name>,
+    # "start_frame", "end_frame", "sample_rate"} — its span of that
+    # session's session.flac — plus "retuned": true for a MIDI take that
+    # was re-rendered at concert pitch (its original is its MIDI, not the
+    # session audio). None for a take from before this existed; see
+    # take_original.py for how an exported mix finds its original anyway.
+    source: dict | None = None
 
 
 @dataclass
@@ -288,12 +297,23 @@ class Project:
         TrackEntry.source_label() — so completed takes recorded against
         it can name explicitly what backing track they came from."""
         ensure_dir(self.backing_tracks_dir)
-        if source_path.parent.resolve() == self.backing_tracks_dir.resolve():
+        from .audio.formats import LOSSLESS_EXTS, LOSSY_EXT, encode_mp3
+        in_vault = source_path.parent.resolve() == self.backing_tracks_dir.resolve()
+        lossless = source_path.suffix.lower() in LOSSLESS_EXTS
+        if in_vault and not lossless:
             dest = source_path
         else:
+            # Only a session's raw recording is kept lossless; a lossless
+            # backing track is stored as LAME V2 (audio/formats.py).
             safe_stem = sanitize_filename(source_path.stem) or "track"
-            dest = self.backing_tracks_dir / f"{secrets.token_hex(4)}_{safe_stem}{source_path.suffix}"
-            shutil.copy2(source_path, dest)
+            stem = source_path.stem if in_vault else f"{secrets.token_hex(4)}_{safe_stem}"
+            dest = self.backing_tracks_dir / f"{stem}{LOSSY_EXT if lossless else source_path.suffix}"
+            if lossless:
+                encode_mp3(source_path, dest)
+                if in_vault:
+                    source_path.unlink(missing_ok=True)
+            else:
+                shutil.copy2(source_path, dest)
         name = track_name or source_path.stem
         entry = TrackEntry(name=name, backing_track=dest.name, duration_seconds=duration_seconds, source=source)
         self.setlist.add_track(entry)

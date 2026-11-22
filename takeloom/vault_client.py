@@ -227,6 +227,13 @@ class VaultClient:
             f"/api/takes/{quote(take_filename, safe='')}/video{query}", local_path, _CLIP_TIMEOUT,
         )
 
+    def download_take_original(self, take_filename: str, local_path: Path) -> bool:
+        """A lossless FLAC of completed take `take_filename`, which the
+        server cuts back out of its session (see take_original.py)."""
+        return self._download(
+            f"/api/takes/{quote(take_filename, safe='')}/original", local_path, _CLIP_TIMEOUT,
+        )
+
     def _download(self, path: str, local_path: Path, timeout: float) -> bool:
         local_path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(prefix=".download-", dir=local_path.parent)
@@ -246,8 +253,9 @@ class VaultClient:
             return False
 
     def list_files(self, vault_relative_dir: str) -> list[dict] | None:
-        """[{"name", "size"}] of the files directly in a vault folder, or
-        None if the vault couldn't be reached."""
+        """[{"name", "size", "mtime"?}] of the files directly in a vault
+        folder ("mtime" only from takeloom-vault 0.10+), or None if the
+        vault couldn't be reached."""
         try:
             return self._json("GET", f"/api/list/{self._q(vault_relative_dir)}").get("files", [])
         except VaultError:

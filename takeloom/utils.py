@@ -7,6 +7,7 @@ import re
 import tempfile
 import time
 from pathlib import Path
+from typing import Iterable
 
 
 def timestamp_now() -> float:
@@ -85,16 +86,23 @@ def take_filename(
     return f"{safe_track} - {safe_inst} - take{take_number} [{source}:{tag_id}].{ext}"
 
 
-def next_take_number(completed_dir: Path, track_name: str, instrument: str) -> int:
-    """Find the next available take number for a track/instrument combo."""
+def next_take_number(
+    completed_dir: Path, track_name: str, instrument: str, other_names: Iterable[str] = (),
+) -> int:
+    """Find the next available take number for a track/instrument combo:
+    one past the highest among completed_dir's files and `other_names`
+    (filenames elsewhere — the remote vault's completed_takes/, under
+    "Remote only" storage, where a take's audio no longer stays here, so
+    the number is never reused for a different take)."""
     prefix = f"{sanitize_filename(track_name)} - {sanitize_filename(instrument)} - take"
     max_num = 0
-    if completed_dir.exists():
-        for f in completed_dir.iterdir():
-            if f.stem.startswith(prefix.rstrip("take")):
-                match = re.search(r"take(\d+)", f.stem)
-                if match:
-                    max_num = max(max_num, int(match.group(1)))
+    stems = [f.stem for f in completed_dir.iterdir()] if completed_dir.exists() else []
+    stems += [Path(name).stem for name in other_names]
+    for stem in stems:
+        if stem.startswith(prefix.rstrip("take")):
+            match = re.search(r"take(\d+)", stem)
+            if match:
+                max_num = max(max_num, int(match.group(1)))
     return max_num + 1
 
 

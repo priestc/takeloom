@@ -1,6 +1,8 @@
 """Post-session processing: replay a session's event log to find completed
 takes, clip their audio out of the continuous session recording, and update
-the setlist. A take's video isn't clipped here — only where it sits in the
+the setlist. A take's file is lossy (LAME V2 .mp3: audio/formats.py); its
+lossless original stays in the session's raw recording, which its
+TakeInfo.source points at (see take_original.py). A take's video isn't clipped here — only where it sits in the
 session video is recorded; see take_video.py.
 
 This is the deferred half of the session-centric recording model (see the
@@ -66,11 +68,12 @@ from pathlib import Path
 
 import soundfile as sf
 
+from ..audio.formats import LOSSY_EXT, encode_mp3
 from ..config import StudioConfig
 from ..project import Project, TakeInfo
 from ..take_video import take_video_ref, write_take_video_ref
 from ..utils import atomic_write_text, take_filename, next_take_number, ensure_dir
-from ..vault import record_inspiration_take, vault_root
+from ..vault import record_inspiration_take, remote_vault, vault_root
 
 # An abandoned (skipped/stopped) play-through this long is kept as a take
 # anyway — see module docstring.
@@ -422,6 +425,12 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
     # session (e.g. redrawn/re-recorded) can produce more than one take.
     session_takes: dict[int, list[dict]] = {}
     completed_dir = ensure_dir(project.completed_takes_dir)
+    # Under "Remote only" storage a take's audio doesn't stay here, so the
+    # vault's own listing is what keeps a take number from being reused.
+    remote_names: list[str] = []
+    client = remote_vault(config) if completed else None
+    if client is not None:
+        remote_names = [f["name"] for f in client.list_files("completed_takes") or []]
     if completed:
         with sf.SoundFile(str(session_flac)) as src:
             total = len(src)
@@ -488,8 +497,10 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
                     take_backing_track = slot.backing_track
                     take_source = slot.source_label()
 
-                take_num = next_take_number(completed_dir, track_name, take_label)
-                flac_name = take_filename(track_name, take_label, take_num, take_source, take_backing_track, "flac")
+                take_num = next_take_number(completed_dir, track_name, take_label, remote_names)
+                audio_name = take_filename(
+                    track_name, take_label, take_num, take_source, take_backing_track, LOSSY_EXT.lstrip("."),
+                )
                 mid_path = completed_dir / take_filename(
                     track_name, take_label, take_num, take_source, take_backing_track, "mid",
                 )
@@ -508,7 +519,7 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
                             ).items() if k != "session"},
                         } for cam in camera_videos],
                     }
-                    write_take_video_ref(completed_dir / flac_name, video_ref)
+                    write_take_video_ref(completed_dir / audio_name, video_ref)
                     videos += 1
                 has_video = video_ref is not None
 
@@ -526,17 +537,28 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
                     from ..audio.midi_log import slice_midi_file
                     slice_midi_file(session_midi, start, end, sample_rate, mid_path)
                     has_midi = True
-                if take.retuned and has_midi:
-                    # See CompletedTake.retuned: the audio, played again
-                    # from the notes at concert pitch, same voice.
-                    from ..audio.midi_log import render_midi_file
-                    render_midi_file(mid_path, take.synth_voice, sample_rate, end - start, completed_dir / flac_name)
-                else:
-                    _copy_flac_segment(src, start, end, completed_dir / flac_name)
+                # Cut (or rendered) losslessly first, then encoded once.
+                lossless = completed_dir / f".{Path(audio_name).stem}.partial.flac"
+                retuned = take.retuned and has_midi
+                try:
+                    if retuned:
+                        # See CompletedTake.retuned: the audio, played again
+                        # from the notes at concert pitch, same voice.
+                        from ..audio.midi_log import render_midi_file
+                        render_midi_file(mid_path, take.synth_voice, sample_rate, end - start, lossless)
+                    else:
+                        _copy_flac_segment(src, start, end, lossless)
+                    encode_mp3(lossless, completed_dir / audio_name)
+                finally:
+                    lossless.unlink(missing_ok=True)
+                source = {
+                    "session": session_dir.name, "start_frame": start, "end_frame": end,
+                    "sample_rate": sample_rate, **({"retuned": True} if retuned else {}),
+                }
 
                 take_info = TakeInfo(
-                    instrument=take_label, take_number=take_num, filename=flac_name, has_video=has_video,
-                    has_midi=has_midi, input_label=take.input_label or input_label,
+                    instrument=take_label, take_number=take_num, filename=audio_name, has_video=has_video,
+                    has_midi=has_midi, input_label=take.input_label or input_label, source=source,
                 )
                 if slot.is_inspiration_filter:
                     # Recorded into the shared vault-wide index (vault.py),

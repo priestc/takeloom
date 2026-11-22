@@ -4,8 +4,11 @@ takeloom/vault.py describes it:
     <vault>/
     ├── sessions/<session_name>_<project_name>/   session.flac, session_log.json, session_video.mp4, ...
     ├── backing_tracks/<filename>
-    ├── completed_takes/<filename>
-    └── projects/<project>.json                    setlist backups (`takeloom sync-push`)
+    ├── completed_takes/<filename>                 .mp3 (LAME V2), .video.json, .mid
+    ├── backing_tuning.json, inspiration_takes.json
+    ├── mixes/<song>.json                          the Completed Takes mixer's saved mixes
+    ├── final_mixes/<song>.mp3                     exported song mixes
+    └── projects/<project>.json                    setlist backups
 
 Everything the HTTP API touches goes through resolve() first, which is
 what keeps a client-supplied path from ever escaping the vault root.
@@ -21,10 +24,11 @@ import tempfile
 from pathlib import Path
 from typing import BinaryIO
 
-# The only top-level folders a client may read or write. Anything else in
-# the vault root (.DS_Store, takeloom's own inspiration_takes.json, ...) is
-# out of the API's reach entirely.
-TOP_LEVEL_DIRS = ("sessions", "backing_tracks", "completed_takes", "projects")
+# The only top-level folders a client may read or write, plus the few
+# files takeloom keeps in the vault root itself. Anything else there
+# (.DS_Store, ...) is out of the API's reach entirely.
+TOP_LEVEL_DIRS = ("sessions", "backing_tracks", "completed_takes", "projects", "mixes", "final_mixes")
+ROOT_FILES = ("inspiration_takes.json", "backing_tuning.json")
 
 # In-progress uploads land beside their destination under this prefix and
 # are renamed into place only once their hash checks out — so a dropped
@@ -50,10 +54,14 @@ class Vault:
     def resolve(self, relative: str) -> Path:
         """`relative` (e.g. "sessions/<name>/session.flac") as an absolute
         path inside the vault, or VaultPathError if it's empty, absolute,
-        has a ".." or hidden component, or isn't under TOP_LEVEL_DIRS."""
+        has a ".." or hidden component, or isn't under TOP_LEVEL_DIRS (or
+        one of ROOT_FILES)."""
         parts = [p for p in relative.replace("\\", "/").split("/") if p]
+        if parts and len(parts) == 1 and parts[0] in ROOT_FILES:
+            return self.root / parts[0]
         if not parts or parts[0] not in TOP_LEVEL_DIRS:
-            raise VaultPathError(f"Path must start with one of {', '.join(TOP_LEVEL_DIRS)}: {relative!r}")
+            raise VaultPathError(f"Path must start with one of {', '.join(TOP_LEVEL_DIRS)} "
+                                 f"(or be one of {', '.join(ROOT_FILES)}): {relative!r}")
         if any(p in (".", "..") or p.startswith(".") for p in parts):
             raise VaultPathError(f"Invalid path component in {relative!r}")
         path = self.root.joinpath(*parts)
@@ -105,7 +113,7 @@ class Vault:
         if not directory.is_dir():
             return []
         return [
-            {"name": f.name, "size": f.stat().st_size}
+            {"name": f.name, "size": (st := f.stat()).st_size, "mtime": st.st_mtime}
             for f in sorted(directory.iterdir())
             if f.is_file() and not f.name.startswith(".")
         ]

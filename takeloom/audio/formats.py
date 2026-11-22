@@ -64,6 +64,57 @@ def write_flac(path: Path, data: np.ndarray, sample_rate: int) -> None:
     sf.write(str(path), data, sample_rate, format="FLAC", subtype="PCM_16")
 
 
+# Only a session's raw recording (session.flac, its videos' Instrument Only
+# track, the phones' mic tracks) is kept lossless. Every other audio file
+# takeloom stores — completed takes, imported backing tracks, exported
+# mixes — is LAME's "alt-preset-standard" (VBR -V2, ~190 kbps), what these
+# arguments ask ffmpeg's libmp3lame for. ffmpeg writes the LAME gapless
+# header and honors it on decode, so a take stays sample-aligned with its
+# backing track.
+LOSSY_EXT = ".mp3"
+LAME_ARGS = ["-c:a", "libmp3lame", "-q:a", "2"]
+# Formats a backing track arrives in that get the same treatment (anything
+# already lossy is stored as it came: re-encoding it would only lose more).
+LOSSLESS_EXTS = frozenset({".wav", ".flac", ".aif", ".aiff"})
+
+
+def encode_mp3(src: Path, out_path: Path) -> None:
+    """Encode `src` (any audio ffmpeg reads) to `out_path` with LAME_ARGS,
+    via a temp file beside it renamed into place only once the encode
+    finished. Raises RuntimeError if ffmpeg fails."""
+    tmp = out_path.with_name(f".{out_path.stem}.partial{LOSSY_EXT}")
+    cmd = [FFMPEG, "-y", "-v", "error", "-i", str(src), "-map", "0:a:0", "-vn", *LAME_ARGS, str(tmp)]
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0 or not tmp.exists():
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"ffmpeg couldn't encode {src} to MP3: {result.stderr.decode(errors='replace')[-300:]}")
+    tmp.replace(out_path)
+
+
+def audio_codec(path: Path) -> str:
+    """ffprobe's codec_name for `path`'s first audio stream ("" if unknown)."""
+    result = subprocess.run(
+        [FFPROBE, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name",
+         "-of", "csv=p=0", str(path)], capture_output=True, text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def write_mp3(path: Path, data: np.ndarray, sample_rate: int) -> None:
+    """write_flac's lossy counterpart: `data` encoded with LAME_ARGS."""
+    if data.ndim == 1:
+        data = data[:, None]
+    data = np.ascontiguousarray(data, dtype=np.float32)
+    tmp = path.with_name(f".{path.stem}.partial{LOSSY_EXT}")
+    cmd = [FFMPEG, "-y", "-v", "error", "-f", "f32le", "-ar", str(sample_rate), "-ac", str(data.shape[1]),
+           "-i", "pipe:0", *LAME_ARGS, str(tmp)]
+    result = subprocess.run(cmd, input=data.tobytes(), capture_output=True)
+    if result.returncode != 0 or not tmp.exists():
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"ffmpeg couldn't encode {path.name} to MP3: {result.stderr.decode(errors='replace')[-300:]}")
+    tmp.replace(path)
+
+
 def get_duration(path: Path) -> float:
     """Get duration of an audio (or video) file in seconds."""
     suffix = path.suffix.lower()

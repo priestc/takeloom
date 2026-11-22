@@ -10,6 +10,11 @@ plain RPC over Remote, written by the studio machine like every other
 vault file). Loading a song applies its saved mix automatically. Settings
 are keyed by instrument label, not take filename, so a mix survives a
 take being re-recorded; Solo is a listening aid only and never saved.
+
+"Export mix..." renders what the mixer is playing right now (faders,
+mutes, solo, trim) to an MP3 (backend.export_song_mix), from each take's
+lossless original rather than the .mp3 the mixer plays (take_original.py),
+saved where asked and kept in the vault's final_mixes/ too.
 """
 
 from __future__ import annotations
@@ -17,7 +22,8 @@ from __future__ import annotations
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk
+from pathlib import Path
+from tkinter import filedialog, ttk
 from typing import Callable
 
 from ..backend import BackendError
@@ -51,6 +57,7 @@ class SongMixer(ttk.Frame):
         self._song_takes: list[dict] = []  # the loaded song's Completed Takes rows
         # One per loaded take: {"key", "label", "gain_var", "mute_var", "solo_var", "pct_var"}
         self._strips: list[dict] = []
+        self._strip_sources: list[dict] = []
         self._saved_state: tuple | None = None  # (volumes, muted) last saved/loaded — for "unsaved changes"
         self._base_status = ""  # status shown when there are no unsaved changes
 
@@ -112,6 +119,8 @@ class SongMixer(ttk.Frame):
         self._save_button.pack(side="left")
         self._reset_button = ttk.Button(buttons, text="Reset to 100%", command=self._on_reset)
         self._reset_button.pack(side="left", padx=(6, 0))
+        self._export_button = ttk.Button(buttons, text="Export mix...", command=self._on_export)
+        self._export_button.pack(side="left", padx=(6, 0))
         self._status_var = tk.StringVar(value="")
         ttk.Label(audio_tab, textvariable=self._status_var, foreground="#666666", wraplength=400, justify="left").pack(
             anchor="w", pady=(6, 0)
@@ -249,6 +258,11 @@ class SongMixer(ttk.Frame):
         self._set_buttons_enabled(True)
 
         loaded_takes = [take for take, _path in loaded]
+        # What each of self._strips is, in the same (player) order — for
+        # Export mix.
+        self._strip_sources = [
+            {"filename": take["filename"], "label": take["instrument"]} for take in loaded_takes
+        ] + ([{"backing": True, "take_filename": loaded_takes[0]["filename"]}] if backing_path is not None else [])
         paths = [path for _take, path in loaded] + ([backing_path] if backing_path is not None else [])
         self.player.load_tracks(
             paths, track_name, gains=self._effective_gains(),
@@ -423,6 +437,46 @@ class SongMixer(ttk.Frame):
         self._base_status = f"Mix saved {time.strftime('%-I:%M %p')}"
         self._on_strip_changed()
 
+    def _on_export(self) -> None:
+        if not self.track_name or not self._strips:
+            return
+        from ..utils import sanitize_filename
+        dest = filedialog.asksaveasfilename(
+            parent=self, title="Export mix", defaultextension=".mp3", filetypes=[("MP3", "*.mp3")],
+            initialdir=str(Path.home() / "Downloads"), initialfile=f"{sanitize_filename(self.track_name)}.mp3",
+        )
+        if not dest:
+            return
+        track_name = self.track_name
+        tracks = [{**src, "gain": gain} for src, gain in zip(self._strip_sources, self._effective_gains())]
+        trim = self.trim
+        self._export_button.state(["disabled"])
+        self._status_var.set(f"Exporting '{track_name}' from the original recordings...")
+        backend = self.app_state.backend
+
+        def worker() -> None:
+            try:
+                result, error = backend.export_song_mix(track_name, tracks, trim[0], trim[1], dest), None
+            except BackendError as e:
+                result, error = None, str(e)
+            except Exception as e:  # noqa: BLE001 — shown, not raised
+                result, error = None, f"{type(e).__name__}: {e}"
+            self.after(0, lambda: self._on_exported(result, error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_exported(self, result: dict | None, error: str | None) -> None:
+        if not self.winfo_exists():
+            return
+        self._export_button.state(["!disabled"])
+        if error or result is None:
+            self._status_var.set(f"Could not export: {error}")
+            return
+        message = f"Exported to {result['path']} (a copy is kept in the vault)."
+        if result.get("notes"):
+            message += " Note: " + "; ".join(result["notes"])
+        self._status_var.set(message)
+
     def _set_buttons_enabled(self, enabled: bool) -> None:
-        for button in (self._save_button, self._reset_button):
+        for button in (self._save_button, self._reset_button, self._export_button):
             button.state(["!disabled"] if enabled else ["disabled"])

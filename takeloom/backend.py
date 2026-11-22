@@ -81,9 +81,14 @@ class PreviewSubscription:
         raise NotImplementedError
 
 
-def _scan_song_take_files(stems: list[str], entry: TrackEntry, completed_dir: Path) -> dict[str, list[dict]]:
-    """Every take file of `entry`'s song among `stems` (completed_takes/
-    .flac stems), by label: {label: [{"take_number", "filename",
+# A completed take's audio: LAME V2 .mp3 now (audio/formats.py), lossless
+# .flac for a take from before that.
+TAKE_AUDIO_EXTS = (".mp3", ".flac")
+
+
+def _scan_song_take_files(names: list[str], entry: TrackEntry, completed_dir: Path) -> dict[str, list[dict]]:
+    """Every take file of `entry`'s song among `names` (completed_takes/
+    filenames: any that aren't take audio are ignored), by label: {label: [{"take_number", "filename",
     "has_video", "has_midi"}, ...]} sorted by take_number — matched by
     utils.take_filename's 'track - label - takeN [source:id]' pattern.
     A file tagged as recorded against a *different* backing track (same
@@ -98,15 +103,16 @@ def _scan_song_take_files(stems: list[str], entry: TrackEntry, completed_dir: Pa
     expected_tag = f"{source}:{sanitize_filename(_backing_track_id(source, entry.backing_track))}"
     pattern = re.compile(r"^(?P<label>(?:(?! - ).)+) - take(?P<n>\d+)(?: \[(?P<tag>.*)\])?$")
     found: dict[str, list[dict]] = {}
-    for stem in stems:
-        if not stem.startswith(prefix):
+    for name in names:
+        stem, ext = Path(name).stem, Path(name).suffix.lower()
+        if ext not in TAKE_AUDIO_EXTS or not stem.startswith(prefix):
             continue
         m = pattern.match(stem[len(prefix):])
         if m is None or (m.group("tag") is not None and m.group("tag") != expected_tag):
             continue
         found.setdefault(m.group("label"), []).append({
-            "take_number": int(m.group("n")), "filename": f"{stem}.flac",
-            "has_video": take_has_video(completed_dir / f"{stem}.flac"),
+            "take_number": int(m.group("n")), "filename": name,
+            "has_video": take_has_video(completed_dir / name),
             "has_midi": (completed_dir / f"{stem}.mid").exists(),
         })
     for takes in found.values():
@@ -670,6 +676,24 @@ class Backend(ABC):
         {"track_name", "volumes": {label: gain}, "muted": [label, ...],
         "saved_at"} — or None if none has been saved. See vault.py's
         load_song_mix."""
+        ...
+
+    @abstractmethod
+    def export_song_mix(
+        self, track_name: str, tracks: list[dict], trim_start_seconds: float, trim_end_seconds: float,
+        dest_path: str,
+    ) -> dict:
+        """Render the Completed Takes mixer's current mix of `track_name`
+        to an MP3 (LAME V2) at `dest_path` on this machine, and keep a copy
+        in the vault (final_mixes/<song>.mp3). `tracks` is the mixer's
+        strips in its player's order: {"filename": a take's file, "label":
+        its instrument label, "gain"} for each take, and {"backing": true,
+        "take_filename": any take of the song, "gain"} for the backing
+        track. Mixed exactly as the mixer plays it (the take's compressor,
+        the backing's pitch correction, the trim), except that each take
+        comes from its lossless original (take_original.py), never its
+        .mp3. Returns {"path", "notes": [...]}: a note per take that had
+        no lossless original left and was mixed from its .mp3 instead."""
         ...
 
     @abstractmethod
@@ -1824,6 +1848,9 @@ class _ActiveAutoDetect:
 # size+mtime and the compressor settings, so changing either re-renders on
 # its own. Backend.clear_playback_cache empties it.
 _playback_cache: dict[Path, tuple] = {}
+# One vault sync (vault.sync_vault_files) at a time: a post-session one and
+# a Completed Takes tab one must never prune/upload the same files at once.
+_vault_sync_lock = threading.Lock()
 
 
 def _file_signature(path: Path) -> tuple:
@@ -2880,8 +2907,10 @@ class LocalBackend(Backend):
                 raise BackendError("This session is still recording — wait for it to end first.")
         from .processing.splicer import process_session
         summary = process_session(session_dir=session_dir_path, config=config)
-        from .vault import sync_and_maybe_prune
+        from .vault import sync_and_maybe_prune, sync_vault_files
         sync_and_maybe_prune(config, session_dir_path)
+        with _vault_sync_lock:
+            sync_vault_files(config, prune=not self.is_session_active())
         return summary
 
     def delete_session(self, session_dir: str) -> dict:
@@ -2912,7 +2941,7 @@ class LocalBackend(Backend):
         ]
         take_files = [
             f"{Path(filename).stem}{ext}" for _, filename in takes
-            for ext in (".flac", ".mp4", ".mid", ".video.json")
+            for ext in (".mp3", ".flac", ".mp4", ".mid", ".video.json")
         ]
 
         from .vault import remote_vault
@@ -2992,7 +3021,19 @@ class LocalBackend(Backend):
         old_ref_path = project.completed_takes_dir / f"{old_stem}.video.json"
         ext = Path(take.filename).suffix.lstrip(".") or "flac"
 
-        new_take_number = next_take_number(project.completed_takes_dir, track_name, new_instrument)
+        # Under "Remote only" storage the take's audio may only be on the
+        # vault: fetched back first, so it's renamed here and the next vault
+        # sync uploads it under its new name (the old names are deleted there).
+        from .vault import remote_vault
+        client = remote_vault(self.get_config())
+        remote_names: list[str] = []
+        if client is not None:
+            remote_names = [f["name"] for f in client.list_files("completed_takes") or []]
+            if not old_audio_path.exists() and take.filename in remote_names:
+                if not client.download_file(f"completed_takes/{take.filename}", old_audio_path):
+                    raise BackendError(f"Could not download '{take.filename}' from the vault at {client.url} to rename it.")
+
+        new_take_number = next_take_number(project.completed_takes_dir, track_name, new_instrument, remote_names)
         new_filename = take_filename(track_name, new_instrument, new_take_number, source, backing_track, ext)
         new_stem = Path(new_filename).stem
         new_audio_path = project.completed_takes_dir / new_filename
@@ -3010,10 +3051,16 @@ class LocalBackend(Backend):
         has_midi = take.has_midi and old_midi_path.exists()
         if has_midi:
             shutil.move(str(old_midi_path), str(new_midi_path))
+        if client is not None:
+            old_names = {take.filename, f"{old_stem}.mp4", f"{old_stem}.mid", f"{old_stem}.video.json"}
+            stale = [f"completed_takes/{n}" for n in old_names if n in remote_names]
+            if stale and not client.delete_paths(stale):
+                print(f"takeloom: couldn't remove the old names of '{take.filename}' from the vault at {client.url}")
 
         return TakeInfo(
             instrument=new_instrument, take_number=new_take_number, filename=new_filename,
             volume=take.volume, has_video=has_video, has_midi=has_midi, input_label=take.input_label,
+            source=take.source,
         )
 
     def _update_session_take_snapshot(
@@ -3103,6 +3150,7 @@ class LocalBackend(Backend):
             shared.set_preferred_take(new_instrument, new_take)
             save_inspiration_index(root, index)
             self._update_session_take_snapshot(session_dir, track_index, take.filename, new_take)
+            self._sync_vault_soon()
             return
 
         entry = next((t for t in project.setlist.tracks if t.name == track_name), None)
@@ -3134,6 +3182,7 @@ class LocalBackend(Backend):
                 save_inspiration_index(root, index)
 
         self._update_session_take_snapshot(session_dir, track_index, take.filename, new_take)
+        self._sync_vault_soon()
 
     def analyze_take(self, session_dir: str, track_name: str, instrument_name: str) -> dict:
         config = self.get_config()
@@ -3305,11 +3354,10 @@ class LocalBackend(Backend):
         completed_dir = vault_root / "completed_takes"
         by_filename: dict[str, dict] = {}
 
+        take_files = self._completed_take_files(config)
+
         def add(entry: TrackEntry, label: str, take: TakeInfo) -> None:
-            try:
-                recorded_at = (completed_dir / take.filename).stat().st_mtime
-            except OSError:
-                recorded_at = None
+            recorded_at = take_files.get(take.filename)
             by_filename[take.filename] = {
                 "track_name": entry.name, "instrument": label, "filename": take.filename,
                 "backing_source": entry.source_label(),
@@ -3352,10 +3400,7 @@ class LocalBackend(Backend):
         # Every take file on disk per song+label — one directory listing
         # for the whole vault, then scanned once per distinct backing
         # track (two records can share a song name but not its audio).
-        try:
-            stems = [p.stem for p in completed_dir.iterdir() if p.suffix == ".flac"]
-        except OSError:
-            stems = []
+        names = list(take_files)
         scans: dict[tuple, dict[str, list[dict]]] = {}
         preferred_labels: dict[str, set[str]] = {}
         for row in by_filename.values():
@@ -3364,7 +3409,7 @@ class LocalBackend(Backend):
             entry = entry_of[row["filename"]]
             key = (entry.name, entry.source_label(), entry.backing_track)
             if key not in scans:
-                scans[key] = _scan_song_take_files(stems, entry, completed_dir)
+                scans[key] = _scan_song_take_files(names, entry, completed_dir)
             song_files = scans[key]
             alternates = {t["filename"]: t for t in song_files.get(row["instrument"], [])}
             # The current take is always offered, even if its file isn't on
@@ -3391,9 +3436,9 @@ class LocalBackend(Backend):
 
         new_take: TakeInfo | None = None
         if new_filename is not None:
-            stems = [Path(new_filename).stem] if (completed_dir / new_filename).exists() else []
+            names = [new_filename] if new_filename in self._completed_take_files(config) else []
             match = next(
-                (t for t in _scan_song_take_files(stems, records[0][1], completed_dir).get(instrument, [])
+                (t for t in _scan_song_take_files(names, records[0][1], completed_dir).get(instrument, [])
                  if t["filename"] == new_filename),
                 None,
             )
@@ -3419,6 +3464,47 @@ class LocalBackend(Backend):
         if shared_touched:
             from .vault import save_inspiration_index
             save_inspiration_index(root, inspiration_index)
+        self._sync_vault_soon()
+
+    def _completed_take_files(self, config: StudioConfig) -> dict[str, float | None]:
+        """Every completed take's audio file — here, and (with a remote
+        vault) on the vault, where under "Remote only" storage a take's
+        audio is the only copy — mapped to when it was recorded (its
+        file's mtime; None if unknown)."""
+        files: dict[str, float | None] = {}
+        from .vault import remote_vault
+        client = remote_vault(config)
+        if client is not None:
+            for f in client.list_files("completed_takes") or []:
+                if Path(f["name"]).suffix.lower() in TAKE_AUDIO_EXTS:
+                    files[f["name"]] = f.get("mtime")
+        completed_dir = Path(config.session_vault_path) / "completed_takes"
+        try:
+            for p in completed_dir.iterdir():
+                if p.suffix.lower() in TAKE_AUDIO_EXTS and not p.name.startswith("."):
+                    files[p.name] = p.stat().st_mtime
+        except OSError:
+            pass
+        return files
+
+    def _sync_vault_soon(self) -> None:
+        """Mirror the vault to the remote one (vault.sync_vault_files) on a
+        background thread, after a change made outside a session (a saved
+        mix, a preferred take...). Never while a session is open: that
+        waits for the sync at its end (no network work mid-session)."""
+        if self.is_session_active():
+            return
+        config = self.get_config()
+        from .vault import remote_vault, sync_vault_files
+        if remote_vault(config) is None:
+            return
+
+        def run() -> None:
+            with _vault_sync_lock:
+                sync_vault_files(config, log=lambda msg: print(f"takeloom: {msg}"),
+                                 prune=not self.is_session_active())
+
+        threading.Thread(target=run, daemon=True, name="vault-sync").start()
 
     def _find_track_records(
         self, config: StudioConfig, take_filename: str,
@@ -3465,9 +3551,91 @@ class LocalBackend(Backend):
             raise BackendError("Can't save a mix without a song name.")
         from .vault import save_song_mix
         try:
-            return save_song_mix(Path(self.get_config().session_vault_path), track_name, volumes, muted)
+            mix = save_song_mix(Path(self.get_config().session_vault_path), track_name, volumes, muted)
         except OSError as e:
             raise BackendError(f"Could not save mix for '{track_name}': {e}") from e
+        self._sync_vault_soon()
+        return mix
+
+    def export_song_mix(
+        self, track_name: str, tracks: list[dict], trim_start_seconds: float, trim_end_seconds: float,
+        dest_path: str,
+    ) -> dict:
+        import numpy as np
+
+        from .audio.filters import apply_compressor
+        from .audio.formats import LOSSY_EXT, read_audio, write_mp3
+        from .take_original import NoOriginalError, lossless_take_path
+        from .utils import sanitize_filename
+        from .vault import load_backing_tuning
+        if not track_name:
+            raise BackendError("Can't export a mix without a song name.")
+        config = self.get_config()
+        root = Path(config.session_vault_path)
+        work_dir = Path(tempfile.mkdtemp(prefix="takeloom_export_"))
+        notes: list[str] = []
+        try:
+            mixed: list[tuple[np.ndarray, float]] = []
+            sr = 0
+            for track in tracks:
+                gain = float(track.get("gain", 1.0))
+                if track.get("backing"):
+                    path = Path(self.ensure_backing_track_local(str(track["take_filename"])))
+                    path = _pitched_playback_path(path, load_backing_tuning(root, path.name))
+                    data, sr_read = read_audio(path, sr or None)
+                else:
+                    filename, label = str(track["filename"]), str(track.get("label") or "")
+                    source = None
+                    records, _index = self._find_track_records(config, filename)
+                    for _project, entry in records:
+                        for take in entry.preferred_takes.values():
+                            if take.filename == filename and take.source:
+                                source = take.source
+                    try:
+                        path = lossless_take_path(config, filename, label, source, work_dir)
+                    except NoOriginalError as e:
+                        notes.append(f"{label}: mixed from its MP3 ({e})")
+                        path = Path(self.ensure_take_local(self._project_for_take(config, filename), filename))
+                    data, sr_read = read_audio(path, sr or None)
+                    settings = config.compressor_for_label(label)
+                    if settings.enabled:
+                        data = apply_compressor(data, sr_read, settings)
+                sr = sr or sr_read
+                if gain > 0:
+                    mixed.append((data if data.ndim == 2 else data[:, None], gain))
+            if not mixed or not sr:
+                raise BackendError(f"Nothing to export for '{track_name}': every track is muted.")
+            length = max(len(d) for d, _ in mixed)
+            out = np.zeros((length, 2), dtype=np.float32)
+            for data, gain in mixed:
+                out[:len(data)] += data[:, :2] * gain  # a mono (N,1) track goes to both channels
+            start = min(length, int(round(trim_start_seconds * sr)))
+            end = max(start, length - int(round(trim_end_seconds * sr)))
+            out = np.clip(out[start:end], -1.0, 1.0)
+            final_dir = ensure_dir(root / "final_mixes")
+            final = final_dir / f"{sanitize_filename(track_name) or 'untitled'}{LOSSY_EXT}"
+            try:
+                write_mp3(final, out, sr)
+            except RuntimeError as e:
+                raise BackendError(str(e)) from e
+            if dest_path and Path(dest_path).resolve() != final.resolve():
+                shutil.copyfile(final, dest_path)
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        self._sync_vault_soon()
+        return {"path": dest_path or str(final), "notes": notes}
+
+    def _project_for_take(self, config: StudioConfig, filename: str) -> str:
+        """Any project referencing take `filename` (for ensure_take_local),
+        else the first project there is."""
+        records, _index = self._find_track_records(config, filename)
+        for project, _entry in records:
+            if project is not None:
+                return project.name
+        projects = Project.list_projects(Path(config.projects_dir))
+        if not projects:
+            raise BackendError(f"No project to fetch '{filename}' through.")
+        return projects[0].stem
 
     def edit_backing_track(
         self, take_filename: str, trim_start_seconds: float, trim_end_seconds: float,
@@ -3489,7 +3657,7 @@ class LocalBackend(Backend):
             raise BackendError(f"'{track_name}' has no backing track file to trim.")
         backing_path = backing_dir / backing_track
         if not backing_path.exists():
-            raise BackendError(f"Backing track file not found: {backing_path}")
+            backing_path = Path(self.ensure_backing_track_local(take_filename))
 
         # Always measured fresh from the untouched file — never derived
         # from a previously-stored duration_seconds, which may already
@@ -6597,8 +6765,13 @@ class LocalBackend(Backend):
         # into its project — sync_and_maybe_prune can delete session_dir
         # entirely in "remote" vault mode, which splicing still needs to
         # read from above.
-        from .vault import sync_and_maybe_prune
+        from .vault import sync_and_maybe_prune, sync_vault_files
         uploaded = sync_and_maybe_prune(config, session.session_dir, log=status)
+        # Then the takes it filed, its backing tracks, the metadata and the
+        # setlists — and, under "Remote only", their local media removed,
+        # unless a new session has opened meanwhile (it may need them).
+        with _vault_sync_lock:
+            sync_vault_files(config, log=status, prune=not self.is_session_active())
         from .video import render_jobs
         if not uploaded and render_jobs.pending(session.session_dir):
             # Left for the vault, but it never got the session: this

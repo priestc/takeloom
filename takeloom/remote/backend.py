@@ -242,6 +242,24 @@ class RemoteBackend(Backend):
             "save_song_mix", {"track_name": track_name, "volumes": volumes, "muted": muted},
         )["mix"]
 
+    def export_song_mix(
+        self, track_name: str, tracks: list[dict], trim_start_seconds: float, trim_end_seconds: float,
+        dest_path: str,
+    ) -> dict:
+        # Rendered on the studio end (where the sessions and the vault are),
+        # then streamed back like a take's video; nothing is cached, since
+        # each export is a fresh mix.
+        self._take_file_buffer = bytearray()
+        result = self._client.call("export_song_mix", {
+            "track_name": track_name, "tracks": tracks,
+            "trim_start_seconds": trim_start_seconds, "trim_end_seconds": trim_end_seconds,
+        }, timeout=DOWNLOAD_TIMEOUT) or {}
+        data = bytes(self._take_file_buffer)
+        if not data:
+            raise BackendError(f"No data received for the exported mix of '{track_name}'.")
+        Path(dest_path).write_bytes(data)
+        return {"path": dest_path, "notes": list(result.get("notes") or [])}
+
     def edit_backing_track(
         self, take_filename: str, trim_start_seconds: float, trim_end_seconds: float,
     ) -> dict:

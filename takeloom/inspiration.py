@@ -255,6 +255,11 @@ def build_inspiration_track_entry(track_info: dict) -> TrackEntry:
     title = track_info.get("title", "Unknown")
     year = track_info.get("year", "")
     fmt = track_info.get("format", "flac") or "flac"
+    from .audio.formats import LOSSLESS_EXTS, LOSSY_EXT
+    if f".{fmt.lower()}" in LOSSLESS_EXTS:
+        # Stored lossy, like every non-raw file: download_inspiration_track
+        # encodes it on arrival (audio/formats.py's LAME_ARGS).
+        fmt = LOSSY_EXT.lstrip(".")
     duration = float(track_info.get("duration") or 0)
     year_str = f" ({year})" if year else ""
     name = f"{artist} - {title}{year_str}"
@@ -296,12 +301,16 @@ def download_inspiration_track(
     req = urllib.request.Request(
         url, headers={"Authorization": f"Bearer {config.inspiration_api_key}"},
     )
+    # Downloaded beside it first: a backing track named .mp3 whose server
+    # copy is lossless (see build_inspiration_track_entry) is encoded from
+    # this, and nothing ever sees a partial file under the real name.
+    download = backing_path.with_name(f".{backing_path.name}.download")
     try:
         with urllib.request.urlopen(req) as resp:
             total = resp.headers.get("Content-Length")
             total = int(total) if total else None
             read = 0
-            with open(backing_path, "wb") as f:
+            with open(download, "wb") as f:
                 while True:
                     chunk = resp.read(_DOWNLOAD_CHUNK_SIZE)
                     if not chunk:
@@ -320,6 +329,16 @@ def download_inspiration_track(
                 # raising, so without this check a truncated download would
                 # silently look like a completed one.
                 raise InspirationError(f"Download incomplete: got {read} of {total} bytes from {url}.")
+        from .audio.formats import LOSSY_EXT, audio_codec, encode_mp3
+        if backing_path.suffix.lower() == LOSSY_EXT and audio_codec(download) != "mp3":
+            if on_progress:
+                on_progress(None, f"Compressing {track.name}...")
+            try:
+                encode_mp3(download, backing_path)
+            except RuntimeError as e:
+                raise InspirationError(str(e)) from e
+        else:
+            download.replace(backing_path)
     except urllib.error.URLError as e:
         # A partial file left behind here would look "already downloaded"
         # to the next caller's exists() check, permanently leaving a
@@ -329,3 +348,5 @@ def download_inspiration_track(
     except Exception:
         backing_path.unlink(missing_ok=True)
         raise
+    finally:
+        download.unlink(missing_ok=True)

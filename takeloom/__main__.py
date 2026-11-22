@@ -1115,6 +1115,31 @@ def vault_migrate_take_videos(delete: bool) -> None:
     click.echo(f"Archived {archived} file(s) of takes with no session video to the vault's completed_takes/.")
 
 
+@vault_group.command(name="sync")
+@click.option("--no-prune", is_flag=True, help="Upload only; keep every local copy.")
+def vault_sync(no_prune: bool) -> None:
+    """Mirror everything in the local vault (completed takes, backing
+    tracks, saved mixes, backing tuning, the inspiration-take index,
+    exported mixes) and every project's setlist to the remote vault. Under
+    "Remote only" storage, the local copies of the media it now verifiably
+    has are then removed (they're fetched again when needed). Takeloom
+    already does this after every session; this is for doing it by hand."""
+    from .vault import sync_vault_files
+    config = StudioConfig.load()
+    _paired_vault_client(config)
+    if config.session_vault_mode == "local":
+        click.echo("Error: vault storage is \"Local only\" (Studio Setup), so there's no remote vault to sync to.",
+                   err=True)
+        raise SystemExit(1)
+    counts = sync_vault_files(config, log=click.echo, prune=not no_prune)
+    if counts is None:
+        raise SystemExit(1)
+    if not any(counts.values()):
+        click.echo("Already in sync.")
+    if counts["failed"] or counts["conflicts"]:
+        raise SystemExit(1)
+
+
 @vault_group.command(name="status")
 def vault_status() -> None:
     """Check that the remote vault server is reachable and accepts this

@@ -1,0 +1,123 @@
+"""A completed take's lossless original, for an exported song mix.
+
+A take's own file in completed_takes/ is lossy (LAME V2 .mp3, see
+audio/formats.py's LAME_ARGS); only a session's raw recording is kept
+lossless. So an exported mix (Backend.export_song_mix) never mixes the
+.mp3s: each take is cut back out of its session, losslessly, from the first
+of these that exists:
+
+1. a retuned MIDI take (TakeInfo.source "retuned"): its session audio is at
+   the wrong pitch, so it's rendered again from its .mid, the same way
+   processing made it;
+2. session.flac, at the take's span (TakeInfo.source's frames), when the
+   session is still on this machine;
+3. a camera video's Instrument Only track (FLAC, on session.flac's own
+   timeline), at the take's video ref (take_video.py), when the session is
+   still on this machine;
+4. a legacy lossless take file (completed_takes/<stem>.flac, from before
+   takes were lossy);
+5. the remote vault, which does 2-4 on its end (GET /api/takes/<f>/original:
+   vault_server/takeloom_vault/takes.py's original_for).
+
+The take's source ref comes from its TakeInfo, else from whichever session
+log's "takes" snapshot lists it (the same lookup the vault does).
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+from .config import StudioConfig
+from .take_video import camera_refs, read_take_video_ref
+from .vault import remote_vault, vault_root
+
+
+class NoOriginalError(Exception):
+    pass
+
+
+def _snapshot_entry(root: Path, filename: str) -> dict | None:
+    sessions = root / "sessions"
+    if not sessions.is_dir():
+        return None
+    for log_path in sessions.glob("*/session_log.json"):
+        try:
+            data = json.loads(log_path.read_text())
+        except (OSError, ValueError):
+            continue
+        for entries in (data.get("takes") or {}).values():
+            for entry in entries:
+                if entry.get("filename") == filename:
+                    return {**entry, "session_dir": log_path.parent.name}
+    return None
+
+
+def _cut_session_flac(session_flac: Path, start: int, end: int, out_path: Path) -> None:
+    import soundfile as sf
+    from .processing.splicer import _copy_flac_segment
+    with sf.SoundFile(str(session_flac)) as src:
+        _copy_flac_segment(src, max(0, start), min(end, len(src)), out_path)
+
+
+def _cut_instrument_track(video: Path, ref: dict, out_path: Path) -> bool:
+    from .ffmpeg_bin import FFMPEG
+    result = subprocess.run([
+        FFMPEG, "-y", "-v", "error", "-ss", f"{max(0.0, ref['instrument_start_s']):.6f}", "-i", str(video),
+        "-map", "0:a:1", "-t", f"{ref['duration_s']:.6f}", "-c:a", "flac", str(out_path),
+    ], capture_output=True)
+    return result.returncode == 0 and out_path.exists()
+
+
+def lossless_take_path(
+    config: StudioConfig, filename: str, label: str, source: dict | None, out_dir: Path,
+) -> Path:
+    """A lossless copy of take `filename` (filed under instrument `label`)
+    in `out_dir` — or a legacy lossless take file where it already is. See
+    the module docstring for where it comes from. Raises NoOriginalError if
+    nowhere has one."""
+    root = vault_root(config)
+    completed = root / "completed_takes"
+    stem = Path(filename).stem
+    out_path = out_dir / f"{stem}.original.flac"
+    entry = None
+    if not source:
+        entry = _snapshot_entry(root, filename)
+        source = (entry or {}).get("source")
+    source = source or {}
+    client = remote_vault(config)
+
+    if source.get("retuned"):
+        mid = completed / f"{stem}.mid"
+        if not mid.exists() and client is not None:
+            client.download_file(f"completed_takes/{mid.name}", mid)
+        if mid.exists():
+            from .audio.midi_log import render_midi_file
+            render_midi_file(mid, label, int(source["sample_rate"]),
+                             int(source["end_frame"]) - int(source["start_frame"]), out_path)
+            return out_path
+        raise NoOriginalError(f"'{filename}' was retuned, and its MIDI ({mid.name}) is nowhere to be found.")
+
+    session = source.get("session") or (entry or {}).get("session_dir")
+    if session and "start_frame" in source:
+        session_flac = root / "sessions" / session / "session.flac"
+        if session_flac.exists():
+            _cut_session_flac(session_flac, int(source["start_frame"]), int(source["end_frame"]), out_path)
+            return out_path
+
+    info = read_take_video_ref(completed / filename) or (entry or {}).get("video") or {}
+    for ref in camera_refs(info):
+        video = root / "sessions" / str(info.get("session") or session or "") / str(ref["file"])
+        if video.is_file() and _cut_instrument_track(video, ref, out_path):
+            return out_path
+
+    legacy = completed / f"{stem}.flac"
+    if legacy.exists():
+        return legacy
+
+    if client is not None:
+        if client.download_take_original(filename, out_path):
+            return out_path
+        raise NoOriginalError(f"The vault at {client.url} has no lossless original of '{filename}'.")
+    raise NoOriginalError(f"No lossless original of '{filename}' is on this machine, and no remote vault is paired.")

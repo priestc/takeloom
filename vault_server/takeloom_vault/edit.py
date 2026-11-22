@@ -350,7 +350,7 @@ class EditRenderer:
             else:
                 # The main camera's two audio tracks (Mix, Instrument Only).
                 cmd += ["-map", "0:v:0", "-map", "1:a:0", "-map", "1:a:1?",
-                        "-c:v", "copy", "-c:a:0", "aac", "-b:a:0", "192k", "-c:a:1", "flac",
+                        "-c:v", "copy", "-c:a:0", "aac", "-b:a:0", "192k", "-c:a:1", "libmp3lame", "-q:a:1", "2",
                         "-metadata:s:a:0", "title=Mix", "-metadata:s:a:1", "title=Instrument Only"]
             cmd += ["-disposition:a:0", "default", "-disposition:a:1", "0",
                     "-t", f"{total:.6f}", "-movflags", "+faststart", str(out)]

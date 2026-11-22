@@ -1,4 +1,4 @@
-"""Completed-take videos, cut from their session's video on demand.
+"""Completed-take videos (and lossless audio), cut from their session on demand.
 
 Takeloom no longer stores a separate .mp4 per take: its session's
 session_log.json "takes" snapshot records where each take sits in
@@ -7,6 +7,13 @@ format). The first time a take's video is requested it's cut out here with
 ffmpeg and kept in a cache directory; an hourly sweep deletes clips that
 haven't been requested for a while, or the oldest ones once the cache is
 over its size cap. Any clip can always be made again, so evicting is free.
+
+A take's own file in completed_takes/ is lossy (LAME V2 .mp3); only the raw
+session audio is kept lossless. original_for() cuts a take's lossless
+original back out of its session, for an exported song mix: from
+session.flac by sample (the take's "source" ref, when the session still has
+it), else from a camera video's Instrument Only (FLAC) track, else a legacy
+lossless completed_takes/<stem>.flac. Cached alongside the video clips.
 """
 
 from __future__ import annotations
@@ -65,6 +72,59 @@ def find_take_ref(vault: Vault, take_filename: str) -> dict | None:
     return None
 
 
+def find_take_entry(vault: Vault, take_filename: str) -> dict | None:
+    """`take_filename`'s entry in whichever session's "takes" snapshot
+    lists it (its TakeInfo fields, plus "video" and "source" when it has
+    them), with that session's name added as "session_dir"; or None."""
+    for name in vault.session_names():
+        data = vault.read_session_log(name) or {}
+        for entries in (data.get("takes") or {}).values():
+            for entry in entries:
+                if entry.get("filename") == take_filename:
+                    return {**entry, "session_dir": name}
+    return None
+
+
+def original_cmd(entry: dict, vault: Vault) -> tuple[list[str], str] | None:
+    """The ffmpeg command (minus the output path) that cuts `entry`'s take
+    losslessly out of its session, and a description of where from; or
+    None if the session has nothing lossless left to cut it from. A
+    retuned MIDI take's session audio is at the wrong pitch, so it never
+    comes from here (takeloom re-renders it from the take's MIDI)."""
+    source = entry.get("source") or {}
+    if source.get("retuned"):
+        return None
+    session = str(source.get("session") or entry.get("session_dir") or "")
+    try:
+        directory = vault.session_dir(session) if session else None
+    except Exception:
+        directory = None
+    if directory is not None and "start_frame" in source and (directory / "session.flac").is_file():
+        start, end = int(source["start_frame"]), int(source["end_frame"])
+        return ([
+            "ffmpeg", "-y", "-v", "error", "-i", str(directory / "session.flac"),
+            "-af", f"atrim=start_sample={start}:end_sample={end},asetpts=PTS-STARTPTS",
+            "-c:a", "flac",
+        ], f"{session}/session.flac")
+    info = entry.get("video") or {}
+    video_session = str(info.get("session") or session)
+    for ref in camera_refs(info):
+        video_file = str(ref["file"])
+        if "/" in video_file or "\\" in video_file or video_file.startswith(".") or not video_session:
+            continue
+        try:
+            video = vault.session_dir(video_session) / video_file
+        except Exception:
+            continue
+        if video.is_file():
+            return ([
+                "ffmpeg", "-y", "-v", "error",
+                "-ss", f"{max(0.0, ref['instrument_start_s']):.6f}", "-i", str(video),
+                "-map", "0:a:1", "-t", f"{ref['duration_s']:.6f}", "-c:a", "flac",
+            ], f"{video_session}/{video_file}")
+    return None
+
+
 def clip_cmd(session_video: Path, ref: dict, out_path: Path) -> list[str]:
     """Same command as takeloom/take_video.py's clip_cmd — keep in step."""
     return [
@@ -74,7 +134,7 @@ def clip_cmd(session_video: Path, ref: dict, out_path: Path) -> list[str]:
         "-map", "0:v:0", "-map", "0:a:0", "-map", "1:a:1",
         "-t", f"{ref['duration_s']:.6f}",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-c:a:0", "aac", "-c:a:1", "flac",
+        "-c:a:0", "aac", "-c:a:1", "libmp3lame", "-q:a:1", "2",
         "-metadata:s:a:0", "title=Mix", "-metadata:s:a:1", "title=Instrument Only",
         "-disposition:a:0", "0", "-disposition:a:1", "default",
         "-movflags", "+faststart",
@@ -152,6 +212,42 @@ class TakeVideoCache:
             tmp.replace(out)
             self._log(f"Cut take video {take_filename!r} from {ref['session']} "
                       f"({ref['duration_s']:.0f}s of video in {time.monotonic() - started:.0f}s)")
+            return out
+
+    def original_for(self, take_filename: str) -> Path:
+        """A lossless FLAC of `take_filename` as recorded (see the module
+        docstring), cut on first request and cached. Raises TakeVideoError
+        if its session has nothing lossless left to cut it from."""
+        if "/" in take_filename or "\\" in take_filename or take_filename.startswith("."):
+            raise TakeVideoError(f"Invalid take name {take_filename!r}")
+        legacy = self.vault.root / "completed_takes" / (Path(take_filename).stem + ".flac")
+        entry = find_take_entry(self.vault, take_filename)
+        found = original_cmd(entry, self.vault) if entry is not None else None
+        if found is None:
+            if legacy.is_file():
+                return legacy
+            raise TakeVideoError(f"No lossless original is left for take {take_filename!r}.")
+        cmd, where = found
+        src = Path(cmd[cmd.index("-i") + 1])
+        st = src.stat()
+        key = hashlib.sha256(json.dumps(
+            ["original", take_filename, cmd, st.st_size, st.st_mtime_ns], sort_keys=True,
+        ).encode()).hexdigest()[:24]
+        out = self.dir / f"{key}.flac"
+        with self._lock_for(key):
+            if out.exists():
+                out.touch()
+                return out
+            tmp = self.dir / f"{PARTIAL_PREFIX}{key}.flac"
+            result = subprocess.run([*cmd, str(tmp)], capture_output=True, text=True)
+            if result.returncode != 0 or not tmp.exists():
+                tmp.unlink(missing_ok=True)
+                raise TakeVideoError(
+                    f"ffmpeg couldn't cut the original of {take_filename!r} from {where}: "
+                    f"{(result.stderr or '').strip()[-300:] or 'exit code ' + str(result.returncode)}"
+                )
+            tmp.replace(out)
+            self._log(f"Cut lossless original of {take_filename!r} from {where}")
             return out
 
     def _lock_for(self, key: str) -> threading.Lock:

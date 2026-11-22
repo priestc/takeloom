@@ -60,6 +60,18 @@ vault server and removed locally once every file's checksum is verified), or bot
 but also kept locally). Starting a session downloads whatever that project's setlist needs
 from the remote first, in remote-only mode.
 
+With a remote vault, the vault stores everything: sessions, completed takes, backing tracks,
+saved mixes, backing-track tuning, the inspiration-take index, exported mixes, and every
+project's setlist. Takeloom syncs it all after each session (or run `takeloom vault sync`).
+In remote-only mode the bulky media (take audio, backing tracks, exported mixes) are then
+removed locally and fetched again when needed. The small files stay local too.
+
+Only a session's raw recording is lossless (`session.flac`, the session videos' Instrument
+Only track, the phones' mic tracks). Everything else takeloom stores is MP3, encoded with
+LAME's `alt-preset-standard` (VBR `-V 2`, about 190 kbps): completed takes, lossless backing
+tracks (on import), and exported mixes. An exported mix never uses the MP3 takes. Each take
+is cut back out of its session's lossless recording.
+
 The remote vault is a separate small server, `takeloom-vault` (this repo's
 [`vault_server/`](vault_server/README.md) folder), running on the storage machine. It also
 serves a web page for browsing sessions and watching their videos. Takeloom pairs with it
@@ -117,7 +129,12 @@ The session plays the backing track through your speakers, monitors your instrum
 | `u` | Raise backing track volume by 5% | Any time |
 | `q` | End session | Any time |
 
-**Completing a take:** Press `r` to start, then `e` when the song finishes. The take is saved to the vault's `completed_takes/` and set as the preferred take in the setlist.
+**Completing a take:** Press `r` to start, then `e` when the song finishes. The take is saved to the vault's `completed_takes/` (as an MP3, which records where its lossless original sits in the session) and set as the preferred take in the setlist.
+
+**Exporting a mix:** in the Completed Takes tab's mixer, **Export mix...** renders what you're
+hearing (faders, mutes, solo, trim) to an MP3 wherever you choose, and keeps a copy in the
+vault's `final_mixes/`. Each take comes from its lossless original in the session recording,
+not from its MP3.
 
 **Restarting a take:** Press `b` to loop back to the beginning. The backing track restarts and a new take file begins.
 
@@ -182,11 +199,16 @@ recording it twice:
 <vault>/
 ├── backing_tracks/
 │   ├── song1.mp3
-│   └── a1b2c3d4_song2.flac
+│   └── a1b2c3d4_song2.mp3
 ├── completed_takes/
-│   ├── song1 - guitar - take1 [upload:a1b2c3d4].flac
-│   ├── song1 - bass - take1 [upload:a1b2c3d4].flac
-│   └── song2 - guitar - take2 [youtube:dQw4w9WgXcQ].flac
+│   ├── song1 - guitar - take1 [upload:a1b2c3d4].mp3
+│   ├── song1 - bass - take1 [upload:a1b2c3d4].mp3
+│   └── song2 - guitar - take2 [youtube:dQw4w9WgXcQ].mp3
+├── mixes/
+│   └── song1.json
+├── final_mixes/
+│   └── song1.mp3
+├── backing_tuning.json
 ├── inspiration_takes.json
 └── sessions/
     └── 2025-01-15_14-30-00_guitar_My Album/

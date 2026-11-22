@@ -314,6 +314,130 @@ def sync_and_maybe_prune(config: StudioConfig, session_dir: Path, log: LogFn | N
     return True
 
 
+# --- everything else in the vault ---
+#
+# Sessions go up one at a time, as each is processed (above). Everything
+# else the vault holds is mirrored by sync_vault_files: completed takes,
+# backing tracks, the small metadata files (saved mixes, backing tuning, the
+# shared inspiration-take index), exported mixes, and every project's
+# setlist. Under "Remote only" storage the bulky media (take audio, backing
+# tracks, exported mixes) are then removed here once the vault verifiably
+# has them; they come back on demand (ensure_setlist_files_local, Backend.
+# ensure_take_local). What stays here is tiny and read constantly: the
+# metadata files themselves, take videos' .video.json refs and takes' .mid
+# files (how has_video/has_midi are known), and the setlists.
+
+# Media that's pruned locally under "Remote only" storage.
+_PRUNABLE = {
+    "completed_takes": {".mp3", ".flac", ".mp4", ".m4a", ".wav"},
+    "backing_tracks": None,  # every file
+    "final_mixes": None,
+}
+# Synced, never pruned. A take's audio is never overwritten on the vault
+# (its name is unique: see utils.next_take_number); a mismatch is reported.
+_SYNCED_DIRS = ("completed_takes", "backing_tracks", "mixes", "final_mixes")
+_ROOT_FILES = (_INDEX_FILENAME, "backing_tuning.json")
+
+
+# (vault URL, vault path) -> (size, mtime_ns) of the copy this process last
+# uploaded, for the files sync_vault_files can't list on the vault (the
+# root's own files) or that change in place (setlists): unchanged since,
+# nothing to send.
+_uploaded: dict[tuple[str, str], tuple[int, int]] = {}
+
+
+def _prunable(folder: str, path: Path) -> bool:
+    if folder not in _PRUNABLE:
+        return False
+    exts = _PRUNABLE[folder]
+    return exts is None or path.suffix.lower() in exts
+
+
+def sync_vault_files(config: StudioConfig, log: LogFn | None = None, prune: bool = True) -> dict | None:
+    """Best-effort: upload everything in the local vault (and every project
+    setlist) that the remote vault doesn't have yet, or has an older copy
+    of, then — under "Remote only" storage and with `prune` — delete the
+    local copies of the media it now verifiably has (see above). Callers
+    pass prune=False while a session is open, so nothing it may load gets
+    removed under it. Returns counts, or None if there's no remote vault
+    (mode "local", or not paired). Never raises."""
+    from .vault_client import VaultError
+    log = log or (lambda msg: None)
+    client = remote_vault(config)
+    if client is None:
+        return None
+    root = vault_root(config)
+    counts = {"uploaded": 0, "pruned": 0, "failed": 0, "conflicts": 0}
+
+    def upload(path: Path, relative: str) -> bool:
+        st = path.stat()
+        try:
+            client.upload_file(path, relative)
+            counts["uploaded"] += 1
+            _uploaded[(client.url, relative)] = (st.st_size, st.st_mtime_ns)
+            return True
+        except VaultError as e:
+            counts["failed"] += 1
+            log(f"Vault sync: couldn't upload {relative}: {e}")
+            return False
+
+    def upload_if_changed(path: Path, relative: str) -> None:
+        st = path.stat()
+        if _uploaded.get((client.url, relative)) != (st.st_size, st.st_mtime_ns):
+            upload(path, relative)
+
+    for name in _ROOT_FILES:
+        if (root / name).is_file():
+            upload_if_changed(root / name, name)
+    projects = Path(config.projects_dir)
+    if projects.is_dir():
+        for path in sorted(projects.glob("*.json")):
+            if not path.name.startswith("."):
+                upload_if_changed(path, f"projects/{path.name}")
+
+    prune = prune and config.session_vault_mode == "remote"
+    for folder in _SYNCED_DIRS:
+        local_dir = root / folder
+        if not local_dir.is_dir():
+            continue
+        local = sorted(f for f in local_dir.iterdir() if f.is_file() and not f.name.startswith("."))
+        if not local:
+            continue
+        listing = client.list_files(folder)
+        if listing is None:
+            counts["failed"] += 1
+            log(f"Vault sync: couldn't list {folder}/ on {client.url}; skipped it.")
+            continue
+        remote = {f["name"]: f for f in listing}
+        for path in local:
+            relative = f"{folder}/{path.name}"
+            st = path.stat()
+            there = remote.get(path.name)
+            if there is None:
+                have = upload(path, relative)
+            elif there["size"] == st.st_size and not (
+                # Same size isn't proof for a small file that's edited in
+                # place (a saved mix): newer here means upload it again.
+                not _prunable(folder, path) and st.st_mtime > float(there.get("mtime") or 0)
+            ):
+                have = True
+            elif _prunable(folder, path):
+                counts["conflicts"] += 1
+                log(f"Vault sync: {relative} differs from the vault's copy ({st.st_size:,} bytes here, "
+                    f"{there['size']:,} there); left both alone.")
+                have = False
+            else:
+                have = upload(path, relative)
+            if have and prune and _prunable(folder, path):
+                path.unlink(missing_ok=True)
+                counts["pruned"] += 1
+    if counts["uploaded"] or counts["pruned"] or counts["failed"] or counts["conflicts"]:
+        log(f"Vault sync with {client.url}: {counts['uploaded']} uploaded, {counts['pruned']} removed locally"
+            + (f", {counts['failed']} failed" if counts["failed"] else "")
+            + (f", {counts['conflicts']} conflicting" if counts["conflicts"] else "") + ".")
+    return counts
+
+
 def _files_used_by_track(project: Project, track: TrackEntry, config: StudioConfig) -> set[tuple[Path, str]]:
     """(local_path, vault-relative-path-string) pairs a track needs on
     local disk to be playable/recordable — its own backing track and

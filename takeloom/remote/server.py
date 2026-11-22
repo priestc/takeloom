@@ -26,8 +26,10 @@ import hmac
 import ipaddress
 import json
 import secrets
+import shutil
 import socket
 import socketserver
+import tempfile
 import threading
 from pathlib import Path
 from typing import Callable
@@ -380,6 +382,22 @@ class _ClientHandler(socketserver.StreamRequestHandler):
                 path = self._owner.backend.get_backing_playback_path(args["take_filename"])
                 self.send_file("take_file", Path(path), extra={"filename": Path(path).name})
                 result = {"filename": Path(path).name}  # real name/extension — mp3/m4a/... decode by suffix
+            elif op == "export_song_mix":
+                # Rendered here (LocalBackend.export_song_mix, which also
+                # keeps it in the vault), then streamed back the same way as
+                # a take's video, for RemoteBackend to save where asked.
+                work_dir = Path(tempfile.mkdtemp(prefix="takeloom_export_send_"))
+                try:
+                    out = work_dir / "mix.mp3"
+                    exported = self._owner.backend.export_song_mix(
+                        str(args["track_name"]), list(args.get("tracks") or []),
+                        float(args.get("trim_start_seconds") or 0.0), float(args.get("trim_end_seconds") or 0.0),
+                        str(out),
+                    )
+                    self.send_file("take_file", out, extra={"filename": out.name})
+                finally:
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                result = {"notes": exported["notes"]}
             else:
                 result = dispatch(self._owner.backend, op, args)
             self._write({"kind": "response", "id": req_id, "ok": True, "result": result})

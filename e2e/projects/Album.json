@@ -1,0 +1,35 @@
+{
+  "tracks": [
+    {
+      "name": "Song",
+      "backing_track": "a0332c9a_song.mp3",
+      "duration_seconds": 6.0,
+      "volume": 100,
+      "takes_volume": 100,
+      "inspiration_track_id": 0,
+      "is_inspiration_filter": false,
+      "song_set": [],
+      "depth": 1,
+      "preferred_takes": {
+        "electric-bass": {
+          "instrument": "electric-bass",
+          "take_number": 1,
+          "filename": "Song - electric-bass - take1 [upload:a0332c9a].mp3",
+          "volume": 1.0,
+          "has_video": false,
+          "has_midi": false,
+          "input_label": "in1",
+          "source": {
+            "session": "2026-11-22_10-00-00_electric-bass_Album",
+            "start_frame": 48000,
+            "end_frame": 336000,
+            "sample_rate": 48000
+          }
+        }
+      },
+      "source": "upload",
+      "trim_start_seconds": 0.0,
+      "trim_end_seconds": 0.0
+    }
+  ]
+}

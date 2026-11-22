@@ -17,6 +17,8 @@ API — every route except /api/pair* needs `Authorization: Bearer <token>`:
                                            on first request and cached (see takes.py);
                                            ?camera=<label>: from that camera (none: the
                                            camera on the program feed when it started)
+    GET    /api/takes/<filename>/original -> a completed take's lossless FLAC, cut from its
+                                           session (takes.py's original_for), for an exported mix
     PUT    /api/files/<vault path>      <- raw bytes, X-Content-SHA256 header required
     POST   /api/delete                  {"paths": [...]} -> {}
     PUT    /api/youtube                 {"client_id", "client_secret", "refresh_token",
@@ -322,6 +324,12 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json({"files": vault.list_dir(m.group(1))})
         if (m := re.fullmatch(r"/takes/([^/]+)/video", path)) and method in ("GET", "HEAD"):
             return self._send_take_video(m.group(1))
+        if (m := re.fullmatch(r"/takes/([^/]+)/original", path)) and method in ("GET", "HEAD"):
+            try:
+                original = self.server.take_videos.original_for(m.group(1))
+            except TakeVideoError as e:
+                raise _HTTPError(HTTPStatus.NOT_FOUND, str(e)) from e
+            return self._send_file(original)
         if path.startswith("/files/"):
             relative = path[len("/files/"):]
             if method in ("GET", "HEAD"):
