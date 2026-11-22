@@ -2713,7 +2713,7 @@ class LocalBackend(Backend):
                     data = json.loads(log_path.read_text())
                 except (json.JSONDecodeError, OSError):
                     continue
-                results.append(self._session_summary(session_dir.name, data))
+                results.append({**self._session_summary(session_dir.name, data), "local": True})
                 seen.add(session_dir.name)
 
         from .vault import remote_vault
@@ -2722,7 +2722,7 @@ class LocalBackend(Backend):
             for name, data in client.list_session_logs().items():
                 if name in seen:
                     continue
-                results.append(self._session_summary(name, data))
+                results.append({**self._session_summary(name, data), "local": False})
 
         results.sort(key=lambda s: s["date"], reverse=True)
         return results

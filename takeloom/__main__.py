@@ -591,7 +591,11 @@ def server_command(disable_color: bool) -> None:
     except BackendError as e:
         log(f"Could not check for a pending session: {e}", err=True)
     else:
-        latest = sessions[0] if sessions else None
+        # Only a session still on this machine can be left unprocessed by
+        # a crash here — one that's only in the vault has nothing local to
+        # process (and was processed by whoever uploaded it).
+        local = [s for s in sessions if s.get("local")]
+        latest = local[0] if local else None
         if latest is not None and not latest.get("processed", True):
             try:
                 backend.start_leftover_session_processing(latest["session_dir"])

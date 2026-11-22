@@ -244,7 +244,9 @@ def _process_latest_session_if_pending(root: tk.Misc, app_state: AppState, on_do
             print(f"takeloom: could not check for a pending session: {e}")
             root.after(0, finish)
             return
-        latest = sessions[0] if sessions else None
+        # Only one still on this machine (see takeloom server's same check).
+        local = [s for s in sessions if s.get("local")]
+        latest = local[0] if local else None
         if latest is None or latest.get("processed", True):
             root.after(0, finish)
             return

@@ -599,12 +599,14 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
 
     project.save_setlist()
 
-    if session_takes:
-        # Snapshot written back into session_log.json itself — see
-        # session_takes' own docstring above for why get_session_detail
-        # needs this rather than reading current preferred_takes state.
-        data["takes"] = {str(k): v for k, v in session_takes.items()}
-        atomic_write_text(log_path, json.dumps(data, indent=2))
+    # Snapshot written back into session_log.json itself — see
+    # session_takes' own docstring above for why get_session_detail needs
+    # this rather than reading current preferred_takes state. Written even
+    # when empty: its presence is what marks a session as processed, and a
+    # session that produced no takes used to stay "Pending processing"
+    # forever (and get retried at every startup).
+    data["takes"] = {str(k): v for k, v in session_takes.items()}
+    atomic_write_text(log_path, json.dumps(data, indent=2))
 
     # Only now that every take has been spliced out of session.flac above —
     # and every camera has its own copy of the audio muxed in.
