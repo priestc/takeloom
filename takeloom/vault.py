@@ -287,31 +287,101 @@ def vault_encodes_videos(config: StudioConfig, log: LogFn | None = None) -> bool
     return True
 
 
-def sync_and_maybe_prune(config: StudioConfig, session_dir: Path, log: LogFn | None = None) -> bool:
+def _format_bytes(n: float) -> str:
+    for unit in ("bytes", "KB", "MB", "GB"):
+        if n < 1000 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "bytes" else f"{n:.1f} {unit}"
+        n /= 1000
+    return f"{n:.1f} GB"
+
+
+def _format_seconds(seconds: float) -> str:
+    seconds = int(round(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {seconds:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
+
+
+def upload_summary(name: str, url: str, stats: dict) -> str:
+    """One line for the server log: what a session upload sent, how long it
+    took and how fast that was."""
+    seconds = max(stats["seconds"], 0.001)
+    line = (f"Uploaded session '{name}' to the vault at {url}: {stats['files']} file(s), "
+            f"{_format_bytes(stats['bytes'])} in {_format_seconds(stats['seconds'])} "
+            f"({_format_bytes(stats['bytes'] / seconds)}/s)")
+    if stats["skipped"]:
+        line += f"; {stats['skipped']} already there from an earlier attempt"
+    return line + "."
+
+
+def sync_and_maybe_prune(
+    config: StudioConfig, session_dir: Path, log: LogFn | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> bool:
     """Best-effort: upload `session_dir` (already inside the vault) to the
     remote vault server if session_vault_mode is "remote" or "both", and
     — only for "remote" mode, and only once every file's upload was
     checksum-verified by the server — delete the local copy, so the
     remote ends up as the sole copy. Does nothing for "local" mode, or if
     no vault server is configured/paired (there's nowhere to push to).
-    `log`, if given, reports progress — an emitted event from a live
-    session's background processing thread, or plain stdout from the
-    migration CLI command; either way this function never raises,
-    matching this codebase's other best-effort sync/hardware paths."""
+    `log`, if given, reports progress and, once it's done, a summary
+    (upload_summary). A failed upload keeps the session here, and
+    Backend's upload retry tries it again later (`should_stop` lets that
+    give way to a session opening). Never raises, matching this
+    codebase's other best-effort sync/hardware paths."""
     log = log or (lambda msg: None)
     client = remote_vault(config, log)
     if client is None:
         return False
     name = session_dir.name
     log(f"Uploading session '{name}' to the vault at {client.url}...")
-    if not client.upload_session(session_dir, name, log=log):
-        log(f"Vault upload failed for '{name}' — kept locally.")
+    try:
+        stats = client.upload_session(session_dir, name, log=log, should_stop=should_stop)
+    except Exception as e:  # noqa: BLE001 — e.g. the folder vanishing mid-upload
+        log(f"Vault upload of '{name}' failed: {type(e).__name__}: {e}")
+        stats = None
+    if stats is None:
+        if should_stop is not None and should_stop():
+            log(f"Kept '{name}' locally; its upload carries on once the session is over.")
+        else:
+            log(f"Vault upload failed for '{name}' — kept locally; it'll be retried automatically.")
         return False
-    log(f"Uploaded '{name}' to the vault.")
+    log(upload_summary(name, client.url, stats))
     if config.session_vault_mode == "remote":
         shutil.rmtree(session_dir, ignore_errors=True)
         log(f"Removed local copy of '{name}' (remote-only vault mode).")
     return True
+
+
+def sessions_awaiting_upload(config: StudioConfig) -> list[Path]:
+    """Processed sessions still on this machine that the remote vault
+    doesn't have yet: under "Remote only", every one (a successful upload
+    removes it here, so it being here means an earlier attempt failed —
+    re-running it re-sends only what's missing); under "Both", the ones
+    the vault doesn't list. Unprocessed ones (no "takes" in their log) are
+    left alone: they're processed, and uploaded, first. Oldest first."""
+    if config.session_vault_mode not in ("remote", "both"):
+        return []
+    client = remote_vault(config)
+    sessions = vault_root(config) / "sessions"
+    if client is None or not sessions.is_dir():
+        return []
+    candidates = []
+    for d in sorted(sessions.iterdir()):
+        try:
+            data = json.loads((d / "session_log.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if "takes" in data:
+            candidates.append(d)
+    if not candidates or config.session_vault_mode == "remote":
+        return candidates
+    remote = set(client.list_session_logs())
+    return [d for d in candidates if d.name not in remote]
 
 
 # --- everything else in the vault ---

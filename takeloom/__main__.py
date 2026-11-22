@@ -505,6 +505,31 @@ def server_command(disable_color: bool) -> None:
     backend = LocalBackend()
     listen_port = REMOTE_SERVER_PORT
 
+    # Deliberately no sleep_guard.track_backend(backend) here: a headless
+    # server machine should be free to let its own screensaver/sleep kick
+    # in regardless of recording state — only a UI actually being watched
+    # (local or a Remote client) has a reason to hold it off. See
+    # AppState.recording_active, which does that for the UI side.
+
+    def on_streaming_event(event: str, data: dict) -> None:
+        # The only backend event this headless console prints on its own
+        # (everything else is either driven by StreamDeck key presses,
+        # which RecordingDeckDriver already narrates via `log`, or is
+        # display-only state a connected Remote client would show). A
+        # streaming session has no on-screen status anywhere in this
+        # context otherwise, so without this, a stream starting, YouTube
+        # accepting (or rejecting) the title API calls, and the stream
+        # ending would all happen invisibly here.
+        if event == "streaming_status" and "status" in data:
+            log(data["status"])
+        # Vault work outside a session (the upload retry below; processing
+        # a leftover session at startup), which has no recording_status
+        # to ride on.
+        if event == "vault_status" and "status" in data:
+            log(data["status"])
+
+    backend.on_event(on_streaming_event)
+
     # Same startup check as ui/app.py's _process_latest_session_if_pending
     # (see its docstring): if the vault's own most recent session hasn't
     # been through process_session yet — the ordinary case, or because
@@ -530,25 +555,11 @@ def server_command(disable_color: bool) -> None:
             except BackendError as e:
                 log(f"Could not process last session '{latest['session_dir']}': {e}", err=True)
 
-    # Deliberately no sleep_guard.track_backend(backend) here: a headless
-    # server machine should be free to let its own screensaver/sleep kick
-    # in regardless of recording state — only a UI actually being watched
-    # (local or a Remote client) has a reason to hold it off. See
-    # AppState.recording_active, which does that for the UI side.
+    # A session whose upload to the remote vault failed (the vault down, the
+    # network dropping...) stays here: retried now and every 10 minutes,
+    # whenever no session is open (backend.retry_session_uploads).
+    backend.start_session_upload_retries()
 
-    def on_streaming_event(event: str, data: dict) -> None:
-        # The only backend event this headless console prints on its own
-        # (everything else is either driven by StreamDeck key presses,
-        # which RecordingDeckDriver already narrates via `log`, or is
-        # display-only state a connected Remote client would show). A
-        # streaming session has no on-screen status anywhere in this
-        # context otherwise, so without this, a stream starting, YouTube
-        # accepting (or rejecting) the title API calls, and the stream
-        # ending would all happen invisibly here.
-        if event == "streaming_status" and "status" in data:
-            log(data["status"])
-
-    backend.on_event(on_streaming_event)
 
     def request_authorization(ip: str, client_name: str) -> bool:
         log(f"\nPairing request from '{client_name}' ({ip})")

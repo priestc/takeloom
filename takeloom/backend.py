@@ -1851,6 +1851,9 @@ _playback_cache: dict[Path, tuple] = {}
 # One vault sync (vault.sync_vault_files) at a time: a post-session one and
 # a Completed Takes tab one must never prune/upload the same files at once.
 _vault_sync_lock = threading.Lock()
+# One session upload at a time: the background retry (retry_session_uploads)
+# and a just-processed session's own upload never send the same files at once.
+_session_upload_lock = threading.Lock()
 
 
 def _file_signature(path: Path) -> tuple:
@@ -2908,7 +2911,9 @@ class LocalBackend(Backend):
         from .processing.splicer import process_session
         summary = process_session(session_dir=session_dir_path, config=config)
         from .vault import sync_and_maybe_prune, sync_vault_files
-        sync_and_maybe_prune(config, session_dir_path)
+        with _session_upload_lock:
+            sync_and_maybe_prune(config, session_dir_path,
+                                 log=lambda msg: self._emit("vault_status", {"status": msg}))
         with _vault_sync_lock:
             sync_vault_files(config, prune=not self.is_session_active())
         return summary
@@ -6766,7 +6771,8 @@ class LocalBackend(Backend):
         # entirely in "remote" vault mode, which splicing still needs to
         # read from above.
         from .vault import sync_and_maybe_prune, sync_vault_files
-        uploaded = sync_and_maybe_prune(config, session.session_dir, log=status)
+        with _session_upload_lock:
+            uploaded = sync_and_maybe_prune(config, session.session_dir, log=status)
         # Then the takes it filed, its backing tracks, the metadata and the
         # setlists — and, under "Remote only", their local media removed,
         # unless a new session has opened meanwhile (it may need them).
@@ -6784,6 +6790,56 @@ class LocalBackend(Backend):
 
     def is_session_active(self) -> bool:
         return self._active_session is not None
+
+    # --- retrying failed session uploads ---
+
+    def _busy_with_a_session(self) -> bool:
+        thread = self._processing_thread
+        return self._active_session is not None or (thread is not None and thread.is_alive())
+
+    def retry_session_uploads(self) -> int:
+        """Upload every processed session still waiting here for the remote
+        vault (vault.sessions_awaiting_upload) — one whose upload failed
+        (the vault was down, the network dropped...). Only while no session
+        is open or being processed, and giving way (mid-file, if need be)
+        the moment one opens: no network work mid-session. Reported through
+        the "vault_status" event (the server log), never "recording_status",
+        whose phase changes mean something to the recording UI. Returns how
+        many uploads succeeded."""
+        if self._busy_with_a_session():
+            return 0
+        config = self.get_config()
+        from .vault import sessions_awaiting_upload, sync_and_maybe_prune, sync_vault_files
+        log = lambda msg: self._emit("vault_status", {"status": msg})  # noqa: E731
+        done = 0
+        with _session_upload_lock:
+            waiting = sessions_awaiting_upload(config)
+            if waiting:
+                log(f"Retrying the vault upload of {len(waiting)} session(s) left on this machine...")
+            for session_dir in waiting:
+                if self._busy_with_a_session():
+                    log("Upload retry paused: a session opened. It'll carry on once it's over.")
+                    break
+                if sync_and_maybe_prune(config, session_dir, log=log, should_stop=self._busy_with_a_session):
+                    done += 1
+            if done:
+                with _vault_sync_lock:
+                    sync_vault_files(config, log=log, prune=not self._busy_with_a_session())
+        return done
+
+    def start_session_upload_retries(self, interval_seconds: float = 600.0) -> None:
+        """Run retry_session_uploads now and then every `interval_seconds`
+        on a background thread, for as long as this process runs (takeloom
+        server)."""
+        def loop() -> None:
+            while True:
+                try:
+                    self.retry_session_uploads()
+                except Exception as e:  # noqa: BLE001 — the loop must never die
+                    self._emit("vault_status", {"status": f"Session upload retry failed: {type(e).__name__}: {e}"})
+                time.sleep(interval_seconds)
+
+        threading.Thread(target=loop, daemon=True, name="session-upload-retry").start()
 
     def _save_session_log(self, session: "_ActiveSession") -> Path | None:
         """Write session_log.json fresh from `session`'s current state —

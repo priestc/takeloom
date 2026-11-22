@@ -19,6 +19,7 @@ import json
 import os
 import socket
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -79,6 +80,22 @@ def _describe(exc: Exception, url: str) -> str:
     if isinstance(exc, urllib.error.URLError):
         return f"Could not reach {url}: {exc.reason}{terse_source_note(exc)}"
     return f"{url}: {type(exc).__name__}: {exc}"
+
+
+class _Stopped(OSError):
+    pass
+
+
+class _StoppableReader:
+    """A file body for urllib that raises once `should_stop()` turns true."""
+
+    def __init__(self, f, should_stop: Callable[[], bool]) -> None:
+        self._f, self._should_stop = f, should_stop
+
+    def read(self, n: int = -1) -> bytes:
+        if self._should_stop():
+            raise _Stopped("stopped: a session opened")
+        return self._f.read(n)
 
 
 class VaultClient:
@@ -160,14 +177,22 @@ class VaultClient:
         except VaultError:
             return False
 
-    def upload_session(self, local_dir: Path, session_dir_name: str, log: LogFn | None = None) -> bool:
+    def upload_session(
+        self, local_dir: Path, session_dir_name: str, log: LogFn | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> dict | None:
         """Upload every file in `local_dir` to sessions/<session_dir_name>/
         — each one checksum-verified by the server before it's renamed
         into place — with session_log.json deliberately last: the server
         only lists a session once that file exists, so a session cut off
-        partway through never shows up as if it were complete. Re-running
-        after a failure simply re-sends everything. Returns True only if
-        every file made it."""
+        partway through never shows up as if it were complete. A file the
+        vault already has at the same size (from an earlier, interrupted
+        attempt) isn't sent again, so a retry picks up where that one
+        stopped. `should_stop`, checked as it goes (even mid-file), aborts
+        it — a retry in the background gives way to a session opening.
+
+        Returns {"files", "skipped", "bytes", "seconds"} (what was actually
+        sent, and how long it took) once every file is there, else None."""
         log = log or (lambda msg: None)
         # A cheap auth/reachability check first: the server can't report
         # e.g. a revoked token cleanly once a multi-GB body is in flight.
@@ -175,23 +200,43 @@ class VaultClient:
             self.ping()
         except VaultError as e:
             log(f"Vault upload not started: {e}")
-            return False
+            return None
         files = sorted(
             (f for f in local_dir.iterdir() if f.is_file() and not f.name.startswith(".")),
             key=lambda f: (f.name == "session_log.json", f.name),
         )
+        there = {f["name"]: f["size"] for f in self.list_files(f"sessions/{session_dir_name}") or []}
+        stats = {"files": 0, "skipped": 0, "bytes": 0, "seconds": 0.0}
+        started = time.monotonic()
         for f in files:
+            if should_stop is not None and should_stop():
+                log(f"Vault upload of '{session_dir_name}' paused: a session opened.")
+                return None
+            size = f.stat().st_size
+            if f.name != "session_log.json" and there.get(f.name) == size:
+                stats["skipped"] += 1
+                continue
             try:
-                self.upload_file(f, f"sessions/{session_dir_name}/{f.name}")
+                self.upload_file(f, f"sessions/{session_dir_name}/{f.name}", should_stop=should_stop)
             except VaultError as e:
-                log(f"Vault upload of {f.name} failed: {e}")
-                return False
-        return True
+                if should_stop is not None and should_stop():
+                    log(f"Vault upload of '{session_dir_name}' paused partway through {f.name}: a session opened.")
+                else:
+                    log(f"Vault upload of {f.name} failed: {e}")
+                return None
+            stats["files"] += 1
+            stats["bytes"] += size
+        stats["seconds"] = time.monotonic() - started
+        return stats
 
     # --- arbitrary vault files ---
 
-    def upload_file(self, local_path: Path, vault_relative: str) -> None:
-        """Raises VaultError on failure."""
+    def upload_file(
+        self, local_path: Path, vault_relative: str, should_stop: Callable[[], bool] | None = None,
+    ) -> None:
+        """Raises VaultError on failure — including `should_stop` turning
+        true mid-upload, which cuts the body off (the server then discards
+        the partial file: see its receive_file)."""
         size = local_path.stat().st_size
         headers = {
             "Content-Type": "application/octet-stream",
@@ -200,7 +245,8 @@ class VaultClient:
         }
         path = f"/api/files/{self._q(vault_relative)}"
         try:
-            with open(local_path, "rb") as body:
+            with open(local_path, "rb") as f:
+                body = _StoppableReader(f, should_stop) if should_stop is not None else f
                 req = urllib.request.Request(self.url + path, data=body, method="PUT", headers=headers)
                 if self.token:
                     req.add_header("Authorization", f"Bearer {self.token}")
