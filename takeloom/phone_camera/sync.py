@@ -465,7 +465,11 @@ def realign_late_upload(
     if not _normalize_video(uploaded, normalized, scale):
         raise RuntimeError(f"couldn't rescale {uploaded.name}'s video timestamps")
     try:
-        cmd = [FFMPEG, "-y", "-v", "error"]
+        # Low priority: this is background repair work, and a full-core
+        # re-encode starves everything else on the studio machine (the
+        # phones' live links kept dropping while one ran).
+        import shutil
+        cmd = (["nice", "-n", "15"] if shutil.which("nice") else []) + [FFMPEG, "-y", "-v", "error"]
         if video_start >= 0:
             # A stream copy: the video just starts a little into the file.
             cmd += ["-itsoffset", f"{video_start:.6f}", "-i", str(normalized), "-i", str(camera_video),

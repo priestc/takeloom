@@ -91,6 +91,7 @@ class PhoneCameraInfo:
     connected_at: float = field(default_factory=time.monotonic)
     video_frames: int = 0
     video_bytes: int = 0
+    last_frame_at: float = 0.0  # time.monotonic() of the last frame of any kind
     live_reported: bool = False
 
 
@@ -352,6 +353,7 @@ class PhoneCameraHub:
             self._cameras[conn.info.device_id] = conn
             self._cond.notify_all()
         if old is not None and old is not conn:
+            old.replaced = True
             old.close()
         self._on_change()
 
@@ -428,6 +430,7 @@ class _CameraConnection:
         self.sock = sock
         self.info = info
         self.closed = False
+        self.replaced = False  # closed because the same phone connected again
         self._write_lock = threading.Lock()
 
     def send_json(self, msg: dict) -> bool:
@@ -550,9 +553,22 @@ class _Handler(socketserver.BaseRequestHandler):
         status = version_status(info.app_version)
         hub._log(f"Takeloom Camera '{info.client_name}' ({ip}) connected, app {info.app_version or 'version unknown'}"
                  + (f" — outdated, {status['latest']} is available" if status["outdated"] else ""))
+        end_reason = "the phone closed it"
+        read_failed = False
         try:
             while not conn.closed:
-                frame_type, payload = read_frame(sock)
+                try:
+                    frame_type, payload = read_frame(sock)
+                except (OSError, ConnectionError) as e:
+                    read_failed = True
+                    if str(e) != "connection closed":  # protocol.py's clean EOF: the phone hung up
+                        end_reason = f"network error: {type(e).__name__}: {e}"
+                    raise
+                except ProtocolError as e:
+                    read_failed = True
+                    end_reason = f"bad data from the phone: {e}"
+                    raise
+                info.last_frame_at = time.monotonic()
                 if frame_type == FRAME_VIDEO:
                     pts_ns, keyframe, data = decode_video(payload)
                     info.video_frames += 1
@@ -566,10 +582,23 @@ class _Handler(socketserver.BaseRequestHandler):
                     hub._on_preview(device_id, payload)
                 elif frame_type == FRAME_JSON:
                     self._on_camera_message(conn, decode_json(payload))
+        except BaseException as e:
+            if not read_failed:
+                end_reason = f"server error: {type(e).__name__}: {e}"
+            raise
         finally:
             conn.closed = True
             hub._unregister_camera(conn)
-            hub._log(f"Takeloom Camera '{info.client_name}' ({ip}) disconnected")
+            # Why, so a phone that keeps reconnecting can be told apart: the
+            # phone giving up on a working link (video still arriving right
+            # up to its replacement) vs. the link really dying (video
+            # stopped some seconds before).
+            now = time.monotonic()
+            if conn.replaced:
+                end_reason = "replaced: the phone opened a new connection"
+            quiet = f", last data {now - info.last_frame_at:.1f} s before" if info.last_frame_at else ", no data at all"
+            hub._log(f"Takeloom Camera '{info.client_name}' ({ip}) disconnected — {end_reason} "
+                     f"(after {now - info.connected_at:.1f} s, {info.video_frames} video frames{quiet})")
 
     def _report_live_feed(self, info: PhoneCameraInfo) -> None:
         """Once per connection, a few seconds in: what live video actually
