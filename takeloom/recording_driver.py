@@ -500,14 +500,19 @@ class RecordingDeckDriver:
                 # _process_session's own completion summary and vault.
                 # sync_and_maybe_prune's sync messages are routed through
                 # "recording_status" same as everything else here, tagged
-                # phase "idle" since post-processing has no better phase
-                # to report through. Without surfacing the text itself
+                # `processing` and no phase (see below). Without surfacing the text itself
                 # too, headless `takeloom server` had no indication
                 # whatsoever that splicing/syncing was still working in
                 # the background after a session ended — same reasoning
                 # video_check_status's handling below already applies to
                 # its own status text.
                 self._log(data["status"])
+            if "processing" in data:
+                # The previous session's post-processing (Backend._process_
+                # session): its progress on the touchscreen between
+                # sessions, cleared once it's done. Never carries a
+                # `phase` — it can overlap the next session entirely.
+                self.streamdeck.set_status_line(data.get("status") if data["processing"] else None)
             if "track_name" in data:
                 self.track_name = data["track_name"]
             if "phase" in data:

@@ -6678,6 +6678,7 @@ class LocalBackend(Backend):
             self._emit("recording_status", {
                 "phase": "idle",
                 "status": "Session ended — processing takes...",
+                "processing": True,
             })
 
         # Non-daemon deliberately: if the app quits right after stopping, the
@@ -6729,7 +6730,22 @@ class LocalBackend(Backend):
         (and, with a camera, its video) out of the continuous recording,
         updating the setlist — the deferred work the live session never did.
         Runs on a background thread; a fresh session can already be recording
-        while this grinds along on the old one's files."""
+        while this grinds along on the old one's files.
+
+        Its progress goes out as "recording_status" with `processing: True`
+        and deliberately *no* `phase`: by the time most of it arrives a new
+        session may well be open, and a stale "idle" here used to snap every
+        client (and the Stream Deck) back to the idle layout mid-session.
+        One last `processing: False` marks it finished."""
+        try:
+            self._process_session_steps(session)
+        finally:
+            self._emit("recording_status", {"processing": False})
+
+    def _processing_status(self, msg: str) -> None:
+        self._emit("recording_status", {"status": msg, "processing": True})
+
+    def _process_session_steps(self, session: "_ActiveSession") -> None:
         from .processing.splicer import process_session
         config = self.get_config()
         if self._phone_hub is not None:
@@ -6744,27 +6760,21 @@ class LocalBackend(Backend):
                 label = labels.get(device_id, "Takeloom Camera")
                 arrived = self._phone_hub.wait_for_upload(
                     session_id, device_id,
-                    lambda msg: self._emit("recording_status", {"phase": "idle", "status": msg}),
+                    self._processing_status,
                     label=label,
                 )
                 self._phone_hub.forget_upload(session_id, device_id)
                 if arrived is None:
-                    self._emit("recording_status", {
-                        "phase": "idle",
-                        "status": f"{label}'s recording didn't arrive — using the live feed's video instead.",
-                    })
+                    self._processing_status(f"{label}'s recording didn't arrive — using the live feed's video instead.")
         from .vault import vault_encodes_videos
-        status = lambda msg: self._emit("recording_status", {"phase": "idle", "status": msg})  # noqa: E731
+        status = self._processing_status
         defer_video = vault_encodes_videos(config, log=status)
         try:
             summary = process_session(session_dir=session.session_dir, config=config, defer_video=defer_video)
         except Exception as e:
-            self._emit("recording_status", {
-                "phase": "idle",
-                "status": f"Session take processing failed: {e} — raw files kept in {session.session_dir}",
-            })
+            status(f"Session take processing failed: {e} — raw files kept in {session.session_dir}")
             return
-        self._emit("recording_status", {"phase": "idle", "status": summary})
+        status(summary)
 
         # Only after splicing has safely pulled every completed take out
         # into its project — sync_and_maybe_prune can delete session_dir

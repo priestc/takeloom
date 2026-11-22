@@ -268,6 +268,15 @@ def _load_font(size: int):
     return ImageFont.load_default()
 
 
+def _fit_text(draw: "ImageDraw.ImageDraw", text: str, font, max_width: int) -> str:
+    """`text`, cut short with an ellipsis if it's wider than `max_width`."""
+    if draw.textlength(text, font=font) <= max_width:
+        return text
+    while text and draw.textlength(text + "…", font=font) > max_width:
+        text = text[:-1]
+    return text.rstrip() + "…"
+
+
 def _format_mmss(seconds: float) -> str:
     total = max(0, int(seconds))
     return f"{total // 60}:{total % 60:02d}"
@@ -609,6 +618,11 @@ class StreamDeckController:
         # tuner_cents parameters.
         self._touchscreen_tuner_note: str | None = None
         self._touchscreen_tuner_cents: float = 0.0
+        # The previous session's post-processing progress (phone videos
+        # arriving, takes being cut, the vault upload) — see set_status_
+        # line. Only drawn while no track is loaded, i.e. between sessions,
+        # in the title row it would otherwise leave empty.
+        self._touchscreen_status_line: str | None = None
         # Only set when a device was actually found but failed to open/
         # configure — "no device plugged in" (the common case for anyone
         # without a Stream Deck) deliberately leaves this unset, so callers
@@ -963,6 +977,19 @@ class StreamDeckController:
         with self._lock:
             self._update_touchscreen()
 
+    def set_status_line(self, text: str | None) -> None:
+        """Show (or, with None, clear) a small background-progress line —
+        the last session still being processed — on the touchscreen while
+        nothing's loaded, so the deck isn't sitting there looking dead
+        while the previous session's videos come in. Dial decks only."""
+        if text == self._touchscreen_status_line:
+            return
+        self._touchscreen_status_line = text
+        if not self.connected or not self._has_dials:
+            return
+        with self._lock:
+            self._update_touchscreen()
+
     def update_monitoring_mode(self, mode: str) -> None:
         """Redraw the monitor-mode toggle key (index 3) to reflect the
         current Production/Recording monitoring mode (see
@@ -1098,6 +1125,10 @@ class StreamDeckController:
             if self._touchscreen_track_name:
                 draw.text((w // 2, int(h * 0.20)), self._touchscreen_track_name, anchor="mm",
                           font=_load_font(22), fill="white")
+            elif self._touchscreen_status_line:
+                font = _load_font(16)
+                draw.text((w // 2, int(h * 0.20)), _fit_text(draw, self._touchscreen_status_line, font, w - 40),
+                          anchor="mm", font=font, fill=(170, 170, 170))
             if self._touchscreen_instrument_text:
                 _draw_instrument_badge(draw, w, int(h * 0.44), self._touchscreen_instrument_text)
             tuning = self._touchscreen_tuner_note is not None

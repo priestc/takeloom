@@ -86,6 +86,9 @@ class _Stopped(OSError):
     pass
 
 
+_PROGRESS_MIN_BYTES = 50_000_000
+
+
 class _StoppableReader:
     """A file body for urllib that raises once `should_stop()` turns true."""
 
@@ -207,6 +210,10 @@ class VaultClient:
         )
         there = {f["name"]: f["size"] for f in self.list_files(f"sessions/{session_dir_name}") or []}
         stats = {"files": 0, "skipped": 0, "bytes": 0, "seconds": 0.0}
+        total = sum(
+            f.stat().st_size for f in files
+            if f.name == "session_log.json" or there.get(f.name) != f.stat().st_size
+        )
         started = time.monotonic()
         for f in files:
             if should_stop is not None and should_stop():
@@ -216,6 +223,11 @@ class VaultClient:
             if f.name != "session_log.json" and there.get(f.name) == size:
                 stats["skipped"] += 1
                 continue
+            if size >= _PROGRESS_MIN_BYTES:
+                # One line per big file (the videos), so there's visible
+                # progress through a multi-GB upload — the Stream Deck
+                # shows it between sessions.
+                log(f"Uploading to the vault: {stats['bytes'] / 1e9:.1f} of {total / 1e9:.1f} GB sent ({f.name})")
             try:
                 self.upload_file(f, f"sessions/{session_dir_name}/{f.name}", should_stop=should_stop)
             except VaultError as e:

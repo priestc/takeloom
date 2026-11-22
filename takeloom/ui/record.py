@@ -1682,6 +1682,10 @@ class RecordFrame(ttk.Frame):
         if event == "recording_status":
             if "status" in data:
                 self.status_var.set(data["status"])
+            if data.get("processing") is False:
+                # The last session's post-processing just finished (see
+                # Backend._process_session) — its takes are filed now.
+                self._refresh_setlist_from_server()
             if "phase" in data:
                 self._phase = data["phase"]
                 self._update_recording_active()
