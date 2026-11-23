@@ -209,6 +209,7 @@ final class Uploader {
             RecordingStore.remove(recording.sessionID)
             return false
         }
+        var refusals = 0
         while true {
             do { try file.seek(toOffset: UInt64(offset)) } catch { return true }
             guard let chunk = try? file.read(upToCount: chunkSize), !chunk.isEmpty else { return true }
@@ -217,9 +218,21 @@ final class Uploader {
                                 URLQueryItem(name: "size", value: String(size))]
             guard let reply = vaultRequest(parts.url!, method: "PUT", token: token, body: chunk) else { return true }
             if reply.code == 409 {
-                offset = int64(reply.json["received"]) ?? 0  // the vault says where it's up to
+                let theirs = int64(reply.json["received"]) ?? 0  // the vault says where it's up to
+                if theirs == offset {
+                    // Refused at the right place: another of our chunks is
+                    // still in flight there. Wait, and after a few, start over
+                    // through the server (which may take it itself).
+                    refusals += 1
+                    if refusals >= 5 { return true }
+                    Thread.sleep(forTimeInterval: 10)
+                } else {
+                    refusals = 0
+                }
+                offset = theirs
                 continue
             }
+            refusals = 0
             guard reply.code == 200 else { return true }
             if reply.json["done"] as? Bool == true {
                 onProgress?("Uploaded \(recording.sessionID) to the vault")

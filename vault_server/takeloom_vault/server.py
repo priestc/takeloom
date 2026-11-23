@@ -137,6 +137,12 @@ class _Handler(BaseHTTPRequestHandler):
     server: VaultHTTPServer
     protocol_version = "HTTP/1.1"
     server_version = "takeloom-vault"
+    # Seconds any one read or write on a connection may wait. Without it a
+    # client that vanished mid-request (a phone off the Wi-Fi in the middle
+    # of a chunk) held its thread forever — and, for a camera upload, the
+    # file's "busy" flag (camera_uploads.py), so every later chunk of it
+    # was refused. An idle keep-alive connection is closed after this too.
+    timeout = 120
 
     # --- plumbing ---
 

@@ -120,10 +120,18 @@ class _ExpectedUpload:
     # Going straight to the remote vault (set_callbacks' upload_redirect):
     # its progress is the vault's (vault_progress), not this machine's.
     to_vault: bool = False
+    # The phone coming back to ask again without the vault's copy having
+    # grown since: it can't get through to the vault (_redirect_to_vault).
+    vault_received_at_redirect: int = -1
+    vault_stalls: int = 0
+    vault_given_up: bool = False
 
 
 # How big each chunk of an upload straight to the vault is (one HTTP PUT).
 VAULT_CHUNK_BYTES = 8 * 1024 * 1024
+# A phone asking again this many times with nothing more reaching the vault
+# in between uploads here instead, for the rest of that recording.
+_VAULT_STALLS_BEFORE_FALLBACK = 2
 # How long a phone that's connected but sending nothing to the vault is
 # waited for (it may be failing to reach it), and how often the vault is
 # asked how far its upload is.
@@ -795,6 +803,27 @@ class _Handler(socketserver.BaseRequestHandler):
         backend says so (set_callbacks' upload_redirect). The metadata
         stays here, where the session's processing reads it."""
         hub = self._hub
+        if up.vault_given_up:
+            return False
+        # How far the vault's copy is, to tell next time whether anything
+        # got through in between (asking again = the last try ended).
+        try:
+            progress = hub._vault_progress(up.session_id, up.file_name)
+        except Exception:  # noqa: BLE001
+            progress = None
+        received = int((progress or {}).get("received") or 0)
+        if up.to_vault:
+            if progress is None or received <= up.vault_received_at_redirect:
+                up.vault_stalls += 1
+            else:
+                up.vault_stalls = 0
+        up.vault_received_at_redirect = max(up.vault_received_at_redirect, received)
+        if up.to_vault:
+            if up.vault_stalls >= _VAULT_STALLS_BEFORE_FALLBACK:
+                up.vault_given_up = True
+                hub._log(f"Takeloom Camera recording for {up.session_id} from {up.device_id}: nothing more has "
+                         f"reached the vault in {up.vault_stalls} tries; receiving it here instead")
+                return False
         try:
             target = hub._upload_redirect(up.session_id, up.device_id, up.file_name, str(hello.get("token") or ""))
         except Exception as e:  # noqa: BLE001 — anything wrong: take it here instead

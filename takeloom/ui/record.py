@@ -91,6 +91,10 @@ class RecordFrame(ttk.Frame):
         # the project/track controls for its whole duration.
         self._phase = "idle"
         self._video_check_phase = "idle"  # "idle" | "recording"
+        # A session already open when this tab attached to its backend
+        # (is_recording, asked in _attach_backend): keeps the screen on
+        # (sleep_guard) until the session's own next event says where it's at.
+        self._session_open_at_attach = False
         # Name of whichever instrument backend.py's start_auto_detect_
         # instrument locked onto — "" until it has (see _begin_identify/
         # _handle_auto_detect_status). This is what a session actually
@@ -224,6 +228,19 @@ class RecordFrame(ttk.Frame):
         self._streamdeck_driver.rebind_backend(self._current_backend)
         self._clear_selection()
         self._load()
+        self._check_session_open()
+
+    def _check_session_open(self) -> None:
+        """Opened (or reconnected) partway through a session: keep the screen
+        on from now, not just from its next phase change."""
+        backend = self._current_backend
+
+        def on_done(result, error) -> None:
+            if error is None and backend is self._current_backend:
+                self._session_open_at_attach = bool(result)
+                self._update_recording_active()
+
+        self._run_backend(backend.is_recording, on_done)
 
     def _on_app_state_changed(self) -> None:
         if self.app_state.backend is not self._current_backend:
@@ -1677,6 +1694,7 @@ class RecordFrame(ttk.Frame):
     def _update_recording_active(self) -> None:
         self.app_state.recording_active = (
             self._phase in ("waiting", "recording") or self._video_check_phase == "recording"
+            or self._session_open_at_attach
         )
 
     def _handle_backend_event(self, event: str, data: dict) -> None:
@@ -1689,6 +1707,7 @@ class RecordFrame(ttk.Frame):
                 self._refresh_setlist_from_server()
             if "phase" in data:
                 self._phase = data["phase"]
+                self._session_open_at_attach = False  # the session's own phase from here on
                 self._update_recording_active()
                 if self._phase == "idle":
                     self._refresh_setlist_from_server()

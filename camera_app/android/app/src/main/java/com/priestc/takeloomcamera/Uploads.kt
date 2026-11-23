@@ -236,6 +236,7 @@ class Uploader(private val store: RecordingStore, private val settings: Settings
             return false
         }
         val buffer = ByteArray(chunkSize)
+        var refusals = 0
         while (true) {
             input.seek(offset)
             var n = 0
@@ -247,9 +248,21 @@ class Uploader(private val store: RecordingStore, private val settings: Settings
             if (n <= 0) return true
             val reply = vaultRequest("$url?offset=$offset&size=$size", "PUT", token, buffer, n) ?: return true
             if (reply.first == 409) {
-                offset = reply.second.optLong("received")  // the vault says where it's up to
+                val theirs = reply.second.optLong("received")  // the vault says where it's up to
+                if (theirs == offset) {
+                    // Refused at the right place: another of our chunks is
+                    // still in flight there. Wait, and after a few, start over
+                    // through the server (which may take it itself).
+                    refusals += 1
+                    if (refusals >= 5) return true
+                    Thread.sleep(10_000)
+                } else {
+                    refusals = 0
+                }
+                offset = theirs
                 continue
             }
+            refusals = 0
             if (reply.second.optBoolean("done")) {
                 onProgress("Uploaded ${recording.sessionId} to the vault")
                 store.remove(recording.sessionId)
