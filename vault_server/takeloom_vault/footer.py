@@ -2,10 +2,13 @@
 musician, the instrument, the song, when it was played, and the camera.
 
 It used to be burned into every camera's video while takeloom processed
-the session. Now it belongs to the web video mixer: the session page draws
-it over the player (web.py), changing with the song and with each cut, and
-"Render final video" draws the same thing into edit.mp4 (edit.py). Only for
-sessions whose camera videos are clean — the session log's
+the session. Now it's only ever on YouTube: publishing a session renders
+its edit again with the footer drawn in (edit.py's render_for_youtube),
+changing with the song and with each cut, and takeloom's live stream draws
+its own (takeloom/video/stream_switcher.py, from takeloom/video/
+live_footer.py: keep the text the same). edit.mp4 itself, the session
+page's player, and everything else made from a session are clean. Only
+for sessions whose camera videos are clean — the session log's
 "video_footer": "none" (takeloom marks them); an older session's videos
 already carry their footer, so it isn't added twice.
 

@@ -67,7 +67,17 @@ In remote-only mode the bulky media (take audio, backing tracks, exported mixes)
 removed locally and fetched again when needed. The small files stay local too.
 
 Only a session's raw recording is lossless (`session.flac`, the session videos' Instrument
-Only track, the phones' mic tracks). Everything else takeloom stores is MP3, encoded with
+Only track, the phones' mic tracks).
+
+What's archived is the least-modified copy of every recording. `session.flac` is the
+instrument exactly as the audio interface recorded it, and it's never deleted. Each Takeloom
+Camera phone's own file is kept exactly as the phone made it (`<camera>_phone.mp4`, with its
+`.upload.json`): video and original mic, untouched. The session log records how it lines up
+(`video_sync`: offset, drift). The camera videos (`<camera>.mp4`: that phone's video stream,
+copied, not re-encoded, with the session's audio) and the mic FLACs are working copies made
+from those. The monitor mix is kept only as a reference (the camera videos' AAC "Mix" track),
+never losslessly: it carries the backing track, so it's never part of anything made from a
+session. Everything else takeloom stores is MP3, encoded with
 LAME's `alt-preset-standard` (VBR `-V 2`, about 190 kbps): completed takes, lossless backing
 tracks (on import), and exported mixes. An exported mix never uses the MP3 takes. Each take
 is cut back out of its session's lossless recording.
@@ -232,7 +242,7 @@ recording it twice:
   at different audio.
 - Existing take files are never deleted. New takes increment the take number and replace the preferred take in the setlist.
 - `inspiration_takes.json` — the cross-project take index (see below).
-- `session.flac` — the continuous raw recording spanning the full session
+- `session.flac` — the continuous raw recording spanning the full session, kept forever as the archive master
 - `session_log.json` — musician, studio, and event data; what post-session processing replays to find completed takes and copy them into the vault's `completed_takes/`
 - `session_video.mp4` is only present when a camera is configured
 

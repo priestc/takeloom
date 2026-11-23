@@ -625,24 +625,23 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
         # The vault deletes these once its encodes succeed (render_jobs.py).
         if have_video:
             render_cleanup.append(session_video_raw.name)
-        render_cleanup += [session_mix_flac.name, session_flac.name]
+        render_cleanup += [session_mix_flac.name]  # never session.flac: the archive master
         staged: list[str] = []
         if vault_uploads is not None and vault_uploads.jobs:
             # Lining up the phones' recordings that are in the vault comes
             # first; then they're cleaned up with the rest.
             render_jobs[:0] = vault_uploads.jobs
-            staged = list(vault_uploads.staged)
-            render_cleanup += staged
+            staged = list(vault_uploads.staged)  # kept: each phone's original recording
         write_jobs(session_dir, render_jobs, render_cleanup, staged_inputs=staged)
     elif camera_videos and extra_videos_ok and (session_video_ok or not have_video):
         session_video_raw.unlink(missing_ok=True)
+        # The monitor mix is only ever a reference (it carries the backing
+        # track: copyrighted, never part of anything made from the
+        # session), kept as each camera video's AAC "Mix" track.
         session_mix_flac.unlink(missing_ok=True)
-        # The instrument-only track muxed into every camera's video above
-        # is a lossless, bit-identical copy of session.flac's samples, so
-        # once those muxes succeed this standalone file is pure
-        # redundancy. Kept only for audio-only sessions (no camera), where
-        # it's the sole recording, or if any camera's video failed.
-        session_flac.unlink(missing_ok=True)
+        # session.flac is never deleted: it's the instrument's archive
+        # master, untouched, as the audio interface recorded it. The camera
+        # videos' Instrument Only tracks are working copies of it.
 
     take_word = "take" if saved == 1 else "takes"
     summary = f"Session processed: {saved} completed {take_word} saved"

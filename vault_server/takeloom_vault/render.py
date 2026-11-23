@@ -212,7 +212,8 @@ def mux_args(spec: dict) -> list[str]:
         "-metadata:s:a:1", "title=Instrument Only",
         "-disposition:a:0", "0",
         "-disposition:a:1", "default",
-        "-shortest",
+        # Never -shortest: a camera that started late or stopped early
+        # mustn't cut the session's audio short.
         "-movflags", "+faststart",
         spec["output"],
     ]

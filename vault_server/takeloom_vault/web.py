@@ -507,9 +507,10 @@ def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor
         ".then(function(r){return r.json();}).then(edState);}"
         "function ytState(s){var el=document.getElementById('yt-status'),b=document.getElementById('yt-publish'),P=ED.pub;"
         "var rendered=document.getElementById('ed-final').textContent.length>0;"
-        "b.disabled=!P.connected||!rendered||s.state=='uploading';"
+        "b.disabled=!P.connected||!rendered||s.state=='uploading'||s.state=='preparing';"
         "if(!P.connected)el.textContent='Connect YouTube in takeloom first (video-ui › Settings › Streaming).';"
         "else if(!rendered)el.textContent='Render the final video first.';"
+        "else if(s.state=='preparing'){el.textContent='Adding the footer… '+Math.round(100*(s.progress||0))+'%';setTimeout(ytPoll,3000);}"
         "else if(s.state=='uploading'){el.textContent='Uploading… '+Math.round(100*(s.progress||0))+'%';setTimeout(ytPoll,3000);}"
         "else if(s.state=='failed')el.textContent='Publishing failed: '+(s.error||'');"
         "else if(s.state=='done'){el.innerHTML='Published: <a target=_blank href=\"'+s.url+'\">'+s.url+'</a> ('+s.privacy+"
@@ -562,19 +563,16 @@ def session_page(vault: Vault, name: str, data: dict, editor=None, publisher=Non
             "Open Takeloom Camera on that phone; if the recording's still there it'll upload and replace this.</p>"
         )
     if has_video:
-        from . import footer
-        if editor is not None and (len(videos) > 1 or footer.wanted(data)):
+        if editor is not None and len(videos) > 1:
             # Every camera playing together, cutting between them as the
-            # editor's timeline says, with the footer over it: a preview of
-            # the final video.
+            # editor's timeline says: a preview of the final video. No
+            # footer over it: that's only on YouTube (footer.py).
             from .edit import camera_files
             shifts = [shift for _title, _path, shift in camera_files(directory, data)]
             from .edit import mic_files
             mics = [_media_url(f"{rel}/{path.name}") for _title, path in mic_files(directory, data)]
-            parts.append(_stage_player(rel, videos, shifts,
-                                       footer.schedule(data) if footer.wanted(data) else None, mics))
-            if len(videos) > 1:
-                parts.append(_edit_editor(name, rel, videos, editor, publisher, data))
+            parts.append(_stage_player(rel, videos, shifts, None, mics))
+            parts.append(_edit_editor(name, rel, videos, editor, publisher, data))
         else:
             parts.append(f"<video id='v' controls preload='metadata' src='{_media_url(rel + '/' + videos[0][1])}'></video>")
     elif (directory / "render_jobs.json").exists():

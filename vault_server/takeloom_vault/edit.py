@@ -27,9 +27,11 @@ whole frames (FPS) and each is encoded to exactly its frame count, so the
 picture never drifts from the sound however many cuts there are.
 
 Each stretch is its own short ffmpeg encode (frame-accurate seek, scaled to
-the main camera's size, with the footer drawn in: footer.py, naming that
-stretch's camera; for sessions whose videos are clean), then they're joined
-without re-encoding and the audio added. One render at a time, on a background thread, at low priority,
+the main camera's size), then they're joined without re-encoding and the
+audio added. edit.mp4 is clean: the footer (footer.py) is only for YouTube,
+so publishing renders the same plan again, from the same sources (one
+encode, never an encode of edit.mp4), with it drawn in, naming each
+stretch's camera, as edit_youtube.mp4 (render_for_youtube). One render at a time, on a background thread, at low priority,
 like render.py's session encodes.
 """
 
@@ -50,6 +52,7 @@ from .store import Vault
 
 PLAN_FILE = "edit.json"
 OUTPUT_FILE = "edit.mp4"
+YOUTUBE_FILE = "edit_youtube.mp4"  # edit.mp4 with the footer, made to publish (render_for_youtube)
 FPS = 30
 MAX_CUTS = 5000
 _FONTS = ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/System/Library/Fonts/Helvetica.ttc")
@@ -279,7 +282,24 @@ class EditRenderer:
         with self._lock:
             self._status[name] = status
 
-    def _render(self, name: str) -> None:
+    def render_for_youtube(self, name: str, on_progress: Callable[[float], None]) -> Path:
+        """The edit with the footer drawn in (see the module docstring), as
+        YOUTUBE_FILE, rendered now on the calling thread. Just edit.mp4 for a
+        session whose videos carry their own footer already, or if this
+        ffmpeg can't draw text."""
+        directory = self.vault.session_dir(name)
+        data = self.vault.read_session_log(name) or {}
+        if not footer.wanted(data):
+            return directory / OUTPUT_FILE
+        if not self.draws_text:
+            self.log(f"{name}'s YouTube video: no footer (this ffmpeg has no drawtext)")
+            return directory / OUTPUT_FILE
+        self._render(name, with_footer=True, output=YOUTUBE_FILE, on_progress=on_progress)
+        return directory / YOUTUBE_FILE
+
+    def _render(self, name: str, with_footer: bool = False, output: str = OUTPUT_FILE,
+                on_progress: Callable[[float], None] | None = None) -> None:
+        progress = on_progress or (lambda fraction: self._set(name, state="rendering", progress=fraction))
         directory = self.vault.session_dir(name)
         data = self.vault.read_session_log(name) or {}
         cameras = camera_files(directory, data)
@@ -300,19 +320,18 @@ class EditRenderer:
             else:
                 stretches.append([start, end, cam])
 
-        work = directory / ".edit-work"
+        work = directory / (".edit-work-youtube" if with_footer else ".edit-work")
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir()
-        entries = footer.schedule(data) if footer.wanted(data) and self.draws_text else None
-        if footer.wanted(data) and not self.draws_text:
-            self.log(f"{name}'s edit: no footer (this ffmpeg has no drawtext)")
+        entries = footer.schedule(data) if with_footer and footer.wanted(data) and self.draws_text else None
         nice = ["nice", "-n", "10"] if shutil.which("nice") else []
         started = time.monotonic()
-        self.log(f"Rendering {name}'s edit: {len(stretches)} stretches, {total:.0f}s")
+        what = "YouTube video (with the footer)" if entries is not None else "edit"
+        self.log(f"Rendering {name}'s {what}: {len(stretches)} stretches, {total:.0f}s")
         try:
             names = []
             for i, (start, end, cam) in enumerate(stretches):
-                self._set(name, state="rendering", progress=round(start / total, 3) if total else 0)
+                progress(round(start / total, 3) if total else 0)
                 frames = round((end - start) * FPS)
                 part = work / f"part{i:05d}.mp4"
 
@@ -330,8 +349,8 @@ class EditRenderer:
                         raise RuntimeError(f"couldn't render {start:.1f}-{end:.1f}s")
                 names.append(part.name)
             (work / "parts.txt").write_text("".join(f"file '{n}'\n" for n in names))
-            self._set(name, state="rendering", progress=1.0)
-            out = directory / (OUTPUT_FILE + ".partial.mp4")
+            progress(1.0)
+            out = directory / (output + ".partial.mp4")
             mics = mic_files(directory, data) if plan["audio"] == "atmospheric" else []
             if plan["audio"] == "atmospheric" and not mics:
                 raise RuntimeError("this session has no phone mic tracks for atmospheric audio")
@@ -358,10 +377,10 @@ class EditRenderer:
             if result.returncode != 0 or not out.exists():
                 out.unlink(missing_ok=True)
                 raise RuntimeError(f"joining failed: {(result.stderr or '').strip()[-300:]}")
-            os.replace(out, directory / OUTPUT_FILE)
+            os.replace(out, directory / output)
         finally:
             shutil.rmtree(work, ignore_errors=True)
-        self.log(f"Rendered {name}'s edit ({total:.0f}s of video in {time.monotonic() - started:.0f}s)")
+        self.log(f"Rendered {name}'s {what} ({total:.0f}s of video in {time.monotonic() - started:.0f}s)")
 
     @staticmethod
     def _encode_stretch(nice: list[str], src: Path, seek: float, frames: int, width: int, height: int,

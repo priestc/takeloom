@@ -343,7 +343,13 @@ def _align_camera(
     offset in ms, recording how it was measured into `record`
     ("video_offset_ms"/"video_sync"). With `mic_file`, the phone's mic
     track is saved under that name too, lined up with the mix (extract_mic;
-    record["mic_file"]). None if nothing usable."""
+    record["mic_file"]). None if nothing usable.
+
+    The phone's recording itself (`upload_file`, and its .upload.json) is
+    never deleted: it's the archive master, exactly as the phone made it.
+    `raw` (its video, timestamps rescaled for drift), the camera video made
+    from that, and the mic FLAC are working copies, all re-derivable from
+    it and the "video_sync" record (file_zero_s, drift, offset_ms)."""
     uploaded, _part, meta_path = upload_paths(session_dir, upload_file)
     mix_flac = session_dir / "session_mix.flac"
     session_flac = session_dir / "session.flac"
@@ -374,10 +380,12 @@ def _align_camera(
                     "duration": sf.info(str(mix_flac)).duration,
                 }})
                 record["mic_file"] = mic_file
+            sync["original_file"] = upload_file
             # The vault makes `raw` from the recording (its normalize job):
             # the live feed's version would only be uploaded to be replaced.
+            # The recording itself and its metadata are kept (see
+            # _align_camera's docstring).
             raw.unlink(missing_ok=True)
-            meta_path.unlink(missing_ok=True)
     elif uploaded.exists() and mix_flac.exists():
         try:
             meta = json.loads(meta_path.read_text())
@@ -396,8 +404,7 @@ def _align_camera(
                         record["mic_file"] = mic_file
                 except Exception as e:  # the video matters more: never lose it over the mic
                     record["mic_error"] = str(e)
-            uploaded.unlink(missing_ok=True)
-            meta_path.unlink(missing_ok=True)
+            sync["original_file"] = upload_file
 
     if sync is None and "video_sync" in record and record["video_sync"].get("source") == "phone upload":
         return record.get("video_offset_ms")  # already aligned by an earlier, interrupted run

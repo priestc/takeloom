@@ -1,4 +1,8 @@
-"""Publishing a session's edit (edit.mp4) to YouTube, from the vault.
+"""Publishing a session's edit to YouTube, from the vault.
+
+What's uploaded is the edit with the footer drawn in (edit.py's
+render_for_youtube, rendered just before the upload and deleted after):
+the footer is only ever on YouTube, never in edit.mp4 itself.
 
 The video is here, so it's uploaded from here rather than copied back to
 the studio machine first. The YouTube account is takeloom's: when it's
@@ -187,9 +191,10 @@ def _ask_offset(session_url: str, token: str, size: int, fallback: int) -> int:
 class Publisher:
     """One upload at a time, in the background; status per session."""
 
-    def __init__(self, vault: Vault, log: Callable[[str], None]) -> None:
+    def __init__(self, vault: Vault, log: Callable[[str], None], editor=None) -> None:
         self.vault = vault
         self.log = log
+        self.editor = editor  # edit.py's EditRenderer: adds the footer before uploading
         self._lock = threading.Lock()
         self._status: dict[str, dict] = {}
 
@@ -216,25 +221,31 @@ class Publisher:
         if privacy not in PRIVACY:
             raise ValueError("pick public, unlisted or private")
         with self._lock:
-            if self._status.get(name, {}).get("state") == "uploading":
+            if self._status.get(name, {}).get("state") in ("preparing", "uploading"):
                 return dict(self._status[name])
-            self._status[name] = {"state": "uploading", "progress": 0.0}
+            self._status[name] = {"state": "preparing", "progress": 0.0}
         threading.Thread(target=self._run, args=(name, video, title, description, privacy, creds),
                          name="youtube-upload", daemon=True).start()
         return self.status(name)
 
     def _run(self, name: str, video: Path, title: str, description: str, privacy: str, creds: dict) -> None:
-        def progress(fraction: float) -> None:
+        def progress(fraction: float, state: str = "uploading") -> None:
             with self._lock:
-                self._status[name] = {"state": "uploading", "progress": round(fraction, 3)}
+                self._status[name] = {"state": state, "progress": round(fraction, 3)}
         self.log(f"Publishing {name}'s edit to YouTube ({privacy}): {title!r}")
         try:
+            if self.editor is not None:
+                video = self.editor.render_for_youtube(name, lambda f: progress(f, "preparing"))
+            progress(0.0)
             result = upload(video, title, description, privacy, creds, progress)
         except Exception as e:  # noqa: BLE001
             self.log(f"Publishing {name} to YouTube failed: {e}")
             with self._lock:
                 self._status[name] = {"state": "failed", "error": str(e)}
             return
+        finally:
+            from .edit import YOUTUBE_FILE
+            (self.vault.session_dir(name) / YOUTUBE_FILE).unlink(missing_ok=True)
         record = {
             "video_id": result.get("id", ""), "url": f"https://youtu.be/{result.get('id', '')}", "title": title,
             "privacy": (result.get("status") or {}).get("privacyStatus", privacy), "asked_privacy": privacy,

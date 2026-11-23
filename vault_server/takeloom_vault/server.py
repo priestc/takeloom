@@ -550,7 +550,7 @@ def serve(vault: Vault, auth: Auth, take_videos: TakeVideoCache, host: str, port
     renderer = Renderer(vault, log)
     renderer.start()
     editor = EditRenderer(vault, log, renderer.available)
-    httpd = VaultHTTPServer((host, port), vault, auth, take_videos, renderer, editor, Publisher(vault, log))
+    httpd = VaultHTTPServer((host, port), vault, auth, take_videos, renderer, editor, Publisher(vault, log, editor))
     log(f"takeloom-vault serving {vault.root} on http://{socket.gethostname()}:{port} (pid {os.getpid()})")
     try:
         httpd.serve_forever()

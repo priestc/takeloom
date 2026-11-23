@@ -16,13 +16,22 @@ resamples to a constant frame rate, scaling every camera to the same 16:9
 frame (letterboxed), so cameras with different resolutions or frame rates
 switch cleanly. If the program camera stalls, the last frame repeats, so
 the stream never starves.
+
+The stream carries the footer (live_footer.py's text plus the program
+camera's name): a strip along the bottom, as the vault draws into a
+published edit, redrawn by ffmpeg from a text file (drawtext's reload)
+that set_footer and set_program rewrite. The cameras' own recordings never
+get it: the footer is only ever on YouTube.
 """
 
 from __future__ import annotations
 
 import io
+import os
 import queue
+import shutil
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 
@@ -34,6 +43,14 @@ from ..streaming import StreamTarget
 _SOURCE_RESOLUTION_WIDTH = 1920
 # A program camera silent this long gets its last frame repeated.
 _REPEAT_AFTER_S = 0.2
+# The footer's font: the first of these there is (the vault's edit.py
+# uses the same two).
+_FONTS = (
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+)
+_FOOTER_FILE = "footer.txt"
 
 
 def _black_jpeg(width: int, height: int) -> bytes:
@@ -45,7 +62,8 @@ def _black_jpeg(width: int, height: int) -> bytes:
 
 class StreamSwitcher:
     def __init__(self, target: StreamTarget, program: str, framerate: int = 30,
-                 log_path: Path | None = None) -> None:
+                 log_path: Path | None = None, labels: dict[str, str] | None = None,
+                 footer: str = "") -> None:
         self.target = target
         self.log_path = log_path  # ffmpeg's errors go here (the session's stream.log)
         self.framerate = framerate
@@ -58,6 +76,11 @@ class StreamSwitcher:
         self._proc: subprocess.Popen | None = None
         self._writer: threading.Thread | None = None
         self._stopping = threading.Event()
+        # The footer: its text without the camera, each camera's name, and
+        # the folder ffmpeg reads it from (its working directory).
+        self._footer = footer
+        self._labels = dict(labels or {})
+        self._footer_dir: Path | None = None
 
     @property
     def stream_width(self) -> int:
@@ -69,6 +92,7 @@ class StreamSwitcher:
             return False
         w, h, t = self.width, self.height, self.target
         bitrate = f"{t.bitrate_kbps}k"
+        footer = self._footer_filters()
         cmd = [
             FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
             "-use_wallclock_as_timestamps", "1", "-thread_queue_size", "1024",
@@ -77,7 +101,7 @@ class StreamSwitcher:
             "-f", "f32le", "-ar", str(t.sample_rate), "-ac", str(t.channels), "-i", str(t.audio_fifo),
             "-filter_complex",
             f"[0:v]scale={w}:{h}:force_original_aspect_ratio=decrease,"
-            f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={self.framerate},format=yuv420p[v]",
+            f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={self.framerate}{footer},format=yuv420p[v]",
             "-map", "[v]", "-map", "1:a",
             # Same encoder settings as before the switcher (see the comment in
             # video/capture.py's history: no -tune zerolatency).
@@ -89,13 +113,50 @@ class StreamSwitcher:
         ]
         log = open(self.log_path, "ab") if self.log_path else subprocess.DEVNULL
         try:
-            self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=log)
+            self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=log,
+                                          cwd=self._footer_dir)
         finally:
             if self.log_path:
                 log.close()  # the child has its own copy
         self._writer = threading.Thread(target=self._write_frames, args=(self._proc,), daemon=True)
         self._writer.start()
         return True
+
+    def _footer_filters(self) -> str:
+        """",drawbox=...,drawtext=..." for the footer, or "" without a font."""
+        font = next((f for f in _FONTS if Path(f).exists()), None)
+        if font is None:
+            return ""
+        self._footer_dir = Path(tempfile.mkdtemp(prefix="takeloom-stream-"))
+        self._write_footer()
+        bar = max(28, self.height // 24)
+        size = max(13, bar - 12)
+        return (f",drawbox=x=0:y=ih-{bar}:w=iw:h={bar}:color=black@0.43:t=fill,"
+                f"drawtext=fontfile='{font}':textfile={_FOOTER_FILE}:reload=1:expansion=none:"
+                f"fontsize={size}:fontcolor=white@0.92:x=14:y=h-{bar}+({bar}-th)/2")
+
+    def _write_footer(self) -> None:
+        directory = self._footer_dir
+        if directory is None:
+            return
+        from .live_footer import join
+        with self._lock:
+            text = join(self._footer, self._labels.get(self._program, ""))
+        # Replaced whole, never written in place: ffmpeg rereads it every frame.
+        tmp = directory / (_FOOTER_FILE + ".tmp")
+        try:
+            tmp.write_text(text or " ")
+            os.replace(tmp, directory / _FOOTER_FILE)
+        except OSError:
+            pass
+
+    def set_footer(self, text: str) -> None:
+        """The footer's text without the camera (live_footer.footer_text)."""
+        with self._lock:
+            changed = text != self._footer
+            self._footer = text
+        if changed:
+            self._write_footer()
 
     @property
     def is_running(self) -> bool:
@@ -111,6 +172,7 @@ class StreamSwitcher:
             latest = self._latest.get(device)
         if latest is not None:
             self._enqueue(latest)  # switch on the next frame, not the camera's next one
+        self._write_footer()
 
     def push_frame(self, device: str, jpeg: bytes) -> None:
         """A stream-quality frame from one camera (any of them)."""
@@ -170,3 +232,6 @@ class StreamSwitcher:
                 proc.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
                 proc.kill()
+        if self._footer_dir is not None:
+            shutil.rmtree(self._footer_dir, ignore_errors=True)
+            self._footer_dir = None

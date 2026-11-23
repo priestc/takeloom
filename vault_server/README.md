@@ -105,11 +105,13 @@ result: every camera's video plays together, in step, and with **Preview edit** 
 between them as the timeline says, with the priority-1 camera's sound, just as the render will
 (a camera's button turns preview off and holds that camera).
 
-The footer (musician, instrument, the song, when it was played, and the camera on screen) is the
-mixer's too (`takeloom_vault/footer.py`): takeloom no longer burns it into the camera videos, so
-the player draws it over the picture, changing with each song and cut, and rendering draws the
-same into `edit.mp4` (needs ffmpeg's `drawtext`, which Ubuntu's has). Sessions recorded before
-this already have it in their videos, so it isn't added again. Click any stretch to switch it to the next camera; the player above jumps
+The footer (musician, instrument, the song, when it was played, and the camera on screen) only
+ever goes on YouTube (`takeloom_vault/footer.py`). `edit.mp4` and the player are clean.
+**Publish to YouTube** first renders the same plan again from the camera videos with the footer
+drawn in, changing with each song and cut, then uploads that (`edit_youtube.mp4`, deleted after).
+That needs ffmpeg's `drawtext`, which Ubuntu's has. takeloom's live stream draws the same footer.
+Sessions recorded before November 2026 already have it in their videos, so it isn't added
+again. Click any stretch to switch it to the next camera; the player above jumps
 there showing that camera. **Render final video** saves the plan (`edit.json` in the session's
 folder) and makes `edit.mp4` in the background: each stretch of picture from its camera, cut
 frame-accurately, and the sound unbroken from the main camera from start to finish, so a cut
@@ -161,8 +163,8 @@ not to the studio machine: into `camera_uploads/<session>/`, in resumable chunks
 session's audio from a small extract of its sound this server sends, and its
 `render_jobs.json` gets two more kinds of job ahead of the encodes: `normalize` (the video,
 timestamps rescaled for the phone's clock drift, as a stream copy) and `mic` (the phone's mic
-track on the session's timeline). The recording is moved into the session first, and deleted
-with the other raw inputs once the videos are made.
+track on the session's timeline). The recording is moved into the session first and kept there
+untouched, as the archive master; so is `session.flac`.
 
 A job file is a description (file names, offsets, watermark timings), never a command line:
 this server builds the ffmpeg command itself and only accepts plain file names inside the

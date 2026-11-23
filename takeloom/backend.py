@@ -37,6 +37,7 @@ from .config import DEFAULT_CONFIG_PATH, INSTRUMENT_LABELS, MAX_INSTRUMENT_VOLUM
 from .phone_camera.protocol import DEVICE_PREFIX, is_phone_device, phone_device_id
 from .project import Project, Setlist, TakeInfo, TrackEntry
 from .utils import atomic_write_text, ensure_dir, timestamp_now, wall_timestamp
+from .video.live_footer import footer_text as live_footer_text
 
 
 class BackendError(Exception):
@@ -6320,6 +6321,10 @@ class LocalBackend(Backend):
             synth_voice=synth_voice,
             camera=camera,
         ))
+        if session.stream_switcher is not None:
+            # The live stream's footer follows the song (live_footer.py).
+            session.stream_switcher.set_footer(live_footer_text(
+                session.musician, session.inst.full_name, session.events))
         # Written to disk on every event, not just once at clean session
         # end — session_log.json used to only exist at all once
         # _end_session ran, so a crash (power loss, the process being
@@ -6529,7 +6534,10 @@ class LocalBackend(Backend):
                     audio_fifo=stream_feeder.fifo_path,
                     sample_rate=config.sample_rate, channels=engine.output_channels,
                     width=config.streaming_video_width, bitrate_kbps=config.streaming_bitrate_kbps,
-                ), program=self._resolve_program_camera(cameras), log_path=session_dir / "stream.log")
+                ), program=self._resolve_program_camera(cameras), log_path=session_dir / "stream.log",
+                    labels=dict(cameras),
+                    footer=live_footer_text(inst.musician or config.studio_musician, inst.full_name, [],
+                                            wall_timestamp()))
                 # Bind a freshly titled broadcast before ffmpeg starts
                 # pushing RTMP, so it's already in place once data starts
                 # flowing (see _create_youtube_broadcast). Best-effort:
@@ -7102,6 +7110,15 @@ class LocalBackend(Backend):
             client.upload_file(new_video, f"sessions/{session_id}/{cam['final_file']}")
             if sync.get("mic_file"):
                 client.upload_file(directory / mic_name, f"sessions/{session_id}/{mic_name}")
+            # The phone's own recording, untouched, as the archive master
+            # (as every on-time one is: phone_camera/sync.py's _align_camera)
+            # — before the session log says it's been swapped in, which is
+            # what a retry goes by.
+            client.delete_paths([f"sessions/{session_id}/{cam['upload_file']}.part"])
+            log(f"Archiving {label}'s original recording of {session_id} in the vault...")
+            client.upload_file(uploaded, f"sessions/{session_id}/{cam['upload_file']}")
+            if meta_path.exists():
+                client.upload_file(meta_path, f"sessions/{session_id}/{meta_path.name}")
             # Re-read right before writing: only this one entry changes.
             # video_offset_ms stays: the audio (what it describes, for the
             # take refs and the editor) is exactly where it was.
@@ -7109,15 +7126,12 @@ class LocalBackend(Backend):
             for entry in fresh.get("extra_cameras") or []:
                 if entry.get("final_file") == cam["final_file"]:
                     entry["replaced_video_sync"] = entry.get("video_sync")
-                    entry["video_sync"] = {k: v for k, v in sync.items() if k != "mic_file"}
+                    entry["video_sync"] = {**{k: v for k, v in sync.items() if k != "mic_file"},
+                                           "original_file": cam["upload_file"]}
                     if sync.get("mic_file"):
                         entry["mic_file"] = sync["mic_file"]
             if not client.write_session_log(session_id, fresh):
                 raise RuntimeError("the vault didn't take the updated session log")
-            # The half-uploaded leftovers of the attempt that was cut short.
-            stem = Path(cam["upload_file"]).stem
-            client.delete_paths([f"sessions/{session_id}/{cam['upload_file']}.part",
-                                 f"sessions/{session_id}/{stem}.upload.json"])
             for f in (uploaded, meta_path, old_video, new_video, directory / mic_name):
                 f.unlink(missing_ok=True)
             log(f"{label}'s full-quality video of {session_id} is in the vault now.")
