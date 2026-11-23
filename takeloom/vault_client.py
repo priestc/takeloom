@@ -209,6 +209,12 @@ class VaultClient:
             key=lambda f: (f.name == "session_log.json", f.name),
         )
         there = {f["name"]: f["size"] for f in self.list_files(f"sessions/{session_dir_name}") or []}
+        if "render_jobs.json" in there and not (local_dir / "render_jobs.json").exists():
+            # An earlier attempt got the videos' jobs and inputs there, then
+            # failed, and this machine made the videos itself (render_jobs.py's
+            # run_locally). Left there, the vault would run those jobs again
+            # once session_log.json arrives, from inputs since deleted here.
+            self._drop_stale_render_jobs(session_dir_name, there, log)
         stats = {"files": 0, "skipped": 0, "bytes": 0, "seconds": 0.0}
         total = sum(
             f.stat().st_size for f in files
@@ -240,6 +246,25 @@ class VaultClient:
             stats["bytes"] += size
         stats["seconds"] = time.monotonic() - started
         return stats
+
+    def _drop_stale_render_jobs(self, session_dir_name: str, there: dict, log: LogFn) -> None:
+        base = f"sessions/{session_dir_name}"
+        stale = ["render_jobs.json"]
+        fd, tmp = tempfile.mkstemp(prefix=".render-jobs-", suffix=".json")
+        os.close(fd)
+        try:
+            if self.download_file(f"{base}/render_jobs.json", Path(tmp)):
+                jobs = json.loads(Path(tmp).read_text())
+                stale += [name for name in jobs.get("cleanup") or [] if name in there]
+        except (OSError, ValueError):
+            pass
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+        if self.delete_paths([f"{base}/{name}" for name in stale]):
+            log(f"Removed {session_dir_name}'s stale video jobs from the vault (its videos were made here): "
+                f"{', '.join(stale)}")
+            for name in stale:
+                there.pop(name, None)
 
     # --- arbitrary vault files ---
 
