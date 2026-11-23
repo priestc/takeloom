@@ -450,11 +450,21 @@ class PhoneCameraHub:
             if up is not None:
                 return up
         session_dir = self._session_dir_resolver(session_id)
-        if session_dir is None:
+        data = None
+        if session_dir is not None:
+            try:
+                data = json.loads((session_dir / "session_log.json").read_text())
+            except (OSError, ValueError):
+                return None
+        # Already processed — gone to the vault, or still here waiting to be
+        # uploaded there ("takes" is what processing leaves in the log; with
+        # the vault making the videos, none of them is ever here to look
+        # for) — so made from the live feed: a late upload.
+        if session_dir is None or data.get("takes") is not None:
             try:
                 late = self._late_upload_target(session_id, device_id)
             except Exception as e:  # noqa: BLE001 — e.g. the vault unreachable: refuse for now
-                self._log(f"Couldn't check the vault for a late Takeloom Camera recording of {session_id}: {e}")
+                self._log(f"Couldn't check for a late Takeloom Camera recording of {session_id}: {e}")
                 late = None
             if late is None:
                 return None
@@ -463,10 +473,6 @@ class PhoneCameraHub:
                 return self._uploads.setdefault(
                     (session_id, device_id), _ExpectedUpload(session_id, late_dir, device_id, late_file, late=True),
                 )
-        try:
-            data = json.loads((session_dir / "session_log.json").read_text())
-        except (OSError, ValueError):
-            return None
         phone = data.get("phone_camera") or {}
         if phone.get("device_id") == device_id:
             if (session_dir / "session_video.mp4").exists():

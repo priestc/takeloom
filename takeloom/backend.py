@@ -7026,11 +7026,19 @@ class LocalBackend(Backend):
         vault now, or None to refuse it (see PhoneCameraHub.set_callbacks).
         Called on the phone's upload connection."""
         config = self.get_config()
-        from .vault import remote_vault
-        client = remote_vault(config)
-        if client is None:
-            return None
-        data = client.fetch_session_log(session_id)
+        local = self._local_session_dir_path(session_id)
+        if local is not None:
+            # Processed, but still here: not uploaded to the vault yet.
+            try:
+                data = json.loads((local / "session_log.json").read_text())
+            except (OSError, ValueError):
+                return None
+        else:
+            from .vault import remote_vault
+            client = remote_vault(config)
+            if client is None:
+                return None
+            data = client.fetch_session_log(session_id)
         if not data or self._late_camera_entry(data, device_id) is None:
             return None
         entry = self._late_camera_entry(data, device_id)
