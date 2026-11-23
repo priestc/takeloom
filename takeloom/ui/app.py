@@ -107,9 +107,14 @@ def _show_connect_screen(
     A "could not connect" result auto-retries every `_RETRY_INTERVAL_MS`
     in the background as well as offering a manual Retry button, so a
     remote instance recovers on its own once the server comes back.
-    Shared by an "always connect" remote at startup (`_run_always_remote`)
-    and by recovery from a mid-session disconnect
-    (`handle_remote_disconnect`)."""
+    Shared by an "always connect" remote at startup (`_run_always_remote`),
+    video-ui's startup, and recovery from a mid-session disconnect
+    (`handle_remote_disconnect`).
+
+    The "could not connect" screen also has the server's address, editable:
+    a server that's been renamed (Mac.local -> macmini.lan) is fixed right
+    there. Connecting to a new address moves the saved remote over to it
+    (_rename_known_remote), keeping its pairing and "always connect"."""
     from .remote import connect_async, remember_remote_token
 
     placeholder = ttk.Frame(root)
@@ -149,11 +154,90 @@ def _show_connect_screen(
                 pady=(0, 16)
             )
             ttk.Button(placeholder, text="Retry", command=attempt).pack()
+
+            # The server's address, to fix it if it's changed.
+            row = ttk.Frame(placeholder)
+            row.pack(pady=(24, 0))
+            ttk.Label(row, text="Server address:").pack(side="left", padx=(0, 6))
+            address_var = tk.StringVar(value=host)
+            entry = ttk.Entry(row, textvariable=address_var, width=28)
+            entry.pack(side="left")
+
+            def stop_auto_retry(_event=None) -> None:
+                # Editing the address: don't wipe it with a retry.
+                nonlocal retry_after_id
+                if retry_after_id is not None:
+                    placeholder.after_cancel(retry_after_id)
+                    retry_after_id = None
+
+            def connect_to_address(_event=None) -> None:
+                nonlocal host
+                new = _clean_host(address_var.get())
+                if not new:
+                    return
+                if new != host:
+                    _rename_known_remote(app_state, host, new)
+                    host = new
+                attempt()
+
+            entry.bind("<Key>", stop_auto_retry)
+            entry.bind("<Return>", connect_to_address)
+            ttk.Button(row, text="Connect", command=connect_to_address).pack(side="left", padx=(6, 0))
+            ttk.Label(placeholder, text="e.g. macmini.lan or 192.168.1.200", foreground="#666666").pack(pady=(4, 0))
             retry_after_id = placeholder.after(_RETRY_INTERVAL_MS, attempt)
 
-        connect_async(root, app_state, host, port, token, on_done=on_done, on_error=on_error, on_pending=on_pending)
+        connect_async(root, app_state, host, port, _known_token(app_state, host) or token,
+                      on_done=on_done, on_error=on_error, on_pending=on_pending)
 
     attempt()
+
+
+def _clean_host(text: str) -> str:
+    """What's typed as a server address, as a bare host: no scheme, path
+    or port (every takeloom server is on the same port)."""
+    text = text.strip()
+    if "://" in text:
+        text = text.split("://", 1)[1]
+    text = text.split("/", 1)[0]
+    if text.count(":") == 1:  # host:port (not an IPv6 address)
+        text = text.split(":", 1)[0]
+    return text
+
+
+def _known_token(app_state: AppState, host: str) -> str:
+    try:
+        config = app_state.local_backend.get_config()
+    except BackendError:
+        return ""
+    remote = next((r for r in config.known_remotes if r.host == host), None)
+    return remote.token if remote else ""
+
+
+def _rename_known_remote(app_state: AppState, old: str, new: str) -> None:
+    """The saved remote at `old` is at `new` now: move it there, keeping its
+    token (it's the same server under a new name; if it isn't, the server
+    just asks to pair again), label, and "always connect". Merged into an
+    entry `new` already has, if there is one."""
+    backend = app_state.local_backend
+    try:
+        config = backend.get_config()
+    except BackendError:
+        return
+    entry = next((r for r in config.known_remotes if r.host == old), None)
+    if entry is None:
+        return
+    existing = next((r for r in config.known_remotes if r.host == new), None)
+    if existing is None:
+        entry.host = new
+    else:
+        existing.token = existing.token or entry.token
+        existing.label = existing.label or entry.label
+        existing.always_connect = existing.always_connect or entry.always_connect
+        config.known_remotes.remove(entry)
+    try:
+        backend.save_config(config)
+    except BackendError:
+        pass
 
 
 def _run_always_remote(root: tk.Misc, app_state: AppState, host: str, port: int, token: str) -> None:
