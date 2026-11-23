@@ -169,6 +169,10 @@ class PhoneCameraHub:
         # (full_preview.py), per device_id, across reconnects.
         self._video_taps: dict[str, list[VideoSink]] = {}
         self._pending_ips: set[str] = set()
+        # device_id -> time.monotonic() it was last left with no connection
+        # (gone from _cameras): how long a phone's really been away, not
+        # just between one connection and the next.
+        self._disconnected_at: dict[str, float] = {}
         # Both keyed by (session_id, device_id): every connected phone
         # records each session (see backend.py's session_cameras).
         self._uploads: dict[tuple[str, str], _ExpectedUpload] = {}
@@ -355,6 +359,9 @@ class PhoneCameraHub:
                     return None
                 now = time.monotonic()
                 connected = up.device_id in self._cameras
+                # Away for the whole idle_timeout, not just at this moment:
+                # a phone reconnecting is briefly in neither connection.
+                away_for = 0.0 if connected else now - self._disconnected_at.get(up.device_id, start)
                 if up.to_vault and now - last_poll >= _VAULT_POLL_S:
                     last_poll = now
                     self._cond.release()
@@ -372,7 +379,7 @@ class PhoneCameraHub:
                         up.size = int(progress.get("size") or up.size or 0)
                 if now - start > max_wait:
                     return None
-                if now - up.last_progress > idle_timeout and not connected:
+                if now - up.last_progress > idle_timeout and away_for > idle_timeout:
                     return None
                 if up.to_vault and now - up.last_progress > _VAULT_IDLE_TIMEOUT_S:
                     on_progress(f"{label} has sent nothing to the vault for {_VAULT_IDLE_TIMEOUT_S / 60:.0f} minutes.")
@@ -411,6 +418,7 @@ class PhoneCameraHub:
         with self._lock:
             old = self._cameras.get(conn.info.device_id)
             self._cameras[conn.info.device_id] = conn
+            self._disconnected_at.pop(conn.info.device_id, None)
             self._cond.notify_all()
         if old is not None and old is not conn:
             old.replaced = True
@@ -421,6 +429,7 @@ class PhoneCameraHub:
         with self._lock:
             if self._cameras.get(conn.info.device_id) is conn:
                 del self._cameras[conn.info.device_id]
+                self._disconnected_at[conn.info.device_id] = time.monotonic()
             self._cond.notify_all()
         self._on_change()
 
