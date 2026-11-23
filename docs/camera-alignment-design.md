@@ -1,7 +1,7 @@
 # Design: phone cameras, lined up whenever their recordings arrive
 
-Status: stage 1 built (behind `config.camera_sources`, off until stage 3);
-stages 2-5 not yet. Replaces the "process the session, wait for
+Status: stages 1-2 built (behind `config.camera_sources`, off until stage 3;
+the vault side in takeloom-vault 0.13); stages 3-5 not yet. Replaces the "process the session, wait for
 the phones' uploads, repair whatever arrives afterwards" model with one
 where a camera recording is lined up whenever it arrives, every derived
 file is made on demand, and the vault simply shows what each session has.

@@ -49,15 +49,23 @@ class UploadConflict(Exception):
 
 
 class CameraUploads:
-    def __init__(self, vault: Vault) -> None:
+    """`in_session`: uploads go straight into the session's own folder
+    (sessions/<session>/<file>, its .part and .size beside it) rather than
+    camera_uploads/ — for sessions whose cameras are sources (align.py),
+    which nothing has to move them out of later."""
+
+    def __init__(self, vault: Vault, in_session: bool = False) -> None:
         self.vault = vault
+        self.in_session = in_session
         self._lock = threading.Lock()
         self._busy: set[Path] = set()
 
     def path(self, session: str, file: str) -> Path:
         if not _FILE.fullmatch(file) or ".." in file or len(file) > 200:
             raise VaultPathError(f"Not a camera recording's file name: {file!r}")
-        self.vault.session_dir(session)  # the same check a session name gets
+        directory = self.vault.session_dir(session)  # the same check a session name gets
+        if self.in_session:
+            return directory / file
         return self.vault.resolve(f"{DIR}/{session}/{file}")
 
     def status(self, session: str, file: str) -> dict:

@@ -186,6 +186,8 @@ class PhoneCameraHub:
         self._late_upload_target: Callable[[str, str], tuple[Path, str] | None] = lambda _s, _d: None
         self._on_late_upload: Callable[[str, str], None] = lambda _s, _d: None
         self._upload_redirect: Callable[[str, str, str, str], dict | None] = lambda _s, _d, _f, _t: None
+        self._sources_upload_target: Callable[[str, str], tuple[Path, str] | None] = lambda _s, _d: None
+        self._on_upload_complete: Callable[[str, str, Path, str], None] = lambda _s, _d, _p, _f: None
         self._vault_progress: Callable[[str, str], dict | None] = lambda _s, _f: None
         self._tcp_server: _ThreadingTCPServer | None = None
 
@@ -225,6 +227,8 @@ class PhoneCameraHub:
         on_late_upload: Callable[[str, str], None] = lambda _s, _d: None,
         upload_redirect: Callable[[str, str, str, str], dict | None] = lambda _s, _d, _f, _t: None,
         vault_progress: Callable[[str, str], dict | None] = lambda _s, _f: None,
+        sources_upload_target: Callable[[str, str], tuple[Path, str] | None] = lambda _s, _d: None,
+        on_upload_complete: Callable[[str, str, Path, str], None] = lambda _s, _d, _p, _f: None,
     ) -> None:
         self._on_preview = on_preview
         self._on_change = on_change
@@ -248,6 +252,14 @@ class PhoneCameraHub:
         # the vault's {"received", "size", "done"} (None: couldn't ask).
         self._upload_redirect = upload_redirect
         self._vault_progress = vault_progress
+        # Cameras as sources (phone_camera/sources.py): (session_id,
+        # device_id) -> (directory, file name) to take a phone's recording
+        # into for any session this server knows, processed or not, here or
+        # only in the vault — or None to go by the older rules below. Then
+        # on_upload_complete(session_id, device_id, directory, file name)
+        # once one has come in here in full.
+        self._sources_upload_target = sources_upload_target
+        self._on_upload_complete = on_upload_complete
 
     def log(self, message: str) -> None:
         self._log(message)
@@ -449,6 +461,17 @@ class PhoneCameraHub:
             up = self._uploads.get((session_id, device_id))
             if up is not None:
                 return up
+        try:
+            target = self._sources_upload_target(session_id, device_id)
+        except Exception as e:  # noqa: BLE001 — e.g. the vault unreachable: refuse for now
+            self._log(f"Couldn't check where a Takeloom Camera recording of {session_id} goes: {e}")
+            return None
+        if target is not None:
+            directory, file_name = target
+            with self._lock:
+                return self._uploads.setdefault(
+                    (session_id, device_id), _ExpectedUpload(session_id, directory, device_id, file_name),
+                )
         session_dir = self._session_dir_resolver(session_id)
         data = None
         if session_dir is not None:
@@ -808,6 +831,8 @@ class _Handler(socketserver.BaseRequestHandler):
             hub._cond.notify_all()
         self._send({"kind": "upload_done", "ok": True})
         hub._log(f"Takeloom Camera recording for {session_id} received in full")
+        threading.Thread(target=hub._on_upload_complete, args=(session_id, device_id, up.session_dir, up.file_name),
+                         name="camera-upload-complete", daemon=True).start()
         if up.late:
             hub.forget_upload(session_id, device_id)
             threading.Thread(target=hub._on_late_upload, args=(session_id, device_id),
@@ -820,6 +845,9 @@ class _Handler(socketserver.BaseRequestHandler):
         hub = self._hub
         if up.vault_given_up:
             return False
+        # Written first: the backend may send it on to the vault with the
+        # redirect (a session that's only there now).
+        meta_path.write_text(json.dumps(begin.get("metadata") or {}, indent=2))
         # How far the vault's copy is, to tell next time whether anything
         # got through in between (asking again = the last try ended).
         try:
@@ -847,7 +875,6 @@ class _Handler(socketserver.BaseRequestHandler):
             target = None
         if not target:
             return False
-        meta_path.write_text(json.dumps(begin.get("metadata") or {}, indent=2))
         with hub._lock:
             if not up.to_vault:
                 up.last_progress = time.monotonic()

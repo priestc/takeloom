@@ -373,6 +373,19 @@ class VaultClient:
     def camera_upload_url(self, session_dir_name: str, file_name: str) -> str:
         return f"{self.url}/api/camera-uploads/{quote(session_dir_name, safe='')}/{quote(file_name, safe='')}"
 
+    def session_camera_url(self, session_dir_name: str, file_name: str) -> str:
+        """Where a phone uploads its recording of a session whose cameras are
+        sources: straight into the session's folder (the vault's align.py)."""
+        return f"{self.url}{self._session_camera_path(session_dir_name, file_name)}"
+
+    def _session_camera_path(self, session_dir_name: str, file_name: str) -> str:
+        return f"/api/sessions/{quote(session_dir_name, safe='')}/camera/{quote(file_name, safe='')}"
+
+    def session_camera_status(self, session_dir_name: str, file_name: str) -> dict:
+        """{"received", "size", "done"} of a recording uploading into its
+        session's folder. Raises VaultError."""
+        return self._json("GET", self._session_camera_path(session_dir_name, file_name))
+
     def _camera_upload_path(self, session_dir_name: str, file_name: str) -> str:
         return f"/api/camera-uploads/{quote(session_dir_name, safe='')}/{quote(file_name, safe='')}"
 

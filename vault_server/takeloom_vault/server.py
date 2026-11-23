@@ -69,6 +69,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import web
+from .align import Aligner, merge_sources
 from .auth import Auth, PairedClient
 from .camera_uploads import CameraUploads, UploadConflict
 from .edit import EditRenderer
@@ -130,6 +131,8 @@ class VaultHTTPServer(ThreadingHTTPServer):
         self.editor = editor
         self.publisher = publisher
         self.camera_uploads = CameraUploads(vault)
+        self.session_cameras = CameraUploads(vault, in_session=True)
+        self.aligner = Aligner(vault, log)
         super().__init__(address, _Handler)
 
 
@@ -331,7 +334,7 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/ping" and method == "GET":
             return self._json({"ok": True, "hostname": socket.gethostname(), "client": label,
                                "encode": self.server.renderer.available, "version": _version(),
-                               "camera_uploads": True})
+                               "camera_uploads": True, "camera_sources": True})
         if path == "/clients" and method == "GET":
             return self._json({"clients": [
                 {"id": c.id, "label": c.label, "key": c.key, "last_seen_at": c.last_seen_at}
@@ -352,6 +355,10 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json({})
         if m := re.fullmatch(r"/camera-uploads/([^/]+)/([^/]+?)(/probe|/audio)?", path):
             return self._camera_upload(method, m.group(1), m.group(2), m.group(3) or "", label)
+        if m := re.fullmatch(r"/sessions/([^/]+)/camera/([^/]+)", path):
+            # A phone's recording, straight into its session's folder
+            # (cameras as sources: align.py lines it up once it's in).
+            return self._camera_upload(method, m.group(1), m.group(2), "", label, in_session=True)
         if path == "/sessions" and method == "GET":
             return self._json({"sessions": vault.all_session_logs()})
         if m := re.fullmatch(r"/sessions/([^/]+)/log", path):
@@ -363,7 +370,9 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(data)
             if method == "PUT":
                 try:
-                    vault.write_session_log(name, self._read_json())
+                    with self.server.aligner.lock:
+                        vault.write_session_log(name, merge_sources(self._read_json(), vault.read_session_log(name)))
+                    self.server.aligner.enqueue(name)
                 except FileNotFoundError:
                     raise _HTTPError(HTTPStatus.NOT_FOUND, f"No session named {name!r}") from None
                 log(f"{label} ({self.ip}) updated sessions/{name}/session_log.json")
@@ -403,8 +412,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     # --- a phone's recording, uploaded here directly ---
 
-    def _camera_upload(self, method: str, session: str, file: str, what: str, label: str) -> None:
-        uploads = self.server.camera_uploads
+    def _camera_upload(self, method: str, session: str, file: str, what: str, label: str,
+                       in_session: bool = False) -> None:
+        uploads = self.server.session_cameras if in_session else self.server.camera_uploads
         if method in ("GET", "HEAD") and not what:
             return self._json(uploads.status(session, file))
         if method == "GET" and what == "/probe":
@@ -447,8 +457,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self.close_connection = True
                 raise _HTTPError(HTTPStatus.UNPROCESSABLE_ENTITY, str(e)) from e
             if status["done"]:
-                log(f"{label} ({self.ip}) uploaded its recording camera_uploads/{session}/{file} "
-                    f"({status['size']:,} bytes)")
+                where = f"sessions/{session}" if in_session else f"camera_uploads/{session}"
+                log(f"{label} ({self.ip}) uploaded its recording {where}/{file} ({status['size']:,} bytes)")
+                if in_session:
+                    self.server.aligner.arrived(session, file)
             return self._json(status)
         raise _HTTPError(HTTPStatus.METHOD_NOT_ALLOWED, "Method not allowed")
 
@@ -462,6 +474,8 @@ class _Handler(BaseHTTPRequestHandler):
         if not re.fullmatch(r"[0-9a-fA-F]{64}", expected):
             raise _HTTPError(HTTPStatus.BAD_REQUEST, "X-Content-SHA256 header (hex SHA-256 of the body) required")
         self.server.vault.resolve(relative)  # refuse a bad path before reading anything
+        session_log = re.fullmatch(r"sessions/([^/]+)/session_log\.json", relative)
+        previous = self.server.vault.read_session_log(session_log.group(1)) if session_log else None
         self._body_read = True
         try:
             result = self.server.vault.receive_file(relative, self.rfile, int(length_header), expected)
@@ -472,9 +486,21 @@ class _Handler(BaseHTTPRequestHandler):
             raise _HTTPError(HTTPStatus.UNPROCESSABLE_ENTITY, str(e)) from e
         log(f"{label} ({self.ip}) uploaded {relative} ({result['size']:,} bytes)")
         # session_log.json is the last file of a session's upload: if it
-        # left its videos to be encoded here, start on them.
-        if m := re.fullmatch(r"sessions/([^/]+)/session_log\.json", relative):
-            self.server.renderer.enqueue(m.group(1))
+        # left its videos to be encoded here, start on them; and line up
+        # any camera recordings already here, keeping what this vault has
+        # done with them since the studio machine's copy was written.
+        if session_log:
+            name = session_log.group(1)
+            if previous is not None:
+                with self.server.aligner.lock:
+                    merged = merge_sources(self.server.vault.read_session_log(name) or {}, previous)
+                    self.server.vault.write_session_log(name, merged)
+            self.server.renderer.enqueue(name)
+            self.server.aligner.enqueue(name)
+        elif m := re.fullmatch(r"sessions/([^/]+)/([^/]+\.mp4)", relative):
+            # Maybe a phone's recording, sent on by the studio machine (an
+            # app that uploaded there): the same as one arriving directly.
+            self.server.aligner.arrived(m.group(1), m.group(2))
         self._json(result)
 
     def _edit_fill(self, name: str) -> dict:
@@ -557,6 +583,7 @@ def serve(vault: Vault, auth: Auth, take_videos: TakeVideoCache, host: str, port
     renderer.start()
     editor = EditRenderer(vault, log, renderer.available)
     httpd = VaultHTTPServer((host, port), vault, auth, take_videos, renderer, editor, Publisher(vault, log, editor))
+    httpd.aligner.start()
     log(f"takeloom-vault serving {vault.root} on http://{socket.gethostname()}:{port} (pid {os.getpid()})")
     try:
         httpd.serve_forever()

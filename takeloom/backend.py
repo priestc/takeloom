@@ -2328,7 +2328,108 @@ class LocalBackend(Backend):
             on_late_upload=self._on_late_upload,
             upload_redirect=self._camera_upload_redirect,
             vault_progress=self._camera_upload_progress,
+            sources_upload_target=self._sources_upload_target,
+            on_upload_complete=self._on_camera_recording_here,
         )
+
+    # --- cameras as sources (phone_camera/sources.py; config.camera_sources) ---
+
+    @staticmethod
+    def _phone_entry(data: dict, device_id: str) -> dict | None:
+        return next((c for c in data.get("extra_cameras") or []
+                     if (c.get("phone_camera") or {}).get("device_id") == device_id and c.get("upload_file")), None)
+
+    def _sources_upload_target(self, session_id: str, device_id: str) -> tuple[Path, str] | None:
+        """PhoneCameraHub's sources_upload_target: with cameras as sources,
+        a phone's recording is welcome for any session this server knows,
+        at any time. Into its session's folder here if that's still here
+        (sent on to the vault with the session, or straight there by the
+        redirect); else, for a session only in the vault, a folder here
+        that only ever holds its metadata (it goes straight to the vault)."""
+        config = self.get_config()
+        if not config.camera_sources:
+            return None
+        local = self._local_session_dir_path(session_id)
+        if local is not None:
+            try:
+                data = json.loads((local / "session_log.json").read_text())
+            except (OSError, ValueError):
+                return None
+            entry = self._phone_entry(data, device_id)
+            return (local, entry["upload_file"]) if entry else None
+        from .vault import remote_vault
+        client = remote_vault(config)
+        data = client.fetch_session_log(session_id) if client is not None else None
+        if not data or not data.get("camera_sources"):
+            return None
+        entry = self._phone_entry(data, device_id)
+        if entry is None:
+            return None
+        directory = self._late_uploads_root(config) / session_id
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory, entry["upload_file"]
+
+    def _sources_route(self):
+        """The VaultClient phones upload into session folders of, or None."""
+        from .vault import remote_vault
+        client = remote_vault(self.get_config())
+        if client is None:
+            return None
+        try:
+            return client if client.ping().get("camera_sources") else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _on_camera_recording_here(self, session_id: str, device_id: str, directory: Path, file_name: str) -> None:
+        """A phone's recording came in here in full (an app without HTTP
+        uploads, or no remote vault). With cameras as sources: for a session
+        that's been processed, line it up now (and its live feed goes); for
+        one only in the vault, send it there, where it's lined up."""
+        config = self.get_config()
+        if not config.camera_sources:
+            return
+        log = lambda msg: self._emit("vault_status", {"status": msg})  # noqa: E731
+        local = self._local_session_dir_path(session_id)
+        if local is not None and local == directory:
+            log_path = local / "session_log.json"
+            try:
+                data = json.loads(log_path.read_text())
+            except (OSError, ValueError):
+                return
+            if not data.get("camera_sources"):
+                return  # not processed yet: processing lines it up
+            from .phone_camera.sources import phone_source
+            from .processing.splicer import MIX_REFERENCE
+            entry = self._phone_entry(data, device_id)
+            if entry is None:
+                return
+            mix = local / MIX_REFERENCE if (local / MIX_REFERENCE).exists() else local / "session_mix.flac"
+            source = phone_source(entry, local, data, mix)
+            entry["sources"] = [source] + [s for s in entry.get("sources") or [] if s.get("kind") not in ("phone", "live")]
+            if entry.get("file"):
+                (local / entry["file"]).unlink(missing_ok=True)  # its live feed: superseded
+            atomic_write_text(log_path, json.dumps(data, indent=2))
+            log(f"{entry.get('label') or file_name} of {session_id}: {source['state']}"
+                + (f" by {source['align']['method']}" if source.get("align") else ""))
+            return
+        # Only in the vault: send it there (with its metadata); the vault
+        # lines it up the moment it's in.
+        from .phone_camera.hub import upload_paths
+        from .vault import remote_vault
+        client = remote_vault(config)
+        uploaded, _part, meta_path = upload_paths(directory, file_name)
+        if client is None or not uploaded.exists():
+            return
+        try:
+            if meta_path.exists():
+                client.upload_file(meta_path, f"sessions/{session_id}/{meta_path.name}")
+            client.upload_file(uploaded, f"sessions/{session_id}/{file_name}")
+        except Exception as e:  # noqa: BLE001 — kept here; the upload retry loop doesn't know it, so say so
+            log(f"Couldn't send {file_name} of {session_id} to the vault ({e}); it's kept in {directory}")
+            return
+        uploaded.unlink(missing_ok=True)
+        meta_path.unlink(missing_ok=True)
+        log(f"Sent {file_name} of {session_id} to the vault, which lines it up")
 
     # --- phone recordings uploaded straight to the remote vault ---
 
@@ -2351,7 +2452,8 @@ class LocalBackend(Backend):
         here. The token is the phone's own, which this server vouches for
         (vault.py's vault_access_for) — pairing with this server is all a
         phone ever has to do."""
-        client = self._camera_upload_route(session_id)
+        sources = self.get_config().camera_sources
+        client = self._sources_route() if sources else self._camera_upload_route(session_id)
         if client is None:
             return None
         from .vault import vault_access_for
@@ -2359,14 +2461,32 @@ class LocalBackend(Backend):
         access = vault_access_for(self.get_config(), phone_token, self.save_config, log=log)
         if access is None:
             return None
-        return {"url": _by_ip_address(client.camera_upload_url(session_id, file_name)), "token": access["token"]}
+        if sources:
+            # Its metadata goes to the vault now too: the session may have
+            # gone there already (it's what lining the recording up uses).
+            from .phone_camera.hub import upload_paths
+            local = self._local_session_dir_path(session_id)
+            directory = local if local is not None else self._late_uploads_root(self.get_config()) / session_id
+            meta_path = upload_paths(directory, file_name)[2]
+            if meta_path.exists():
+                try:
+                    client.upload_file(meta_path, f"sessions/{session_id}/{meta_path.name}")
+                except Exception as e:  # noqa: BLE001
+                    log(f"Couldn't send {meta_path.name} to the vault: {e}")
+            url = client.session_camera_url(session_id, file_name)
+        else:
+            url = client.camera_upload_url(session_id, file_name)
+        return {"url": _by_ip_address(url), "token": access["token"]}
 
     def _camera_upload_progress(self, session_id: str, file_name: str) -> dict | None:
-        client = self._camera_upload_route(session_id)
+        sources = self.get_config().camera_sources
+        client = self._sources_route() if sources else self._camera_upload_route(session_id)
         if client is None:
             return None
         from .vault_client import VaultError
         try:
+            if sources:
+                return client.session_camera_status(session_id, file_name)
             return client.camera_upload_status(session_id, file_name)
         except VaultError:
             return None

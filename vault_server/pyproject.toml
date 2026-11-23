@@ -4,13 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "takeloom-vault"
-version = "0.12.1"
+version = "0.13.0"
 description = "Takeloom Studio Vault server: stores recorded sessions and serves a web browser/player for them"
 requires-python = ">=3.9"
-# Deliberately stdlib-only: this runs headless on the storage box (tank2),
-# which has none of takeloom's audio/video/Stream Deck stack — and doesn't
-# need it. Keep it that way so `pipx install` there never needs a compiler.
-dependencies = []
+# Light on purpose: this runs headless on the storage box (tank2), which
+# has none of takeloom's audio/video/Stream Deck stack — and doesn't need
+# it. numpy, for lining up camera recordings (align.py), is the one
+# exception: a prebuilt wheel, so `pipx install` still never needs a compiler.
+dependencies = ["numpy"]
 
 [project.scripts]
 takeloom-vault = "takeloom_vault.__main__:main"
