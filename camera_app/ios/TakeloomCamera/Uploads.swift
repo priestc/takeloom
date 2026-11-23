@@ -58,6 +58,12 @@ enum RecordingStore {
 /// Sends pending recordings one at a time over their own connection (so the
 /// live feed and clock pings never queue behind gigabytes), resuming from
 /// whatever the server already has after a drop.
+///
+/// The server may instead point a recording at its remote vault
+/// ("upload_redirect": a URL and a vault token it got for this phone, so
+/// pairing with the server is all this ever needs): it then goes there over
+/// HTTP, a chunk per PUT, resuming from whatever the vault already has.
+/// Every attempt asks the server first, so it always decides where.
 final class Uploader {
     private let queue = DispatchQueue(label: "uploader")
     var onProgress: ((String?) -> Void)?
@@ -109,6 +115,7 @@ final class Uploader {
             connection.close()
             done(retry)
         }
+        var redirected = false
         var sent: Int64 = 0
 
         func sendChunks() {
@@ -126,7 +133,7 @@ final class Uploader {
             }
         }
 
-        connection.onClose = { _ in finish(true) }
+        connection.onClose = { _ in if !redirected { finish(true) } }
         connection.onFrame = { type, data in
             guard type == .json, let message = decodeJSON(data), let kind = message["kind"] as? String else { return }
             switch kind {
@@ -147,6 +154,22 @@ final class Uploader {
                 sent = offset
                 do { try file.seek(toOffset: UInt64(offset)) } catch { finish(true); return }
                 sendChunks()
+            case "upload_redirect":
+                guard let target = (message["url"] as? String).flatMap(URL.init(string:)),
+                      let token = message["token"] as? String else { finish(true); return }
+                redirected = true
+                connection.close()
+                let chunk = Int(int64(message["chunk_size"]) ?? 8 * 1024 * 1024)
+                DispatchQueue.global(qos: .utility).async {
+                    let retry = self.uploadToVault(recording, file: file, size: size, url: target,
+                                                   token: token, chunkSize: chunk)
+                    self.queue.async {
+                        guard !finished else { return }
+                        finished = true
+                        try? file.close()
+                        done(retry)
+                    }
+                }
             case "upload_rejected":
                 var updated = recording
                 updated.rejected = message["error"] as? String ?? "Rejected by the server."
@@ -168,7 +191,66 @@ final class Uploader {
                 "kind": "hello", "role": "upload", "token": Settings.token(for: recording.host),
                 "client_name": Settings.deviceName, "device_id": Settings.deviceID,
                 "platform": "ios", "app_version": Settings.appVersion, "device_model": Settings.deviceModel,
+                "http_upload": true,
             ])
         }
+    }
+
+    /// The recording to the vault at `url` (see the class comment), from
+    /// wherever the vault's copy is up to. Blocking — runs off the uploader
+    /// queue. Returns true to try again later (through the server), false
+    /// once the vault has all of it (and it's deleted here).
+    private func uploadToVault(_ recording: PendingRecording, file: FileHandle, size: Int64, url: URL,
+                               token: String, chunkSize: Int) -> Bool {
+        guard let status = vaultRequest(url, method: "GET", token: token, body: nil) else { return true }
+        var offset = int64(status.json["received"]) ?? 0
+        if let theirs = int64(status.json["size"]), theirs != size { offset = 0 }
+        if status.json["done"] as? Bool == true {
+            RecordingStore.remove(recording.sessionID)
+            return false
+        }
+        while true {
+            do { try file.seek(toOffset: UInt64(offset)) } catch { return true }
+            guard let chunk = try? file.read(upToCount: chunkSize), !chunk.isEmpty else { return true }
+            var parts = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+            parts.queryItems = [URLQueryItem(name: "offset", value: String(offset)),
+                                URLQueryItem(name: "size", value: String(size))]
+            guard let reply = vaultRequest(parts.url!, method: "PUT", token: token, body: chunk) else { return true }
+            if reply.code == 409 {
+                offset = int64(reply.json["received"]) ?? 0  // the vault says where it's up to
+                continue
+            }
+            guard reply.code == 200 else { return true }
+            if reply.json["done"] as? Bool == true {
+                onProgress?("Uploaded \(recording.sessionID) to the vault")
+                RecordingStore.remove(recording.sessionID)
+                return false
+            }
+            offset = int64(reply.json["received"]) ?? (offset + Int64(chunk.count))
+            let pct = Int(100 * Double(offset) / Double(max(size, 1)))
+            onProgress?("Uploading \(recording.sessionID) to the vault: \(pct)%")
+        }
+    }
+
+    /// One HTTP request, waited for: (status code, JSON body), or nil if it
+    /// never got an answer (or a 401/5xx: try again later, via the server).
+    private func vaultRequest(_ url: URL, method: String, token: String, body: Data?) -> (code: Int, json: [String: Any])? {
+        var request = URLRequest(url: url, timeoutInterval: 120)
+        request.httpMethod = method
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if let body {
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+            request.httpBody = body
+        }
+        let done = DispatchSemaphore(value: 0)
+        var result: (code: Int, json: [String: Any])?
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            defer { done.signal() }
+            guard error == nil, let http = response as? HTTPURLResponse else { return }
+            let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+            if http.statusCode == 200 || http.statusCode == 409 { result = (http.statusCode, json) }
+        }.resume()
+        done.wait()
+        return result
     }
 }

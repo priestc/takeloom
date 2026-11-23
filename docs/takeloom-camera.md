@@ -103,6 +103,28 @@ The measured offset goes into `session_log.json` as `video_offset_ms`. The
 `video_latency_compensation_ms` for this session. If the mic heard nothing
 usable, the clock estimate is used instead.
 
+### Uploading straight to the vault
+
+When the remote vault makes the session videos (Studio Setup: "Remote
+only" storage, "Encode session videos on: Vault server", takeloom-vault
+0.11+), the phones' recordings never pass through the Mac Mini. A phone
+asks the server where to upload, as always, and is pointed at the vault
+(`upload_redirect` in protocol.py), with a vault token the server got for
+it. The upload goes there over HTTP in resumable 8 MB chunks. The server
+follows its progress on the vault, then lines it up from a small extract
+of its sound the vault sends (mono 8 kHz, about 115 MB an hour), just as it
+would a local file. It leaves the file work to the vault as render jobs
+that run before the encodes: rescaling the video for drift, and cutting
+the mic track. Older apps (before 1.6) still upload to the server.
+
+The phone pairs only with the server. Everything paired with the server,
+phones and remote-control laptops alike, gets its own vault token through
+the server's own pairing with the vault, shown under it on the vault's
+Paired devices page. Revoking the server there revokes them all, and a
+client no longer authorized on the server loses its token within minutes.
+A remote laptop uses its token to fetch take audio and videos straight
+from the vault, when it can reach it.
+
 If the upload never arrives (phone died, app killed), the session uses the
 live feed the server recorded, aligned by clock sync alone. That video may
 have gaps wherever Wi-Fi dropped frames. Recordings that haven't uploaded

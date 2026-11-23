@@ -219,6 +219,11 @@ class AuthorizedClient:
     last_ip: str = ""
     authorized_at: str = ""  # ISO timestamp
     last_seen_at: str = ""
+    # Its own token for the remote vault, which this machine vouched for
+    # (vault.py's vault_access_for): pairing with this server is enough to
+    # reach the vault too. For the vault at vault_url; "" until first needed.
+    vault_url: str = ""
+    vault_token: str = ""
 
 
 LOCAL_CAMERA_PREFIX = "local:"

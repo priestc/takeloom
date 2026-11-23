@@ -12,7 +12,9 @@ with attach_phone_camera_hub(). The backend uses it to:
   via set_video_sink) and tell the phone to start/stop its own full-
   quality recording;
 - wait for that recording's upload before processing the session
-  (expect_upload / wait_for_upload).
+  (expect_upload / wait_for_upload) — or, when the remote vault makes the
+  session's videos, point the phone at the vault to upload it there
+  directly (set_callbacks' upload_redirect) and follow its progress there.
 
 Every connection runs on its own thread, like RemoteServer's. Auth is the
 same LAN-only pairing flow, sharing RemoteServer's token list
@@ -115,6 +117,18 @@ class _ExpectedUpload:
     # set_callbacks' late_upload_target): nothing waits on it — the
     # backend is told once it's in (on_late_upload).
     late: bool = False
+    # Going straight to the remote vault (set_callbacks' upload_redirect):
+    # its progress is the vault's (vault_progress), not this machine's.
+    to_vault: bool = False
+
+
+# How big each chunk of an upload straight to the vault is (one HTTP PUT).
+VAULT_CHUNK_BYTES = 8 * 1024 * 1024
+# How long a phone that's connected but sending nothing to the vault is
+# waited for (it may be failing to reach it), and how often the vault is
+# asked how far its upload is.
+_VAULT_IDLE_TIMEOUT_S = 600.0
+_VAULT_POLL_S = 5.0
 
 
 # Status fields the backend reacts to: whether a phone's live feed can
@@ -159,6 +173,8 @@ class PhoneCameraHub:
         self._on_status: Callable[[str, dict], None] = lambda _device, _status: None
         self._late_upload_target: Callable[[str, str], tuple[Path, str] | None] = lambda _s, _d: None
         self._on_late_upload: Callable[[str, str], None] = lambda _s, _d: None
+        self._upload_redirect: Callable[[str, str, str, str], dict | None] = lambda _s, _d, _f, _t: None
+        self._vault_progress: Callable[[str, str], dict | None] = lambda _s, _f: None
         self._tcp_server: _ThreadingTCPServer | None = None
 
     # --- lifecycle ---
@@ -195,6 +211,8 @@ class PhoneCameraHub:
         on_status: Callable[[str, dict], None] = lambda _device, _status: None,
         late_upload_target: Callable[[str, str], tuple[Path, str] | None] = lambda _s, _d: None,
         on_late_upload: Callable[[str, str], None] = lambda _s, _d: None,
+        upload_redirect: Callable[[str, str, str, str], dict | None] = lambda _s, _d, _f, _t: None,
+        vault_progress: Callable[[str, str], dict | None] = lambda _s, _f: None,
     ) -> None:
         self._on_preview = on_preview
         self._on_change = on_change
@@ -211,6 +229,13 @@ class PhoneCameraHub:
         # anyway, or None to refuse it. Then on_late_upload once it's in.
         self._late_upload_target = late_upload_target
         self._on_late_upload = on_late_upload
+        # Where a phone that can upload over HTTP should send a session's
+        # recording instead of here: (session_id, device_id, file name,
+        # the phone's token here) -> {"url", "token"} on the remote vault,
+        # or None for here. Then vault_progress(session_id, file name) ->
+        # the vault's {"received", "size", "done"} (None: couldn't ask).
+        self._upload_redirect = upload_redirect
+        self._vault_progress = vault_progress
 
     def log(self, message: str) -> None:
         self._log(message)
@@ -309,6 +334,7 @@ class PhoneCameraHub:
         go to on_progress about every few seconds while waiting."""
         start = time.monotonic()
         last_report = 0.0
+        last_poll = 0.0
         with self._cond:
             up = self._uploads.get((session_id, device_id))
             if up is None:
@@ -321,15 +347,35 @@ class PhoneCameraHub:
                     return None
                 now = time.monotonic()
                 connected = up.device_id in self._cameras
+                if up.to_vault and now - last_poll >= _VAULT_POLL_S:
+                    last_poll = now
+                    self._cond.release()
+                    try:
+                        progress = self._vault_progress(session_id, up.file_name)
+                    finally:
+                        self._cond.acquire()
+                    if progress:
+                        if progress.get("done"):
+                            up.state = "done"
+                            continue
+                        received = int(progress.get("received") or 0)
+                        if received > up.received:
+                            up.received, up.last_progress = received, now
+                        up.size = int(progress.get("size") or up.size or 0)
                 if now - start > max_wait:
                     return None
                 if now - up.last_progress > idle_timeout and not connected:
+                    return None
+                if up.to_vault and now - up.last_progress > _VAULT_IDLE_TIMEOUT_S:
+                    on_progress(f"{label} has sent nothing to the vault for {_VAULT_IDLE_TIMEOUT_S / 60:.0f} minutes.")
                     return None
                 if now - last_report >= 3.0:
                     last_report = now
                     if up.state == "uploading" and up.size:
                         pct = 100.0 * up.received / up.size
-                        msg = f"Receiving {label} video: {pct:.0f}% of {up.size / 1e9:.2f} GB"
+                        where = " to the vault" if up.to_vault else ""
+                        msg = (f"{label} uploading its video{where}: {pct:.0f}% of {up.size / 1e9:.2f} GB"
+                               if up.to_vault else f"Receiving {label} video: {pct:.0f}% of {up.size / 1e9:.2f} GB")
                     elif connected:
                         msg = f"Waiting for {label} to upload its recording…"
                     else:
@@ -340,6 +386,11 @@ class PhoneCameraHub:
                     finally:
                         self._cond.acquire()
                 self._cond.wait(1.0)
+
+    def upload_went_to_vault(self, session_id: str, device_id: str) -> bool:
+        with self._lock:
+            up = self._uploads.get((session_id, device_id))
+            return up is not None and up.to_vault
 
     def forget_upload(self, session_id: str, device_id: str) -> None:
         with self._lock:
@@ -486,7 +537,7 @@ class _Handler(socketserver.BaseRequestHandler):
             if not device_id:
                 return
             if hello.get("role") == "upload":
-                self._handle_upload(sock, device_id)
+                self._handle_upload(sock, device_id, hello)
             else:
                 self._handle_camera(sock, hello, device_id, ip)
         except (OSError, ConnectionError, ProtocolError):
@@ -666,7 +717,7 @@ class _Handler(socketserver.BaseRequestHandler):
 
     # --- an upload connection ---
 
-    def _handle_upload(self, sock: socket.socket, device_id: str) -> None:
+    def _handle_upload(self, sock: socket.socket, device_id: str, hello: dict) -> None:
         hub = self._hub
         frame_type, payload = read_frame(sock)
         if frame_type != FRAME_JSON:
@@ -688,12 +739,15 @@ class _Handler(socketserver.BaseRequestHandler):
             return
 
         dest, part, meta_path = upload_paths(up.session_dir, up.file_name)
+        if hello.get("http_upload") and not up.late and self._redirect_to_vault(up, begin, hello, size, meta_path):
+            return
         offset = part.stat().st_size if part.exists() else 0
         if offset > size:
             part.unlink()
             offset = 0
         with hub._lock:
             up.state, up.size, up.received, up.last_progress = "uploading", size, offset, time.monotonic()
+            up.to_vault = False  # coming here after all (the vault couldn't take it this time)
             hub._cond.notify_all()
         meta_path.write_text(json.dumps(begin.get("metadata") or {}, indent=2))
         self._send({"kind": "upload_resume", "offset": offset})
@@ -735,6 +789,31 @@ class _Handler(socketserver.BaseRequestHandler):
             hub.forget_upload(session_id, device_id)
             threading.Thread(target=hub._on_late_upload, args=(session_id, device_id),
                              name="late-camera-upload", daemon=True).start()
+
+    def _redirect_to_vault(self, up: _ExpectedUpload, begin: dict, hello: dict, size: int, meta_path: Path) -> bool:
+        """Point the phone at the remote vault for this recording, if the
+        backend says so (set_callbacks' upload_redirect). The metadata
+        stays here, where the session's processing reads it."""
+        hub = self._hub
+        try:
+            target = hub._upload_redirect(up.session_id, up.device_id, up.file_name, str(hello.get("token") or ""))
+        except Exception as e:  # noqa: BLE001 — anything wrong: take it here instead
+            hub._log(f"Couldn't send a Takeloom Camera recording to the vault ({type(e).__name__}: {e}); "
+                     "taking it here instead")
+            target = None
+        if not target:
+            return False
+        meta_path.write_text(json.dumps(begin.get("metadata") or {}, indent=2))
+        with hub._lock:
+            if not up.to_vault:
+                up.last_progress = time.monotonic()
+            up.to_vault, up.state, up.size = True, "uploading", size
+            hub._cond.notify_all()
+        self._send({"kind": "upload_redirect", "url": target["url"], "token": target["token"],
+                    "chunk_size": VAULT_CHUNK_BYTES})
+        hub._log(f"Takeloom Camera recording for {up.session_id} from {up.device_id} "
+                 f"({size / 1e9:.2f} GB) is going straight to the vault")
+        return True
 
     def _expect_end_and_ack(self, sock: socket.socket, up: _ExpectedUpload) -> None:
         frame_type, payload = read_frame(sock)

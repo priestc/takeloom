@@ -83,6 +83,22 @@ multi-GB transfer never sits in front of the live feed or clock pings:
     phone -> server  FRAME_UPLOAD chunks from that offset, then {"kind": "upload_end"}
     server -> phone  {"kind": "upload_done", "ok": true} | {"kind": "upload_done", "ok": false, "error": "..."}
 
+An app that can upload over HTTP says so in its upload hello ("http_upload":
+true, Takeloom Camera 1.6+). When the remote vault makes the session's
+videos, the server may then answer upload_begin with
+
+    server -> phone  {"kind": "upload_redirect", "url": "http://<vault IP>:51824/api/camera-uploads/<session>/<file>",
+                      "token": "...", "chunk_size": n}
+
+and close: the phone uploads the file there instead (vault_server/
+takeloom_vault/camera_uploads.py), GET url for how much the vault already
+has, then PUT url?offset=<n>&size=<total> per chunk of up to chunk_size
+bytes (409 {"received"}: carry on from there), with "Authorization:
+Bearer <token>" — the phone's own vault token, which this server got for it
+(vault.py's vault_access_for), so pairing with the server is all a phone
+ever does. It deletes its copy once the vault says "done". Every retry asks
+the server again, so the server always decides where a recording goes.
+
 Same LAN-only pairing model as the remote protocol (takeloom/remote/
 protocol.py): tokens live in StudioConfig.remote_authorized_clients.
 """

@@ -5,9 +5,11 @@ API — every route except /api/pair* needs `Authorization: Bearer <token>`:
 
     POST   /api/pair                    {"client_name"} -> {"request_id", "code"}
     GET    /api/pair/<id>               -> {"status": "pending"|"approved"|"denied"|"expired", "token"?}
-    GET    /api/ping                    -> {"ok", "hostname", "client", "encode", "version"}
+    GET    /api/ping                    -> {"ok", "hostname", "client", "encode", "version",
+                                            "camera_uploads"}
                                            ("encode": this server makes session videos
-                                           from render_jobs.json — render.py)
+                                           from render_jobs.json — render.py;
+                                           "camera_uploads": phones can upload here directly)
     GET    /api/sessions                -> {"sessions": {name: session_log, ...}}
     GET    /api/sessions/<name>/log     -> session_log.json
     PUT    /api/sessions/<name>/log     <- session_log.json (existing session only)
@@ -22,6 +24,21 @@ API — every route except /api/pair* needs `Authorization: Bearer <token>`:
                                            ?legacy=0: never a legacy .flac take file itself
     PUT    /api/files/<vault path>      <- raw bytes, X-Content-SHA256 header required
     POST   /api/delete                  {"paths": [...]} -> {}
+    POST   /api/clients                 {"label", "key"} -> {"id", "token"}: a token for a device
+                                           the caller vouches for (auth.py's delegate) — takeloom's
+                                           studio server, for its phones and remote laptops
+    GET    /api/clients                 -> {"clients": [{"id", "label", "key", "last_seen_at"}]}:
+                                           the caller's delegated tokens
+    POST   /api/clients/<id>/revoke     -> {}: drop one of the caller's own delegated tokens
+    GET    /api/camera-uploads/<session>/<file>
+                                        -> {"received", "size", "done"}: a phone's recording,
+                                           uploaded here directly (camera_uploads.py)
+    PUT    /api/camera-uploads/<session>/<file>?offset=<n>&size=<total>
+                                        <- one chunk of it, at `offset` -> the same status;
+                                           409 {"error", "received"} if that's not where it's up to
+    GET    /api/camera-uploads/<session>/<file>/probe -> {"first_video_pts"}
+    GET    /api/camera-uploads/<session>/<file>/audio -> its sound, mono 8 kHz float32 (for
+                                           lining it up with the session: takeloom's sync.py)
     PUT    /api/youtube                 {"client_id", "client_secret", "refresh_token",
                                            "title_template", "description_template", "visibility"}
                                            -> {}: takeloom's YouTube account, for publishing
@@ -52,7 +69,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import web
-from .auth import Auth
+from .auth import Auth, PairedClient
+from .camera_uploads import CameraUploads, UploadConflict
 from .edit import EditRenderer
 from .render import Renderer
 from .youtube import Publisher
@@ -111,6 +129,7 @@ class VaultHTTPServer(ThreadingHTTPServer):
         self.renderer = renderer
         self.editor = editor
         self.publisher = publisher
+        self.camera_uploads = CameraUploads(vault)
         super().__init__(address, _Handler)
 
 
@@ -171,13 +190,13 @@ class _Handler(BaseHTTPRequestHandler):
             raise _HTTPError(HTTPStatus.BAD_REQUEST, "JSON body must be an object")
         return data
 
-    def _require_token(self) -> str:
+    def _require_token(self) -> PairedClient:
         header = self.headers.get("Authorization", "")
         token = header[7:].strip() if header.lower().startswith("bearer ") else ""
         client = self.server.auth.authenticate(token, self.ip)
         if client is None:
             raise _HTTPError(HTTPStatus.UNAUTHORIZED, "Missing or unrecognized vault token — pair this device first.")
-        return client.label
+        return client
 
     def _require_same_origin(self) -> None:
         """Browser form POSTs (approve/deny/revoke) have no token — the web
@@ -233,8 +252,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(auth.poll(m.group(1), self.ip))
 
         if path.startswith("/api/"):
-            label = self._require_token()
-            return self._route_api(method, path[len("/api"):], label)
+            client = self._require_token()
+            return self._route_api(method, path[len("/api"):], client)
 
         # Browser UI.
         if method == "POST":
@@ -300,11 +319,33 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(HTTPStatus.NO_CONTENT, b"", "image/x-icon")
         raise _HTTPError(HTTPStatus.NOT_FOUND, "Not found")
 
-    def _route_api(self, method: str, path: str, label: str) -> None:
+    def _route_api(self, method: str, path: str, client: PairedClient) -> None:
         vault = self.server.vault
+        label = client.label
         if path == "/ping" and method == "GET":
             return self._json({"ok": True, "hostname": socket.gethostname(), "client": label,
-                               "encode": self.server.renderer.available, "version": _version()})
+                               "encode": self.server.renderer.available, "version": _version(),
+                               "camera_uploads": True})
+        if path == "/clients" and method == "GET":
+            return self._json({"clients": [
+                {"id": c.id, "label": c.label, "key": c.key, "last_seen_at": c.last_seen_at}
+                for c in list(self.server.auth.clients) if c.parent == client.id
+            ]})
+        if path == "/clients" and method == "POST":
+            body = self._read_json()
+            try:
+                child, token = self.server.auth.delegate(
+                    client, str(body.get("label") or ""), str(body.get("key") or ""), self.ip)
+            except ValueError as e:
+                raise _HTTPError(HTTPStatus.FORBIDDEN, str(e)) from e
+            log(f"{label} ({self.ip}) vouched for {child.label}")
+            return self._json({"id": child.id, "token": token})
+        if (m := re.fullmatch(r"/clients/(\w+)/revoke", path)) and method == "POST":
+            if self.server.auth.revoke(m.group(1), parent=client.id):
+                log(f"{label} ({self.ip}) revoked its delegated client {m.group(1)}")
+            return self._json({})
+        if m := re.fullmatch(r"/camera-uploads/([^/]+)/([^/]+?)(/probe|/audio)?", path):
+            return self._camera_upload(method, m.group(1), m.group(2), m.group(3) or "", label)
         if path == "/sessions" and method == "GET":
             return self._json({"sessions": vault.all_session_logs()})
         if m := re.fullmatch(r"/sessions/([^/]+)/log", path):
@@ -353,6 +394,57 @@ class _Handler(BaseHTTPRequestHandler):
             log(f"{label} ({self.ip}) deleted: {', '.join(paths)}")
             return self._json({})
         raise _HTTPError(HTTPStatus.NOT_FOUND, f"No API route {method} /api{path}")
+
+    # --- a phone's recording, uploaded here directly ---
+
+    def _camera_upload(self, method: str, session: str, file: str, what: str, label: str) -> None:
+        uploads = self.server.camera_uploads
+        if method in ("GET", "HEAD") and not what:
+            return self._json(uploads.status(session, file))
+        if method == "GET" and what == "/probe":
+            try:
+                return self._json({"first_video_pts": uploads.first_video_pts(session, file)})
+            except FileNotFoundError as e:
+                raise _HTTPError(HTTPStatus.NOT_FOUND, str(e)) from e
+            except ValueError as e:
+                raise _HTTPError(HTTPStatus.UNPROCESSABLE_ENTITY, str(e)) from e
+        if method == "GET" and what == "/audio":
+            try:
+                audio = uploads.audio_for(session, file)
+            except FileNotFoundError as e:
+                raise _HTTPError(HTTPStatus.NOT_FOUND, str(e)) from e
+            except ValueError as e:
+                raise _HTTPError(HTTPStatus.UNPROCESSABLE_ENTITY, str(e)) from e
+            try:
+                return self._send_file(audio)
+            finally:
+                audio.unlink(missing_ok=True)
+        if method == "PUT" and not what:
+            query = parse_qs(urlsplit(self.path).query)
+            length_header = self.headers.get("Content-Length")
+            if length_header is None:
+                raise _HTTPError(HTTPStatus.LENGTH_REQUIRED, "Content-Length required")
+            try:
+                offset = int((query.get("offset") or [""])[0])
+                size = int((query.get("size") or [""])[0])
+            except ValueError:
+                raise _HTTPError(HTTPStatus.BAD_REQUEST, "?offset=<bytes>&size=<bytes> required") from None
+            uploads.path(session, file)  # refuse a bad name before reading anything
+            self._body_read = True
+            try:
+                status = uploads.append(session, file, offset, size, self.rfile, int(length_header))
+            except UploadConflict as e:
+                self._body_read = False  # not read: drained before answering
+                self._drain_unread_body()
+                return self._json({"error": str(e), "received": e.received}, HTTPStatus.CONFLICT)
+            except ValueError as e:
+                self.close_connection = True
+                raise _HTTPError(HTTPStatus.UNPROCESSABLE_ENTITY, str(e)) from e
+            if status["done"]:
+                log(f"{label} ({self.ip}) uploaded its recording camera_uploads/{session}/{file} "
+                    f"({status['size']:,} bytes)")
+            return self._json(status)
+        raise _HTTPError(HTTPStatus.METHOD_NOT_ALLOWED, "Method not allowed")
 
     # --- file transfer ---
 

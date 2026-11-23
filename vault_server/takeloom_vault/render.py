@@ -14,7 +14,23 @@ takeloom/video/render_jobs.py's: keep the two in step.
                         "watermarks": [{"png", "start", "end"}]},
                "done": false}],
      "cleanup": ["session_video_raw.mp4", ...],
+     "staged_inputs": ["Camera_2_phone.mp4", ...],
      "error": "..."}
+
+Two more kinds of job come before the encodes, for a phone recording that
+was uploaded here directly (camera_uploads.py) rather than through the
+studio machine, which lined it up from afar and left the file work here:
+
+    {"kind": "normalize", "output": "<camera>_raw.mp4",
+     "spec": {"input": "<camera>_phone.mp4", "scale": f}}
+        its video alone, timestamps rescaled for the phone's clock drift
+        (a stream copy): takeloom's phone_camera/sync.py's _normalize_video
+    {"kind": "mic", "output": "<camera>_mic.flac",
+     "spec": {"input", "file_zero_s", "scale", "sample_rate", "duration"}}
+        its mic, on the mix's timeline: sync.py's extract_mic
+
+"staged_inputs" are those recordings, moved from camera_uploads/<session>/
+into the session before anything runs.
 
 A job is a description, never a command line: the ffmpeg command is built
 here (mux_args, a copy of takeloom/video/capture.py's), and every name in
@@ -84,13 +100,35 @@ def _seconds(value) -> float:
     return float(value)
 
 
+def _number(value, low: float, high: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) \
+            or not low <= value <= high:
+        raise JobError(f"not a number from {low} to {high}: {value!r}")
+    return float(value)
+
+
 def checked_spec(job: dict) -> dict:
     """The job's spec with every field checked, or JobError."""
     spec = job.get("spec")
     if not isinstance(spec, dict):
         raise JobError("no spec")
     output = _file_name(job.get("output"))
+    kind = job.get("kind") or "mux"
+    if kind == "normalize":
+        return {"kind": kind, "input": _file_name(spec.get("input")), "output": output + ENCODING_SUFFIX,
+                "scale": _number(spec.get("scale", 1.0), 0.99, 1.01)}
+    if kind == "mic":
+        if not output.endswith(".flac"):
+            raise JobError(f"a mic track is a .flac, not {output!r}")
+        return {"kind": kind, "input": _file_name(spec.get("input")), "output": output + ".encoding.flac",
+                "file_zero_s": _number(spec.get("file_zero_s"), -1e5, 1e5),
+                "scale": _number(spec.get("scale", 1.0), 0.99, 1.01),
+                "sample_rate": int(_number(spec.get("sample_rate"), 8000, 384000)),
+                "duration": _seconds(spec.get("duration"))}
+    if kind != "mux":
+        raise JobError(f"unknown kind of job: {kind!r}")
     checked = {
+        "kind": kind,
         "video": _file_name(spec.get("video")),
         "mix": _file_name(spec.get("mix")),
         "instrument": _file_name(spec.get("instrument")),
@@ -114,6 +152,29 @@ def checked_spec(job: dict) -> dict:
             "end": _seconds(end) if end is not None else None,
         })
     return checked
+
+
+def normalize_args(spec: dict) -> list[str]:
+    """Same as takeloom/phone_camera/sync.py's _normalize_video — keep in step."""
+    cmd = ["-y"]
+    if abs(spec["scale"] - 1.0) > 1e-9:
+        cmd += ["-itsscale", f"{spec['scale']:.9f}"]
+    return cmd + ["-i", spec["input"], "-map", "0:v:0", "-c", "copy", "-an", spec["output"]]
+
+
+def mic_args(spec: dict) -> list[str]:
+    """Same as takeloom/phone_camera/sync.py's extract_mic — keep in step."""
+    zero = spec["file_zero_s"]
+    shift = (f"adelay=delays={zero * 1000:.3f}:all=1" if zero >= 0
+             else f"atrim=start={-zero:.6f},asetpts=PTS-STARTPTS")
+    chain = (f"aresample={spec['sample_rate']}:async=1000:first_pts=0,{shift},apad,"
+             f"atrim=end={spec['duration']:.6f}")
+    return ["-y", "-itsscale", f"{spec['scale']:.9f}", "-copyts", "-i", spec["input"],
+            "-map", "0:a:0", "-af", chain, "-c:a", "flac", spec["output"]]
+
+
+def job_args(spec: dict) -> list[str]:
+    return {"normalize": normalize_args, "mic": mic_args}.get(spec["kind"], mux_args)(spec)
 
 
 def mux_args(spec: dict) -> list[str]:
@@ -227,19 +288,32 @@ class Renderer:
         try:
             specs = [None if job.get("done") else checked_spec(job) for job in jobs]
             cleanup = [_file_name(f) for f in data.get("cleanup") or []]
+            staged = [_file_name(f) for f in data.get("staged_inputs") or []]
         except (JobError, AttributeError) as e:
             data["error"] = f"rejected render_jobs.json: {e}"
             _write(path, data)
             self.log(f"Rejected {name}'s render_jobs.json: {e}")
             return
-        self.log(f"Encoding {sum(s is not None for s in specs)} video(s) for session {name}...")
+        # The phones' recordings that came here directly (camera_uploads.py).
+        staging = self.vault.root / "camera_uploads" / name
+        for file in staged:
+            if (session_dir / file).exists():
+                continue
+            if not (staging / file).is_file():
+                data["error"] = f"the phone recording {file} isn't in camera_uploads/{name}/"
+                _write(path, data)
+                self.log(f"Can't make {name}'s videos: {data['error']}")
+                return
+            os.replace(staging / file, session_dir / file)
+        self.log(f"Encoding {sum(s is not None and s['kind'] == 'mux' for s in specs)} video(s) "
+                 f"for session {name}...")
         nice = ["nice", "-n", "10"] if shutil.which("nice") else []
         for job, spec in zip(jobs, specs):
             if spec is None:
                 continue
             output = job["output"]
             temp = session_dir / spec["output"]
-            result = subprocess.run([*nice, "ffmpeg", "-v", "error", *mux_args(spec)], cwd=session_dir,
+            result = subprocess.run([*nice, "ffmpeg", "-v", "error", *job_args(spec)], cwd=session_dir,
                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
             if result.returncode != 0 or not temp.exists():
                 temp.unlink(missing_ok=True)
@@ -251,9 +325,11 @@ class Renderer:
             os.replace(temp, session_dir / output)
             job["done"] = True
             _write(path, data)
-            self.log(f"Encoded {name}/{output}")
+            self.log(f"{'Encoded' if spec['kind'] == 'mux' else 'Made'} {name}/{output}")
         for file in cleanup:
             (session_dir / file).unlink(missing_ok=True)
+        if staging.is_dir():
+            shutil.rmtree(staging, ignore_errors=True)  # e.g. a phone's abandoned partial upload
         path.unlink(missing_ok=True)
         self.log(f"Session {name}'s videos are done.")
 

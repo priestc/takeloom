@@ -20,7 +20,14 @@ so a job file can't get it to run anything else or touch other files.
                "spec": {...mux_spec, writing "session_video.mp4.encoding.mp4"...},
                "done": false}],
      "cleanup": ["session_video_raw.mp4", "session_mix.flac", ...],
+     "staged_inputs": ["Camera_2_phone.mp4", ...],
      "error": "..."}   (only after a failed run)
+
+A phone recording uploaded straight to the vault (phone_camera/sync.py's
+VaultCameraUploads) adds a "normalize" and a "mic" job ahead of the
+encodes, and is a "staged input": the vault moves it from its
+camera_uploads/ into the session first. Such a session can only have its
+videos made there (needs_vault).
 
 Each job writes OUTPUT + ".encoding.mp4" and is renamed to OUTPUT only once
 ffmpeg succeeds, so a half-written video never takes the final name. If the
@@ -42,9 +49,11 @@ def encoding_name(output: str) -> str:
     return output + ENCODING_SUFFIX
 
 
-def write_jobs(session_dir: Path, jobs: list[dict], cleanup: list[str]) -> None:
+def write_jobs(session_dir: Path, jobs: list[dict], cleanup: list[str], staged_inputs: list[str] = ()) -> None:
     from ..utils import atomic_write_text
     data = {"version": 1, "jobs": [{**job, "done": False} for job in jobs], "cleanup": cleanup}
+    if staged_inputs:
+        data["staged_inputs"] = list(staged_inputs)
     atomic_write_text(session_dir / JOBS_FILE, json.dumps(data, indent=2))
 
 
@@ -52,12 +61,24 @@ def pending(session_dir: Path) -> bool:
     return (session_dir / JOBS_FILE).exists()
 
 
+def needs_vault(session_dir: Path) -> bool:
+    """Whether some of its jobs' inputs are only in the vault (phone
+    recordings uploaded straight to it), so they can't run here."""
+    try:
+        return bool(json.loads((session_dir / JOBS_FILE).read_text()).get("staged_inputs"))
+    except (OSError, ValueError):
+        return False
+
+
 def run_locally(session_dir: Path) -> bool:
     """Run the jobs here instead (the upload to the vault failed). True if
-    every one succeeded; the jobs file and cleanup files are then gone."""
+    every one succeeded; the jobs file and cleanup files are then gone.
+    False, untouched, for jobs that need the vault (needs_vault)."""
     from ..ffmpeg_bin import FFMPEG
     from ..utils import atomic_write_text
     from .capture import mux_args
+    if needs_vault(session_dir):
+        return False
     path = session_dir / JOBS_FILE
     data = json.loads(path.read_text())
     for job in data["jobs"]:

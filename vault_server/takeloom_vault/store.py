@@ -8,7 +8,10 @@ takeloom/vault.py describes it:
     ├── backing_tuning.json, inspiration_takes.json
     ├── mixes/<song>.json                          the Completed Takes mixer's saved mixes
     ├── final_mixes/<song>.mp3                     exported song mixes
-    └── projects/<project>.json                    setlist backups
+    ├── projects/<project>.json                    setlist backups
+    └── camera_uploads/<session_name>/<file>       phone recordings uploaded here directly,
+                                                   until their session's videos are made
+                                                   (camera_uploads.py)
 
 Everything the HTTP API touches goes through resolve() first, which is
 what keeps a client-supplied path from ever escaping the vault root.
@@ -27,7 +30,9 @@ from typing import BinaryIO
 # The only top-level folders a client may read or write, plus the few
 # files takeloom keeps in the vault root itself. Anything else there
 # (.DS_Store, ...) is out of the API's reach entirely.
-TOP_LEVEL_DIRS = ("sessions", "backing_tracks", "completed_takes", "projects", "mixes", "final_mixes")
+TOP_LEVEL_DIRS = (
+    "sessions", "backing_tracks", "completed_takes", "projects", "mixes", "final_mixes", "camera_uploads",
+)
 ROOT_FILES = ("inspiration_takes.json", "backing_tuning.json")
 
 # In-progress uploads land beside their destination under this prefix and

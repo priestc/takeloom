@@ -41,6 +41,12 @@ Paired devices are listed at `/clients` in the web UI, where they can be revoked
 use `takeloom-vault clients` / `takeloom-vault revoke ID`. Only a SHA-256 of each token is
 stored (in `~/.config/takeloom-vault/clients.json`).
 
+Only the studio machine pairs here. Everything paired with *its* `takeloom server` (Takeloom
+Camera phones, remote-control laptops) gets a token of its own from this vault through it
+(`POST /api/clients`), listed under it on the Paired devices page. A delegated token works for
+as long as the studio machine stays paired: revoking it revokes them all. The studio machine
+revokes one itself once its device is no longer authorized there.
+
 ## Web UI
 
 - `/`: every session in the vault, newest first, plus any pending pairing requests.
@@ -146,6 +152,17 @@ It needs `ffmpeg` with the `libx264` encoder on this machine (`apt install ffmpe
 `GET /api/ping` reports `"encode": true` when it's available; takeloom checks that, and
 encodes on the studio machine instead when it isn't (a NAS without ffmpeg, an older vault, or
 the vault being unreachable).
+
+### Phone recordings, straight from the phones (0.11+)
+
+With vault encoding on, the Takeloom Camera phones (app 1.6+) upload their recordings here,
+not to the studio machine: into `camera_uploads/<session>/`, in resumable chunks
+(`/api/camera-uploads/...`). The studio machine waits for them, then lines each one up with the
+session's audio from a small extract of its sound this server sends, and its
+`render_jobs.json` gets two more kinds of job ahead of the encodes: `normalize` (the video,
+timestamps rescaled for the phone's clock drift, as a stream copy) and `mic` (the phone's mic
+track on the session's timeline). The recording is moved into the session first, and deleted
+with the other raw inputs once the videos are made.
 
 A job file is a description (file names, offsets, watermark timings), never a command line:
 this server builds the ffmpeg command itself and only accepts plain file names inside the

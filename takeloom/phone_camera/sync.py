@@ -35,6 +35,14 @@ Alignment of the uploaded file, coarse to fine:
 If too few windows agree (a silent session, headphones-only with nothing
 acoustic in the room), the clock-sync estimate is used as-is.
 
+A phone recording that went straight to the remote vault (hub.py's
+upload_redirect; VaultCameraUploads) is lined up the same way without ever
+coming here: the vault sends just its sound, decoded exactly as
+_decode_mono would here, and its first frame's time, and the file work
+this would do (_normalize_video, extract_mic) is left to the vault as
+render jobs (vault_server/takeloom_vault/render.py's "normalize" and
+"mic"), ahead of the encodes.
+
 The same fit also places the phone's mic track: extract_mic writes it out
 as <camera file>_mic.flac on the mix's own timeline (sample 0 = the mix's
 first sample, drift corrected, as long as the mix), the room's "atmospheric"
@@ -260,6 +268,38 @@ def extract_mic(uploaded: Path, out: Path, file_zero_s: float, scale: float, mix
     return True
 
 
+class VaultCameraUploads:
+    """The phone recordings of one session that are in the remote vault's
+    camera_uploads/ rather than here (`files`, by upload file name), and
+    the render jobs lining them up leaves for the vault (see the module
+    docstring): `jobs` run first, `staged` are the recordings those jobs
+    move into the session (render_jobs.json's "staged_inputs")."""
+
+    def __init__(self, client, session_id: str, files: list[str]) -> None:
+        self.client = client
+        self.session_id = session_id
+        self.files = set(files)
+        self.jobs: list[dict] = []
+        self.staged: list[str] = []
+
+    def has(self, upload_file: str | None) -> bool:
+        return bool(upload_file) and upload_file in self.files and self.client is not None
+
+    def makes(self, file_name: str) -> bool:
+        """Whether a job here writes `file_name` (a camera's raw video)."""
+        return any(job["output"] == file_name for job in self.jobs)
+
+    def first_video_pts(self, upload_file: str) -> float:
+        return self.client.camera_upload_first_video_pts(self.session_id, upload_file)
+
+    def audio(self, upload_file: str) -> np.ndarray:
+        return np.frombuffer(self.client.camera_upload_audio(self.session_id, upload_file), dtype="<f4")
+
+    def stage(self, upload_file: str) -> None:
+        if upload_file not in self.staged:
+            self.staged.append(upload_file)
+
+
 def align_phone_video(session_dir: Path, data: dict, log_path: Path) -> float | None:
     """Make session_video_raw.mp4 the best available phone video and return
     its offset in ms (positive = video starts that long after the mix), also
@@ -271,12 +311,15 @@ def align_phone_video(session_dir: Path, data: dict, log_path: Path) -> float | 
     return offset_ms
 
 
-def align_extra_cameras(session_dir: Path, data: dict, log_path: Path, local_offset_ms: float) -> None:
+def align_extra_cameras(session_dir: Path, data: dict, log_path: Path, local_offset_ms: float,
+                        vault_uploads: VaultCameraUploads | None = None) -> None:
     """Fill in "video_offset_ms" on each of the session log's
     "extra_cameras" entries (see backend.py's session_cameras): measured,
     for a phone, exactly as align_phone_video does an older session's lone camera (its
     raw file replaced by its uploaded recording, when that arrived);
-    `local_offset_ms` (the hand-tuned camera offset) for a local camera."""
+    `local_offset_ms` (the hand-tuned camera offset) for a local camera.
+    A phone whose recording is in the vault (`vault_uploads`) gets its
+    jobs added there instead of its files made here."""
     for entry in data.get("extra_cameras", []):
         if entry.get("video_offset_ms") is not None:
             continue  # already aligned by an earlier, interrupted run
@@ -285,7 +328,7 @@ def align_extra_cameras(session_dir: Path, data: dict, log_path: Path, local_off
             stem = Path(entry.get("final_file") or entry["file"]).stem
             entry["video_offset_ms"] = _align_camera(
                 session_dir, entry, phone, entry["upload_file"], session_dir / entry["file"], data,
-                mic_file=f"{stem}_mic.flac",
+                mic_file=f"{stem}_mic.flac", vault_uploads=vault_uploads,
             )
         else:
             entry["video_offset_ms"] = local_offset_ms
@@ -294,7 +337,7 @@ def align_extra_cameras(session_dir: Path, data: dict, log_path: Path, local_off
 
 def _align_camera(
     session_dir: Path, record: dict, phone: dict, upload_file: str, raw: Path, data: dict,
-    mic_file: str | None = None,
+    mic_file: str | None = None, vault_uploads: VaultCameraUploads | None = None,
 ) -> float | None:
     """Make `raw` the best available video from one phone and return its
     offset in ms, recording how it was measured into `record`
@@ -308,7 +351,34 @@ def _align_camera(
     mix_start_frame = data.get("mix_start_frame", 0)
 
     sync: dict | None = None
-    if uploaded.exists() and mix_flac.exists():
+    remote = vault_uploads if vault_uploads is not None and vault_uploads.has(upload_file) else None
+    if remote is not None and mix_flac.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (OSError, ValueError):
+            meta = {}
+        try:
+            sync = _align_uploaded(uploaded, meta, phone, mix_flac, session_flac, sample_rate, mix_start_frame, raw,
+                                   remote=remote)
+        except Exception as e:  # never lose the session over this: fall back to the live feed
+            sync = None
+            record["video_sync_error"] = str(e)
+        if sync is not None:
+            sync["uploaded_to"] = "vault"
+            remote.stage(upload_file)
+            if mic_file:
+                import soundfile as sf
+                remote.jobs.append({"kind": "mic", "output": mic_file, "spec": {
+                    "input": upload_file, "file_zero_s": sync["file_zero_s"],
+                    "scale": 1.0 + sync.get("drift", 0.0), "sample_rate": int(sample_rate),
+                    "duration": sf.info(str(mix_flac)).duration,
+                }})
+                record["mic_file"] = mic_file
+            # The vault makes `raw` from the recording (its normalize job):
+            # the live feed's version would only be uploaded to be replaced.
+            raw.unlink(missing_ok=True)
+            meta_path.unlink(missing_ok=True)
+    elif uploaded.exists() and mix_flac.exists():
         try:
             meta = json.loads(meta_path.read_text())
         except (OSError, ValueError):
@@ -347,7 +417,7 @@ def _align_camera(
 
 def _align_uploaded(
     uploaded: Path, meta: dict, phone: dict, mix_flac: Path, session_flac: Path,
-    sample_rate: int, mix_start_frame: int, raw: Path,
+    sample_rate: int, mix_start_frame: int, raw: Path, remote: VaultCameraUploads | None = None,
 ) -> dict | None:
     video_start_pts = meta.get("video_start_pts_ns") or phone.get("phone_video_start_pts_ns")
     clock_offset = meta.get("clock_offset_ns")
@@ -355,8 +425,13 @@ def _align_uploaded(
         clock_offset = phone.get("clock_offset_ns")
     clock_v = _clock_video_start(phone, video_start_pts, clock_offset)
 
-    first_video_pts = _probe_first_video_pts(uploaded)
-    phone_audio = _decode_mono(uploaded, ["-copyts"], "0:a:0", pad_from_zero=True)
+    if remote is not None:
+        # In the vault: its sound and first frame's time come from there.
+        first_video_pts = remote.first_video_pts(uploaded.name)
+        phone_audio = remote.audio(uploaded.name)
+    else:
+        first_video_pts = _probe_first_video_pts(uploaded)
+        phone_audio = _decode_mono(uploaded, ["-copyts"], "0:a:0", pad_from_zero=True)
     references = [("mix", _decode_mono(mix_flac), 0.0)]
     if session_flac.exists():
         # session.flac runs on its own timeline; the mix started
@@ -389,7 +464,10 @@ def _align_uploaded(
                   "file_zero_s": clock_v - first_video_pts, "drift": 0.0}
     else:
         return None
-    if not _normalize_video(uploaded, raw, scale):
+    if remote is not None:
+        remote.jobs.append({"kind": "normalize", "output": raw.name,
+                            "spec": {"input": uploaded.name, "scale": scale}})
+    elif not _normalize_video(uploaded, raw, scale):
         return None
     return result
 

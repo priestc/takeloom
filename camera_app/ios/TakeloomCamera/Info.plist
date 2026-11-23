@@ -24,6 +24,14 @@
 	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- Recordings upload over plain HTTP to the studio's vault on the
+		     local network (Uploads.swift), at the address the takeloom
+		     server gives (an IP address on the LAN). -->
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>Takeloom Camera records video of your session for the takeloom studio.</string>
 	<key>NSLocalNetworkUsageDescription</key>

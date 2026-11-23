@@ -3,6 +3,8 @@ package com.priestc.takeloomcamera
 import org.json.JSONObject
 import java.io.File
 import java.io.RandomAccessFile
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -72,6 +74,12 @@ class RecordingStore(root: File) {
  * Sends pending recordings one at a time over their own connection (so the
  * live feed and clock pings never queue behind gigabytes), resuming from
  * whatever the server already has after a drop.
+ *
+ * The server may instead point a recording at its remote vault
+ * ("upload_redirect": a URL and a vault token it got for this phone, so
+ * pairing with the server is all this ever needs): it then goes there over
+ * HTTP, a chunk per PUT, resuming from whatever the vault already has.
+ * Every attempt asks the server first, so it always decides where.
  */
 class Uploader(private val store: RecordingStore, private val settings: Settings) {
     var onProgress: (String?) -> Unit = {}
@@ -110,6 +118,7 @@ class Uploader(private val store: RecordingStore, private val settings: Settings
         val size = file.length()
         val input = RandomAccessFile(file, "r")
         var finished = false
+        var redirected = false
         lateinit var socket: FramedSocket
         val finish = { retry: Boolean ->
             val first = synchronized(this) { (!finished).also { finished = true } }
@@ -161,6 +170,27 @@ class Uploader(private val store: RecordingStore, private val settings: Settings
                             input.seek(sent)
                             sendChunk()
                         }
+                        "upload_redirect" -> {
+                            val target = msg.optString("url")
+                            val token = msg.optString("token")
+                            if (target.isEmpty() || token.isEmpty()) {
+                                finish(true)
+                            } else {
+                                redirected = true
+                                socket.close()
+                                val chunk = msg.optInt("chunk_size", 8 * 1024 * 1024)
+                                Thread({
+                                    val retry = runCatching {
+                                        uploadToVault(recording, input, size, target, token, chunk)
+                                    }.getOrDefault(true)
+                                    val first = synchronized(this) { (!finished).also { finished = true } }
+                                    if (first) {
+                                        runCatching { input.close() }
+                                        done(retry)
+                                    }
+                                }, "vault-upload").start()
+                            }
+                        }
                         "upload_rejected" -> {
                             store.save(recording.copy(rejected = msg.optString("error", "Rejected by the server.")))
                             finish(false)
@@ -176,7 +206,7 @@ class Uploader(private val store: RecordingStore, private val settings: Settings
                     }
                 }
             },
-            onClosed = { finish(true) },
+            onClosed = { if (!redirected) finish(true) },
         )
         Thread {
             socket.connect()
@@ -184,8 +214,75 @@ class Uploader(private val store: RecordingStore, private val settings: Settings
                 "kind" to "hello", "role" to "upload", "token" to settings.token(recording.host),
                 "client_name" to settings.deviceName, "device_id" to settings.deviceId,
                 "platform" to "android", "app_version" to settings.appVersion,
-                "device_model" to settings.deviceModel,
+                "device_model" to settings.deviceModel, "http_upload" to true,
             ))
         }.start()
+    }
+
+    /**
+     * The recording to the vault at [url] (see the class comment), from
+     * wherever the vault's copy is up to. Blocking. Returns true to try
+     * again later (through the server), false once the vault has all of it
+     * (and it's deleted here).
+     */
+    private fun uploadToVault(
+        recording: PendingRecording, input: RandomAccessFile, size: Long, url: String, token: String, chunkSize: Int,
+    ): Boolean {
+        val status = vaultRequest(url, "GET", token, null, 0) ?: return true
+        var offset = status.second.optLong("received")
+        if (!status.second.isNull("size") && status.second.optLong("size") != size) offset = 0
+        if (status.second.optBoolean("done")) {
+            store.remove(recording.sessionId)
+            return false
+        }
+        val buffer = ByteArray(chunkSize)
+        while (true) {
+            input.seek(offset)
+            var n = 0
+            while (n < chunkSize) {
+                val got = input.read(buffer, n, chunkSize - n)
+                if (got <= 0) break
+                n += got
+            }
+            if (n <= 0) return true
+            val reply = vaultRequest("$url?offset=$offset&size=$size", "PUT", token, buffer, n) ?: return true
+            if (reply.first == 409) {
+                offset = reply.second.optLong("received")  // the vault says where it's up to
+                continue
+            }
+            if (reply.second.optBoolean("done")) {
+                onProgress("Uploaded ${recording.sessionId} to the vault")
+                store.remove(recording.sessionId)
+                return false
+            }
+            offset = reply.second.optLong("received", offset + n)
+            onProgress("Uploading ${recording.sessionId} to the vault: ${100 * offset / maxOf(size, 1)}%")
+        }
+    }
+
+    /** One HTTP request: (status code, JSON body) for a 200 or 409, else null (try again later). */
+    private fun vaultRequest(url: String, method: String, token: String, body: ByteArray?, length: Int): Pair<Int, JSONObject>? {
+        val connection = URL(url).openConnection() as HttpURLConnection
+        return try {
+            connection.requestMethod = method
+            connection.connectTimeout = 15_000
+            connection.readTimeout = 120_000
+            connection.setRequestProperty("Authorization", "Bearer $token")
+            if (body != null) {
+                connection.doOutput = true
+                connection.setFixedLengthStreamingMode(length)
+                connection.setRequestProperty("Content-Type", "application/octet-stream")
+                connection.outputStream.use { it.write(body, 0, length) }
+            }
+            val code = connection.responseCode
+            if (code != 200 && code != 409) return null
+            val stream = if (code == 200) connection.inputStream else connection.errorStream
+            val text = stream?.bufferedReader()?.use { it.readText() } ?: "{}"
+            code to JSONObject(text)
+        } catch (e: Exception) {
+            null
+        } finally {
+            connection.disconnect()
+        }
     }
 }

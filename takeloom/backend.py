@@ -1855,7 +1855,23 @@ _vault_sync_lock = threading.Lock()
 # One session upload at a time: the background retry (retry_session_uploads)
 # and a just-processed session's own upload never send the same files at once.
 _session_upload_lock = threading.Lock()
+def _by_ip_address(url: str) -> str:
+    """`url` with its host name resolved here, to an IP address: a phone
+    may not know the LAN's names (tank2.lan), and its OS only lets an app
+    use plain HTTP to local-network addresses. Unchanged if it won't resolve."""
+    import socket
+    from urllib.parse import urlsplit, urlunsplit
+    parts = urlsplit(url)
+    try:
+        address = socket.gethostbyname(parts.hostname or "")
+    except OSError:
+        return url
+    netloc = address + (f":{parts.port}" if parts.port else "")
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
 _late_upload_lock = threading.Lock()
+_camera_route_lock = threading.Lock()
 
 
 def _file_signature(path: Path) -> tuple:
@@ -1982,6 +1998,9 @@ class LocalBackend(Backend):
             on_full_wanted=self._on_full_preview_wanted,
         )
         self._phone_hub = None  # PhoneCameraHub, when attach_phone_camera_hub() is called
+        # session id -> the VaultClient its phones upload straight to, or
+        # None (here): see _camera_upload_route.
+        self._camera_upload_routes: dict[str, object] = {}
         # phone camera_device -> PhoneFullPreview decoding its live feed, for
         # whoever wants it at full resolution (see _on_full_preview_wanted).
         self._phone_full_previews: dict = {}
@@ -2294,7 +2313,50 @@ class LocalBackend(Backend):
             on_status=self._on_phone_status,
             late_upload_target=self._late_upload_target,
             on_late_upload=self._on_late_upload,
+            upload_redirect=self._camera_upload_redirect,
+            vault_progress=self._camera_upload_progress,
         )
+
+    # --- phone recordings uploaded straight to the remote vault ---
+
+    def _camera_upload_route(self, session_id: str):
+        """The VaultClient this session's phone recordings go straight to
+        (vault.py's phones_upload_to_vault), or None for here — decided
+        once per session, by the first phone to ask, so every phone of it
+        goes the same way."""
+        routes = self._camera_upload_routes
+        with _camera_route_lock:
+            if session_id not in routes:
+                from .vault import phones_upload_to_vault
+                log = lambda msg: self._emit("vault_status", {"status": msg})  # noqa: E731
+                routes[session_id] = phones_upload_to_vault(self.get_config(), log=log)
+            return routes[session_id]
+
+    def _camera_upload_redirect(self, session_id: str, device_id: str, file_name: str, phone_token: str) -> dict | None:
+        """PhoneCameraHub's upload_redirect: the vault URL and token for a
+        phone to upload `file_name` of `session_id` to, or None to take it
+        here. The token is the phone's own, which this server vouches for
+        (vault.py's vault_access_for) — pairing with this server is all a
+        phone ever has to do."""
+        client = self._camera_upload_route(session_id)
+        if client is None:
+            return None
+        from .vault import vault_access_for
+        log = lambda msg: self._emit("vault_status", {"status": msg})  # noqa: E731
+        access = vault_access_for(self.get_config(), phone_token, self.save_config, log=log)
+        if access is None:
+            return None
+        return {"url": _by_ip_address(client.camera_upload_url(session_id, file_name)), "token": access["token"]}
+
+    def _camera_upload_progress(self, session_id: str, file_name: str) -> dict | None:
+        client = self._camera_upload_route(session_id)
+        if client is None:
+            return None
+        from .vault_client import VaultError
+        try:
+            return client.camera_upload_status(session_id, file_name)
+        except VaultError:
+            return None
 
     def _on_phone_cameras_changed(self) -> None:
         self._scan_cameras(force=True)  # also remembers a phone seen for the first time
@@ -6743,6 +6805,18 @@ class LocalBackend(Backend):
         finally:
             self._emit("recording_status", {"processing": False})
 
+    @classmethod
+    def _phone_upload_file(cls, session_dir: Path, device_id: str) -> str:
+        """The file name `device_id`'s recording of this session uploads as."""
+        try:
+            data = json.loads((session_dir / "session_log.json").read_text())
+        except (OSError, ValueError):
+            return ""
+        for cam in data.get("extra_cameras") or []:
+            if (cam.get("phone_camera") or {}).get("device_id") == device_id:
+                return str(cam.get("upload_file") or "")
+        return ""
+
     @staticmethod
     def _logged_phone_uploads(session_dir: Path) -> list[tuple[str, str, str]]:
         """(device id, label, upload file name) for every phone recording
@@ -6800,6 +6874,7 @@ class LocalBackend(Backend):
         """`phones`: (device id, label) of every phone upload to wait for."""
         from .processing.splicer import process_session
         config = self.get_config()
+        vault_files: list[str] = []  # phone recordings that went straight to the vault
         if self._phone_hub is not None:
             # Each phone's full-quality recording, uploading now that the
             # session's over. Waited for here, on this background thread —
@@ -6813,14 +6888,34 @@ class LocalBackend(Backend):
                     self._processing_status,
                     label=label,
                 )
+                file_name = self._phone_upload_file(session_dir, device_id)
+                if self._phone_hub.upload_went_to_vault(session_id, device_id) and file_name:
+                    if arrived is not None:
+                        vault_files.append(file_name)
+                    else:
+                        # Its partial upload is no use now (and if the phone
+                        # carries on later, it's a late upload: through here).
+                        client = self._camera_upload_route(session_id)
+                        if client is not None:
+                            client.delete_paths([f"camera_uploads/{session_id}/{file_name}"])
                 self._phone_hub.forget_upload(session_id, device_id)
                 if arrived is None:
                     self._processing_status(f"{label}'s recording didn't arrive — using the live feed's video instead.")
         from .vault import vault_encodes_videos
         status = self._processing_status
         defer_video = vault_encodes_videos(config, log=status)
+        vault_uploads = None
+        if vault_files:
+            # Those recordings are only in the vault, so only it can make
+            # their videos: left to it even if it can't be reached right now
+            # (the session waits here for the upload retries).
+            from .phone_camera.sync import VaultCameraUploads
+            vault_uploads = VaultCameraUploads(self._camera_upload_route(session_dir.name), session_dir.name,
+                                               vault_files)
+            defer_video = True
         try:
-            summary = process_session(session_dir=session_dir, config=config, defer_video=defer_video)
+            summary = process_session(session_dir=session_dir, config=config, defer_video=defer_video,
+                                      vault_uploads=vault_uploads)
         except Exception as e:
             status(f"Session take processing failed: {e} — raw files kept in {session_dir}")
             return
@@ -6839,7 +6934,10 @@ class LocalBackend(Backend):
         with _vault_sync_lock:
             sync_vault_files(config, log=status, prune=not self.is_session_active())
         from .video import render_jobs
-        if not uploaded and render_jobs.pending(session_dir):
+        if not uploaded and render_jobs.needs_vault(session_dir):
+            status("The vault didn't get this session yet; it's kept here until it does (the vault has its "
+                   "phones' recordings, so only it can make the videos). The upload is retried every few minutes.")
+        elif not uploaded and render_jobs.pending(session_dir):
             # Left for the vault, but it never got the session: this
             # machine has the only copy, so its videos get made here after all.
             status("The vault didn't get this session, so its videos are being encoded here instead...")
@@ -7040,6 +7138,13 @@ class LocalBackend(Backend):
                     self.recover_late_camera_uploads()
                 except Exception as e:  # noqa: BLE001
                     self._emit("vault_status", {"status": f"Late phone recording check failed: {type(e).__name__}: {e}"})
+                if not self._busy_with_a_session():
+                    try:
+                        from .vault import prune_vault_delegates
+                        prune_vault_delegates(self.get_config(),
+                                              log=lambda msg: self._emit("vault_status", {"status": msg}))
+                    except Exception as e:  # noqa: BLE001
+                        self._emit("vault_status", {"status": f"Vault token check failed: {type(e).__name__}: {e}"})
                 time.sleep(interval_seconds)
 
         threading.Thread(target=loop, daemon=True, name="session-upload-retry").start()

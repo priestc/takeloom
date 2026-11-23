@@ -292,6 +292,12 @@ class _ClientHandler(socketserver.StreamRequestHandler):
                 })
 
             self._owner._register(self)
+            # One pairing for the whole system: this client gets its own
+            # token for the remote vault through this server's pairing
+            # (vault.py's vault_access_for). Off this thread — it can take
+            # a round trip or two to the vault, which mustn't hold up the
+            # connection — and only for clients that know the event.
+            threading.Thread(target=self._send_vault_access, name="remote-vault-access", daemon=True).start()
             try:
                 while True:
                     line = self.rfile.readline()
@@ -429,6 +435,18 @@ class _ClientHandler(socketserver.StreamRequestHandler):
                 (camera, jpeg), self._full_pending = self._full_pending, None
             self.send_event("preview_full_frame",
                             {"camera": camera, "jpeg_b64": base64.b64encode(jpeg).decode("ascii")})
+
+    def _send_vault_access(self) -> None:
+        from ..vault import vault_access_for
+        backend = self._owner.backend
+        try:
+            access = vault_access_for(backend.get_config(), self.token or "", backend.save_config,
+                                      log=self._owner._log)
+        except Exception as e:  # noqa: BLE001 — a convenience; never break the connection over it
+            self._owner._log(f"[{_timestamp()}] Couldn't give {self.client_name} vault access: {e}")
+            return
+        if access:
+            self.send_event("vault_access", access)
 
     def send_event(self, event: str, data: dict) -> None:
         try:

@@ -261,7 +261,8 @@ def _copy_flac_segment(src: sf.SoundFile, start: int, end: int, out_path: Path) 
             remaining -= len(block)
 
 
-def process_session(session_dir: Path, config: StudioConfig, defer_video: bool = False) -> str:
+def process_session(session_dir: Path, config: StudioConfig, defer_video: bool = False,
+                    vault_uploads=None) -> str:
     """Turn a finished session directory (session.flac + session_log.json,
     plus the raw video/mix pair when a camera ran) into completed take files
     and setlist updates. Returns a one-line human-readable summary.
@@ -273,7 +274,11 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
     With defer_video, the session videos aren't encoded here: their ffmpeg
     commands go into render_jobs.json for the vault server to run
     (video/render_jobs.py), and their inputs stay in place for it. Takes
-    are filed exactly as if the videos had been made."""
+    are filed exactly as if the videos had been made.
+
+    `vault_uploads` (phone_camera/sync.py's VaultCameraUploads, only with
+    defer_video): phone recordings that went straight to the vault, lined
+    up from there, whose file work joins the render jobs."""
     from ..video.render_jobs import encoding_name, write_jobs
     render_jobs: list[dict] = []
     render_cleanup: list[str] = []
@@ -303,9 +308,13 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
         measured_offset_ms = align_phone_video(session_dir, data, log_path)
         if measured_offset_ms is not None:
             video_offset_ms = measured_offset_ms
+    def in_vault(upload_file) -> bool:
+        return vault_uploads is not None and vault_uploads.has(upload_file)
+
     extra_cameras = [
         c for c in data.get("extra_cameras", [])
         if (session_dir / c["file"]).exists() or (c.get("upload_file") and (session_dir / c["upload_file"]).exists())
+        or in_vault(c.get("upload_file"))
     ]
     if extra_cameras and session_mix_flac.exists():
         # Every camera that recorded this session ("extra_cameras" is all of
@@ -313,8 +322,10 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
         # session_cameras), each lined up against the mix, which also
         # turns a phone's upload into its "file".
         from ..phone_camera.sync import align_extra_cameras
-        align_extra_cameras(session_dir, data, log_path, config.video_latency_compensation_ms)
-        extra_cameras = [c for c in extra_cameras if (session_dir / c["file"]).exists()]
+        align_extra_cameras(session_dir, data, log_path, config.video_latency_compensation_ms,
+                            vault_uploads=vault_uploads)
+        extra_cameras = [c for c in extra_cameras if (session_dir / c["file"]).exists()
+                         or (vault_uploads is not None and vault_uploads.makes(c["file"]))]
     have_video = session_video_raw.exists() and session_mix_flac.exists()
     # The footer (musician, instrument, song, date, and now the camera) is no
     # longer burned into the camera videos here: the vault's web video mixer
@@ -615,7 +626,14 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
         if have_video:
             render_cleanup.append(session_video_raw.name)
         render_cleanup += [session_mix_flac.name, session_flac.name]
-        write_jobs(session_dir, render_jobs, render_cleanup)
+        staged: list[str] = []
+        if vault_uploads is not None and vault_uploads.jobs:
+            # Lining up the phones' recordings that are in the vault comes
+            # first; then they're cleaned up with the rest.
+            render_jobs[:0] = vault_uploads.jobs
+            staged = list(vault_uploads.staged)
+            render_cleanup += staged
+        write_jobs(session_dir, render_jobs, render_cleanup, staged_inputs=staged)
     elif camera_videos and extra_videos_ok and (session_video_ok or not have_video):
         session_video_raw.unlink(missing_ok=True)
         session_mix_flac.unlink(missing_ok=True)
@@ -631,7 +649,11 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
     if videos:
         summary += f" ({videos} with video)"
     if render_jobs:
-        summary += f"; {len(render_jobs)} session video{'s' if len(render_jobs) != 1 else ''} left for the vault to encode"
+        encodes = sum(1 for job in render_jobs if job.get("kind", "mux") == "mux")
+        summary += f"; {encodes} session video{'s' if encodes != 1 else ''} left for the vault to encode"
+        if vault_uploads is not None and vault_uploads.staged:
+            n = len(vault_uploads.staged)
+            summary += f" ({n} from {'a phone recording' if n == 1 else 'phone recordings'} uploaded straight to it)"
     if have_video and not session_video_ok:
         summary += "; session video mux failed, raw files kept"
     if extra_cameras and not render_jobs:

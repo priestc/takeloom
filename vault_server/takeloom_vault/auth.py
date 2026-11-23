@@ -10,6 +10,14 @@ pairing (takeloom/remote/server.py), adapted to HTTP:
    back exactly once, and sends it as `Authorization: Bearer <token>` on
    every API call from then on.
 
+A paired client can also vouch for devices of its own (delegate): takeloom's
+studio server hands every phone and remote-control laptop paired with *it*
+a token of their own here, so pairing once with the studio is enough for
+the whole system (a phone uploads its recording straight here, say). A
+delegated token is good for as long as the client that vouched for it is
+paired: revoking that client revokes them all. Delegated tokens can't
+delegate further.
+
 Only a SHA-256 of each token is stored, so the clients file on disk isn't
 itself a set of usable credentials. Like takeloom's remote mode, this is
 LAN-trust (plain HTTP, local-network peers only — see server.py's
@@ -51,6 +59,11 @@ class PairedClient:
     last_ip: str = ""
     paired_at: str = ""
     last_seen_at: str = ""
+    # Delegated (see the module docstring): the id of the client that
+    # vouched for this one, and that client's own name for it (one token
+    # per key: delegating again under the same key replaces it).
+    parent: str = ""
+    key: str = ""
 
 
 @dataclass
@@ -91,7 +104,9 @@ class Auth:
             return
         if mtime != self._mtime:
             data = json.loads(self.path.read_text())
-            self.clients = [PairedClient(**c) for c in data.get("clients", [])]
+            fields = set(PairedClient.__dataclass_fields__)
+            self.clients = [PairedClient(**{k: v for k, v in c.items() if k in fields})
+                            for c in data.get("clients", [])]
             self._mtime = mtime
 
     def _save(self) -> None:
@@ -112,8 +127,11 @@ class Auth:
         digest = _hash(token)
         with self._lock:
             self._reload_if_changed()
+            ids = {c.id for c in self.clients}
             for client in self.clients:
                 if hmac.compare_digest(digest, client.token_sha256):
+                    if client.parent and client.parent not in ids:
+                        return None  # whoever vouched for it isn't paired any more
                     # Only persist last-seen at most once a minute — this
                     # runs on every API call, including each file upload.
                     now = _now_iso()
@@ -123,15 +141,38 @@ class Auth:
                     return client
         return None
 
-    def revoke(self, client_id: str) -> bool:
+    def revoke(self, client_id: str, parent: str | None = None) -> bool:
+        """Remove a client and everything it vouched for. With `parent`,
+        only if that's who vouched for it (a client revoking its own
+        delegate)."""
         with self._lock:
             self._reload_if_changed()
-            before = len(self.clients)
-            self.clients = [c for c in self.clients if c.id != client_id]
-            if len(self.clients) == before:
+            target = next((c for c in self.clients if c.id == client_id), None)
+            if target is None or (parent is not None and target.parent != parent):
                 return False
+            self.clients = [c for c in self.clients if c.id != client_id and c.parent != client_id]
             self._save()
             return True
+
+    def delegate(self, parent: PairedClient, label: str, key: str, ip: str) -> tuple[PairedClient, str]:
+        """A token for a device `parent` vouches for (see the module
+        docstring), replacing any earlier one it made under `key`.
+        Returns (the new client, its token). ValueError if `parent` is
+        itself delegated."""
+        if parent.parent:
+            raise ValueError("A delegated token can't vouch for other devices.")
+        token = secrets.token_hex(32)
+        now = _now_iso()
+        child = PairedClient(
+            id=secrets.token_hex(4), label=(label or "unknown")[:80], token_sha256=_hash(token),
+            last_ip="", paired_at=now, last_seen_at="", parent=parent.id, key=key[:120],
+        )
+        with self._lock:
+            self._reload_if_changed()
+            self.clients = [c for c in self.clients if not (c.parent == parent.id and c.key == child.key)]
+            self.clients.append(child)
+            self._save()
+        return child, token
 
     # --- pairing ---
 

@@ -50,6 +50,12 @@ class RemoteBackend(Backend):
         # the studio. Cleared by clear_playback_cache (Completed Takes'
         # Reload button).
         self._fetched_takes: dict[str, Path] = {}
+        # The studio's remote vault, reached directly with this machine's
+        # own token for it, which the studio server vouched for when this
+        # connected (its "vault_access" event; vault.py's vault_access_for):
+        # take audio and videos come straight from there instead of being
+        # relayed through the studio. None until then (or with no vault).
+        self._vault = None
         client._on_event = self._on_raw_event
 
     def is_remote(self) -> bool:
@@ -297,12 +303,51 @@ class RemoteBackend(Backend):
             cache_key=f"backing:{take_filename}", local_name="backing_{filename}",
         ))
 
+    def _try_vault(self, url: str, token: str) -> None:
+        """Use the vault directly only if it answers from here (the studio
+        can reach it on a network this machine isn't on) — else every
+        fetch would wait out a timeout before going through the studio."""
+        from ..vault_client import VaultClient, VaultError
+        vault = VaultClient(url, token)
+        try:
+            vault.ping()
+        except VaultError:
+            return
+        self._vault = vault
+
+    def _fetch_from_vault(self, cache_key: str, local_name: str, fetch: Callable[[object, Path], bool]) -> Path | None:
+        """`fetch(vault_client, path)` straight from the studio's vault (see
+        self._vault), cached like _fetch_file; None if there's no vault
+        access or it doesn't have it (yet: a take is uploaded a little after
+        its session) — then it comes through the studio as before."""
+        vault = self._vault
+        if vault is None:
+            return None
+        cached = self._fetched_takes.get(cache_key)
+        if cached is not None and cached.exists():
+            return cached
+        local_path = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_remote_takes") / local_name
+        try:
+            if not fetch(vault, local_path):
+                return None
+        except Exception:  # noqa: BLE001 — any trouble: through the studio instead
+            return None
+        self._fetched_takes[cache_key] = local_path
+        return local_path
+
     def get_take_video_path(self, filename: str, camera: str = "") -> str:
         # The studio end produces the clip (see LocalBackend.get_take_video_path)
-        # and streams it back the same way as a take's audio.
+        # and streams it back the same way as a take's audio — or the vault
+        # does, straight to here.
         args = {"filename": filename, **({"camera": camera} if camera else {})}
         import hashlib
         suffix = "." + hashlib.sha1(camera.encode()).hexdigest()[:8] if camera else ""
+        direct = self._fetch_from_vault(
+            f"video:{filename}:{camera}", Path(filename).stem + suffix + ".mp4",
+            lambda vault, path: vault.download_take_video(filename, path, camera),
+        )
+        if direct is not None:
+            return str(direct)
         return str(self._fetch_file(
             "fetch_take_video", args, cache_key=f"video:{filename}:{camera}",
             local_name=Path(filename).stem + suffix + ".mp4",
@@ -325,6 +370,11 @@ class RemoteBackend(Backend):
         wait/Event needed here. Raises BackendError if nothing came
         back (the file isn't available anywhere on the studio end).
         Reuses an earlier download of the same file (see _fetched_takes)."""
+        direct = self._fetch_from_vault(
+            filename, filename, lambda vault, path: vault.download_file(f"completed_takes/{filename}", path),
+        )
+        if direct is not None:
+            return direct
         return self._fetch_file(
             "fetch_take_file", {"project_name": project_name, "filename": filename},
             cache_key=filename, local_name=filename,
@@ -576,6 +626,11 @@ class RemoteBackend(Backend):
     # --- event dispatch from the RemoteClient's reader thread ---
 
     def _on_raw_event(self, event: str, data: dict) -> None:
+        if event == "vault_access":
+            if data.get("url") and data.get("token"):
+                threading.Thread(target=self._try_vault, args=(str(data["url"]), str(data["token"])),
+                                 name="remote-vault-check", daemon=True).start()
+            return
         if event == "preview_full_frame":
             try:
                 jpeg = base64.b64decode(data["jpeg_b64"])

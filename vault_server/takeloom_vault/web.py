@@ -665,16 +665,27 @@ def session_page(vault: Vault, name: str, data: dict, editor=None, publisher=Non
 
 
 def clients_page(clients: list[PairedClient], pending: list[PairingRequest]) -> str:
-    rows = "".join(
-        "<tr><td>{label}</td><td>{ip}</td><td>{paired}</td><td>{seen}</td>"
-        "<td><form method='post' action='/clients/{id}/revoke'><button>Revoke</button></form></td></tr>".format(
-            label=escape(c.label), ip=escape(c.last_ip), paired=escape(c.paired_at.replace("T", " ")),
+    # A device paired through another one (auth.py's delegate: a phone or
+    # laptop paired with takeloom's studio server) is listed under it;
+    # revoking that one revokes it too.
+    labels = {c.id: c.label for c in clients}
+
+    def row(c: PairedClient) -> str:
+        via = f" <span class='muted'>via {escape(labels.get(c.parent, '?'))}</span>" if c.parent else ""
+        return (
+            "<tr><td>{label}{via}</td><td>{ip}</td><td>{paired}</td><td>{seen}</td>"
+            "<td><form method='post' action='/clients/{id}/revoke'><button>Revoke</button></form></td></tr>"
+        ).format(
+            label=escape(c.label), via=via, ip=escape(c.last_ip), paired=escape(c.paired_at.replace("T", " ")),
             seen=escape(c.last_seen_at.replace("T", " ")), id=quote(c.id),
         )
-        for c in clients
-    )
+
+    rows = "".join(row(c) + "".join(row(d) for d in clients if d.parent == c.id)
+                   for c in clients if not c.parent)
     body = _pairing_banner(pending) + "<h1>Paired devices</h1>" + (
         "<table><tr><th>Device</th><th>Last IP</th><th>Paired</th><th>Last seen</th><th></th></tr>" + rows + "</table>"
+        "<p class='muted'>Devices paired with takeloom's studio server reach this vault through it; "
+        "revoking the studio server revokes them too.</p>"
         if clients else "<p class='muted'>Nothing is paired yet. Use “Pair” next to the vault server "
         "address in takeloom's Studio Setup tab.</p>"
     )

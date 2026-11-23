@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -285,6 +286,112 @@ def vault_encodes_videos(config: StudioConfig, log: LogFn | None = None) -> bool
                 "(it needs takeloom-vault 0.2 or later, and ffmpeg with libx264).")
         return False
     return True
+
+
+def phones_upload_to_vault(config: StudioConfig, log: LogFn | None = None) -> "VaultClient | None":
+    """The remote vault, if this session's phone recordings should go
+    straight to it instead of through this machine: only when the vault
+    makes the session videos (vault_encodes_videos) — its render jobs then
+    take a phone's recording from where it uploaded it — and it takes
+    camera uploads (takeloom-vault 0.11+). Else None: they come here."""
+    if not vault_encodes_videos(config):
+        return None
+    client = remote_vault(config)
+    try:
+        info = client.ping() if client is not None else {}
+    except Exception:  # noqa: BLE001
+        return None
+    if not info.get("camera_uploads"):
+        if log:
+            log(f"Phone recordings come through this machine: the vault at {client.url} can't take them "
+                "directly (it needs takeloom-vault 0.11 or later).")
+        return None
+    return client
+
+
+# --- one pairing for the whole system ---
+#
+# Everything paired with this machine's server (Takeloom Camera phones,
+# remote-control laptops: config.remote_authorized_clients) gets a vault
+# token of its own, which this machine vouches for (the vault's
+# auth.py delegate) — so nothing has to pair with the vault separately.
+# Each is good for as long as this machine is paired with the vault, and
+# is revoked there when its client is no longer authorized here
+# (prune_vault_delegates).
+
+_delegate_lock = threading.Lock()
+
+
+def _delegate_key(token: str) -> str:
+    """What the vault knows a client's token by: never the token itself."""
+    import hashlib
+    return hashlib.sha256(token.encode()).hexdigest()[:24]
+
+
+def _unauthorized(error: Exception) -> bool:
+    import urllib.error
+    cause = error.__cause__
+    return isinstance(cause, urllib.error.HTTPError) and cause.code == 401
+
+
+def vault_access_for(
+    config: StudioConfig, client_token: str, save: Callable[[StudioConfig], None], log: LogFn | None = None,
+) -> dict | None:
+    """{"url", "token"} for the paired client with `client_token`: its own
+    token for the remote vault, made on first use (and again if the vault
+    no longer takes it) and kept in its AuthorizedClient. None if there's
+    no paired remote vault, no such client, or the vault can't be reached
+    to make one."""
+    import hmac
+    from .vault_client import VaultClient, VaultError
+    client = remote_vault(config)
+    if client is None or not client_token:
+        return None
+    with _delegate_lock:
+        entry = next((c for c in config.remote_authorized_clients
+                      if hmac.compare_digest(c.token, client_token)), None)
+        if entry is None:
+            return None
+        if entry.vault_token and entry.vault_url == client.url:
+            try:
+                VaultClient(client.url, entry.vault_token).ping()
+                return {"url": client.url, "token": entry.vault_token}
+            except VaultError as e:
+                if not _unauthorized(e):
+                    # Unreachable right now: it's still the right token.
+                    return {"url": client.url, "token": entry.vault_token}
+        try:
+            made = client.delegate(entry.label, _delegate_key(entry.token))
+        except VaultError as e:
+            if log:
+                log(f"Couldn't get {entry.label} a token for the vault: {e}")
+            return None
+        entry.vault_url, entry.vault_token = client.url, made["token"]
+        save(config)
+        if log:
+            log(f"{entry.label} can reach the vault at {client.url} now, through this server's pairing.")
+        return {"url": client.url, "token": entry.vault_token}
+
+
+def prune_vault_delegates(config: StudioConfig, log: LogFn | None = None) -> int:
+    """Revoke the vault tokens of clients no longer authorized here.
+    Returns how many."""
+    from .vault_client import VaultError
+    client = remote_vault(config)
+    if client is None:
+        return 0
+    try:
+        delegates = client.list_delegates()
+    except VaultError:
+        return 0  # unreachable, or a vault from before delegated tokens
+    keys = {_delegate_key(c.token) for c in config.remote_authorized_clients}
+    revoked = 0
+    for d in delegates:
+        if d.get("key") not in keys and client.revoke_delegate(str(d.get("id"))):
+            revoked += 1
+            if log:
+                log(f"Revoked {d.get('label')}'s vault token: it's no longer authorized on this server.")
+    return revoked
 
 
 def _format_bytes(n: float) -> str:
