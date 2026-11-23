@@ -6892,7 +6892,12 @@ class LocalBackend(Backend):
         from .processing.splicer import process_session
         config = self.get_config()
         vault_files: list[str] = []  # phone recordings that went straight to the vault
-        if self._phone_hub is not None:
+        if self._phone_hub is not None and config.camera_sources:
+            # Cameras as sources (phone_camera/sources.py): nothing waits
+            # for a phone's recording; each is lined up whenever it's here.
+            for device_id, _label in phones:
+                self._phone_hub.forget_upload(session_dir.name, device_id)
+        elif self._phone_hub is not None:
             # Each phone's full-quality recording, uploading now that the
             # session's over. Waited for here, on this background thread —
             # the app is already idle and a new session can start meanwhile.

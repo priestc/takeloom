@@ -244,6 +244,24 @@ def program_camera_at(data: dict, frame: int, camera_videos: list[dict]) -> str:
     return current or camera_videos[0]["camera"]
 
 
+MIX_REFERENCE = "session_mix.m4a"
+
+
+def _encode_mix_reference(mix_flac: Path, out: Path) -> bool:
+    """The monitor mix as a 192 kbps AAC reference (session_mix.m4a), on
+    the same timeline (its sample 0 is the mix's)."""
+    import subprocess
+    from ..ffmpeg_bin import FFMPEG
+    tmp = out.with_name(out.stem + ".partial.m4a")
+    result = subprocess.run([FFMPEG, "-y", "-v", "error", "-i", str(mix_flac), "-c:a", "aac", "-b:a", "192k",
+                             "-movflags", "+faststart", str(tmp)], capture_output=True)
+    if result.returncode != 0 or not tmp.exists():
+        tmp.unlink(missing_ok=True)
+        return False
+    tmp.replace(out)
+    return True
+
+
 def _copy_flac_segment(src: sf.SoundFile, start: int, end: int, out_path: Path) -> None:
     """Write src's [start, end) frame range to out_path, block-wise — a
     session recording can be hours long, so it's never loaded whole."""
@@ -311,7 +329,20 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
     def in_vault(upload_file) -> bool:
         return vault_uploads is not None and vault_uploads.has(upload_file)
 
-    extra_cameras = [
+    # The cameras as sources (config.camera_sources; phone_camera/sources.py):
+    # each lined up on its own, whenever it's here; no camera video is made.
+    source_cameras: list[dict] = []
+    if config.camera_sources and data.get("extra_cameras"):
+        from ..phone_camera.sources import best_source, build_sources
+        build_sources(data, session_dir, session_mix_flac, config.video_latency_compensation_ms)
+        atomic_write_text(log_path, json.dumps(data, indent=2))
+        source_cameras = [
+            {"camera": entry.get("label") or entry.get("file") or "", "device": entry.get("device", "")}
+            for entry in data["extra_cameras"]
+            if entry.get("sources") and (best_source(entry) or entry["sources"][0]["kind"] == "phone")
+        ]
+
+    extra_cameras = [] if config.camera_sources else [
         c for c in data.get("extra_cameras", [])
         if (session_dir / c["file"]).exists() or (c.get("upload_file") and (session_dir / c["upload_file"]).exists())
         or in_vault(c.get("upload_file"))
@@ -517,7 +548,17 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
                 )
 
                 video_ref = None
-                if camera_videos:
+                if source_cameras:
+                    # Which session, and which camera was on the program
+                    # feed as it started; where each camera's view of it is
+                    # comes from that camera's alignment when it's wanted.
+                    video_ref = {
+                        "session": session_dir.name,
+                        "default": program_camera_at(data, start, source_cameras),
+                    }
+                    write_take_video_ref(completed_dir / audio_name, video_ref)
+                    videos += 1
+                elif camera_videos:
                     # Every camera's view of this take, opening on whichever
                     # was on the program feed when it started.
                     video_ref = {
@@ -621,6 +662,11 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
 
     # Only now that every take has been spliced out of session.flac above —
     # and every camera has its own copy of the audio muxed in.
+    if config.camera_sources and data.get("extra_cameras"):
+        # The mix is only ever a reference (it carries the backing track):
+        # kept as AAC, never lossless.
+        if session_mix_flac.exists() and _encode_mix_reference(session_mix_flac, session_dir / MIX_REFERENCE):
+            session_mix_flac.unlink(missing_ok=True)
     if render_jobs:
         # The vault deletes these once its encodes succeed (render_jobs.py).
         if have_video:
@@ -647,6 +693,13 @@ def process_session(session_dir: Path, config: StudioConfig, defer_video: bool =
     summary = f"Session processed: {saved} completed {take_word} saved"
     if videos:
         summary += f" ({videos} with video)"
+    if config.camera_sources and data.get("extra_cameras"):
+        from ..phone_camera.sources import camera_state
+        words = {"phone": "lined up", "live": "live feed until the phone's recording arrives",
+                 "local": "lined up", "lining up": "lining up", "none": "no video"}
+        summary += "; cameras: " + ", ".join(
+            f"{entry.get('label') or entry.get('file')} {words.get(camera_state(entry), camera_state(entry))}"
+            for entry in data["extra_cameras"])
     if render_jobs:
         encodes = sum(1 for job in render_jobs if job.get("kind", "mux") == "mux")
         summary += f"; {encodes} session video{'s' if encodes != 1 else ''} left for the vault to encode"

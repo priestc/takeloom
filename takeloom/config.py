@@ -321,6 +321,11 @@ class StudioConfig:
     # (the "atmospheric" sound) only ever hear the instrument, which is
     # also what lines their video up (phone_camera/sync.py).
     speaker_split: bool = False
+    # docs/camera-alignment-design.md: a session's cameras as sources lined
+    # up independently (phone_camera/sources.py) instead of camera videos
+    # made at processing time. Off until the vault reads sessions made
+    # this way (the design's stage 3).
+    camera_sources: bool = False
     # With speaker_split: a short chirp through the speakers whenever
     # they've been quiet for a while (audio/sync_click.py), so the phones
     # always hear something to line their video up with.

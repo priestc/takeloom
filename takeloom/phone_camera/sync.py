@@ -438,11 +438,19 @@ def _click_times(data: dict) -> list[float]:
     return [(f - mix_start) / sample_rate for f in clicks.get("frames") or [] if f >= mix_start]
 
 
-def _align_uploaded(
-    uploaded: Path, meta: dict, phone: dict, mix_flac: Path, session_flac: Path,
-    sample_rate: int, mix_start_frame: int, raw: Path, remote: VaultCameraUploads | None = None,
+def measure_recording(
+    uploaded: Path, meta: dict, phone: dict, mix_audio: Path, session_flac: Path,
+    sample_rate: int, mix_start_frame: int, remote: VaultCameraUploads | None = None,
     clicks: list[float] | None = None,
 ) -> dict | None:
+    """Where a phone's own recording sits on the session's timeline, without
+    touching it: {"source": "phone upload", "method": "audio"|"clock",
+    "file_zero_s", "drift", "offset_ms", ...}. The file's time t (its raw
+    timestamps, as -copyts decoding sees them) is session time
+    file_zero_s + t * (1 + drift); offset_ms is where its first video
+    frame lands. `mix_audio`: the mix, as session_mix.flac or the
+    session_mix.m4a reference. None if neither the audio nor the clock
+    could place it."""
     video_start_pts = meta.get("video_start_pts_ns") or phone.get("phone_video_start_pts_ns")
     clock_offset = meta.get("clock_offset_ns")
     if clock_offset is None:
@@ -456,7 +464,7 @@ def _align_uploaded(
     else:
         first_video_pts = _probe_first_video_pts(uploaded)
         phone_audio = _decode_mono(uploaded, ["-copyts"], "0:a:0", pad_from_zero=True)
-    references = [("mix", _decode_mono(mix_flac), 0.0)]
+    references = [("mix", _decode_mono(mix_audio), 0.0)]
     if session_flac.exists():
         # session.flac runs on its own timeline; the mix started
         # mix_start_frame samples into it.
@@ -485,12 +493,25 @@ def _align_uploaded(
         }
         if clock_v is not None:
             result["clock_offset_ms"] = round(clock_v * 1000, 3)
-    elif clock_v is not None:
-        scale = 1.0
-        result = {"source": "phone upload", "method": "clock", "offset_ms": round(clock_v * 1000, 3),
-                  "file_zero_s": clock_v - first_video_pts, "drift": 0.0}
-    else:
+        return result
+    if clock_v is not None:
+        return {"source": "phone upload", "method": "clock", "offset_ms": round(clock_v * 1000, 3),
+                "file_zero_s": clock_v - first_video_pts, "drift": 0.0}
+    return None
+
+
+def _align_uploaded(
+    uploaded: Path, meta: dict, phone: dict, mix_flac: Path, session_flac: Path,
+    sample_rate: int, mix_start_frame: int, raw: Path, remote: VaultCameraUploads | None = None,
+    clicks: list[float] | None = None,
+) -> dict | None:
+    """measure_recording, then `raw` made from it: its video, timestamps
+    rescaled for the drift (here, or by the vault's normalize job)."""
+    result = measure_recording(uploaded, meta, phone, mix_flac, session_flac, sample_rate, mix_start_frame,
+                               remote=remote, clicks=clicks)
+    if result is None:
         return None
+    scale = 1.0 + result["drift"]
     if remote is not None:
         remote.jobs.append({"kind": "normalize", "output": raw.name,
                             "spec": {"input": uploaded.name, "scale": scale}})
