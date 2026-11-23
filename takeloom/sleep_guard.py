@@ -13,7 +13,18 @@ AppState.recording_active's docstring and record.py's
 _update_recording_active, which both apply regardless of whether
 app_state.backend is local or remote.
 
-On Linux, screen-blanking is held off by simulating a harmless keypress
+On Linux under GNOME (Ubuntu's desktop, X11 or Wayland), screen blanking,
+locking and suspend are held off by gnome-session-inhibit (--inhibit idle
+--inhibit suspend), GNOME's own tool: it asks the session manager to
+inhibit for as long as it runs, holding the D-Bus connection that the
+inhibit lives on — which is what a one-shot `gdbus call` to the same
+interfaces can't do (the inhibit dies with the call), and likely why the
+earlier D-Bus attempts below seemed to be ignored. On the Framework
+laptop (Ubuntu, GNOME on Wayland, xdotool not installed) it was the only
+thing actually keeping the screen on during a session.
+
+Elsewhere on Linux (no gnome-session-inhibit), screen-blanking is held off
+by simulating a harmless keypress
 (Shift, via xdotool) every _KEYPRESS_INTERVAL seconds — see
 _linux_keypress_loop. This replaced two earlier attempts (xdg-screensaver's
 suspend/resume, then org.freedesktop.ScreenSaver's Inhibit/UnInhibit
@@ -43,25 +54,41 @@ _ES_DISPLAY_REQUIRED = 0x00000002
 
 _KEYPRESS_INTERVAL = 10.0  # seconds
 
-_process: subprocess.Popen | None = None
+_processes: list[subprocess.Popen] = []
 _keypress_thread: threading.Thread | None = None
 _keypress_stop: threading.Event | None = None
 
 
-def _spawn_inhibitor() -> subprocess.Popen | None:
+def _gnome_inhibit_available() -> bool:
+    import os
+    import shutil
+    return bool(shutil.which("gnome-session-inhibit")) and bool(
+        os.environ.get("DBUS_SESSION_BUS_ADDRESS") or os.environ.get("XDG_RUNTIME_DIR"))
+
+
+def _spawn_inhibitors() -> list[subprocess.Popen]:
     if sys.platform == "darwin":
-        return subprocess.Popen(["caffeinate", "-d", "-i"])
-    if sys.platform.startswith("linux"):
-        return subprocess.Popen(
-            [
-                "systemd-inhibit",
-                "--what=idle:sleep:handle-lid-switch",
-                "--who=takeloom",
-                "--why=Recording in progress",
-                "sleep", "infinity",
-            ]
-        )
-    return None
+        return [subprocess.Popen(["caffeinate", "-d", "-i"])]
+    if not sys.platform.startswith("linux"):
+        return []
+    started = []
+    if _gnome_inhibit_available():
+        started.append(subprocess.Popen(
+            ["gnome-session-inhibit", "--app-id=takeloom", "--reason=Recording in progress",
+             "--inhibit=idle", "--inhibit=suspend", "--inhibit-only"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ))
+    started.append(subprocess.Popen(
+        [
+            "systemd-inhibit",
+            "--what=idle:sleep:handle-lid-switch",
+            "--who=takeloom",
+            "--why=Recording in progress",
+            "sleep", "infinity",
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ))
+    return started
 
 
 def _linux_keypress_loop(stop_event: threading.Event) -> None:
@@ -102,26 +129,31 @@ def _set_linux_keypress_loop_active(active: bool) -> None:
 
 def set_active(active: bool) -> None:
     """Prevent (True) or re-allow (False) display/system sleep. Idempotent."""
-    global _process
+    global _processes
 
     if sys.platform.startswith("win"):
         flags = _ES_CONTINUOUS | (_ES_SYSTEM_REQUIRED | _ES_DISPLAY_REQUIRED if active else 0)
         ctypes.windll.kernel32.SetThreadExecutionState(flags)  # type: ignore[attr-defined]
         return
 
-    if sys.platform.startswith("linux"):
+    if sys.platform.startswith("linux") and not _gnome_inhibit_available():
         _set_linux_keypress_loop_active(active)
 
     if active:
-        if _process is not None and _process.poll() is None:
+        if _processes and all(p.poll() is None for p in _processes):
             return  # already running
+        for p in _processes:
+            p.terminate()
         try:
-            _process = _spawn_inhibitor()
+            _processes = _spawn_inhibitors()
         except OSError:
-            _process = None
-    elif _process is not None:
-        _process.terminate()
-        _process = None
+            _processes = []
+    else:
+        for p in _processes:
+            p.terminate()
+        _processes = []
+    if sys.platform.startswith("linux") and not active:
+        _set_linux_keypress_loop_active(False)
 
 
 @atexit.register

@@ -135,6 +135,13 @@ class VideoUIFrame(tk.Frame):
         self._preview_sub = self._backend.open_camera_preview(self._on_preview_frame, self._on_full_frame)
         self._request_full_resolution()
         self._refresh()
+        # A session already open when this window opened (or reconnected):
+        # keep the screen on from now, not just from its next event.
+        backend = self._backend
+        def session_open(result, error) -> None:
+            if not error and result is not None and self.winfo_exists():
+                self.app_state.recording_active = bool(result)
+        self._run(backend.is_recording, session_open)
 
     def _request_full_resolution(self) -> None:
         sub, cameras = self._preview_sub, [self._program] if self._program else []
@@ -196,8 +203,13 @@ class VideoUIFrame(tk.Frame):
             self._streaming = bool(data.get("active"))
             self._update_status(data.get("status", ""))
             self._paint_selection()
-        elif event == "recording_status" and data.get("status"):
-            self._update_status(data["status"])
+        elif event == "recording_status":
+            if data.get("status"):
+                self._update_status(data["status"])
+            if "phase" in data:
+                # The screen stays on while a session's open (sleep_guard),
+                # as the Record tab keeps it on in takeloom ui.
+                self.app_state.recording_active = data["phase"] in ("waiting", "recording")
 
     # --- the camera strip ---
 
