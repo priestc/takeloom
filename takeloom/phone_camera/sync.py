@@ -21,7 +21,10 @@ Alignment of the uploaded file, coarse to fine:
    time.monotonic_ns(), which the backend also stamped mix recording's start
    with. Good to a few tens of ms — capture timestamps are exact, but when
    the mix's first sample really left the audio interface isn't.
-2. Audio cross-correlation. The phone records its mic into the same file,
+2. Audio cross-correlation. (Also against the sync clicks the speakers
+   played when they were quiet, audio/sync_click.py: rebuilt from their
+   logged positions, so a session nobody could hear in the room still
+   matches.) The phone records its mic into the same file,
    on the same clock as its video. GCC-PHAT between that and the session's
    own audio (the full mix, and the dry instrument — whichever the phone
    actually heard) in a window around the clock estimate pins the file's
@@ -365,7 +368,7 @@ def _align_camera(
             meta = {}
         try:
             sync = _align_uploaded(uploaded, meta, phone, mix_flac, session_flac, sample_rate, mix_start_frame, raw,
-                                   remote=remote)
+                                   remote=remote, clicks=_click_times(data))
         except Exception as e:  # never lose the session over this: fall back to the live feed
             sync = None
             record["video_sync_error"] = str(e)
@@ -392,7 +395,8 @@ def _align_camera(
         except (OSError, ValueError):
             meta = {}
         try:
-            sync = _align_uploaded(uploaded, meta, phone, mix_flac, session_flac, sample_rate, mix_start_frame, raw)
+            sync = _align_uploaded(uploaded, meta, phone, mix_flac, session_flac, sample_rate, mix_start_frame, raw,
+                                   clicks=_click_times(data))
         except Exception as e:  # never lose the session over this: fall back to the live feed
             sync = None
             record["video_sync_error"] = str(e)
@@ -422,9 +426,22 @@ def _align_camera(
     return sync["offset_ms"]
 
 
+def _click_times(data: dict) -> list[float]:
+    """The sync clicks' times on the mix's timeline (seconds), from the
+    session log (backend.py logs their session.flac frames)."""
+    from ..audio.sync_click import VERSION
+    clicks = data.get("sync_clicks") or {}
+    if clicks.get("version") != VERSION:
+        return []
+    sample_rate = data.get("sample_rate") or 48000
+    mix_start = data.get("mix_start_frame") or 0
+    return [(f - mix_start) / sample_rate for f in clicks.get("frames") or [] if f >= mix_start]
+
+
 def _align_uploaded(
     uploaded: Path, meta: dict, phone: dict, mix_flac: Path, session_flac: Path,
     sample_rate: int, mix_start_frame: int, raw: Path, remote: VaultCameraUploads | None = None,
+    clicks: list[float] | None = None,
 ) -> dict | None:
     video_start_pts = meta.get("video_start_pts_ns") or phone.get("phone_video_start_pts_ns")
     clock_offset = meta.get("clock_offset_ns")
@@ -444,6 +461,9 @@ def _align_uploaded(
         # session.flac runs on its own timeline; the mix started
         # mix_start_frame samples into it.
         references.append(("instrument", _decode_mono(session_flac), -mix_start_frame / sample_rate))
+    if clicks:
+        from ..audio.sync_click import reference
+        references.append(("clicks", reference(clicks, len(references[0][1]) / RATE, RATE), 0.0))
 
     if clock_v is not None:
         fit = measure_alignment(phone_audio, references, clock_v - first_video_pts, SEARCH_S)

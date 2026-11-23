@@ -68,6 +68,14 @@ _NUM_ANALOGUE_INPUTS = 4
 # both Headphones and Output 1-2 set to "Mix A", whose Left/Right halves
 # are raw mix-bus indices 0 and 1.
 MONITOR_MIX_BUSES = (0, 1)
+# With the speaker/headphone split (config.speaker_split), Output 1-2 (the
+# speakers) stays on Mix A and Headphones draws from Mix B (raw buses 2
+# and 3): an input's direct monitor goes in both.
+SPLIT_MONITOR_MIX_BUSES = (0, 1, 2, 3)
+
+
+def monitor_mix_buses(speaker_split: bool) -> tuple[int, ...]:
+    return SPLIT_MONITOR_MIX_BUSES if speaker_split else MONITOR_MIX_BUSES
 
 # Gain applied to a channel's fader when direct monitor is turned on —
 # unity (0 dB); confirmed audible at a sane level in live testing.
@@ -197,7 +205,7 @@ def set_channel_gain(channel: int, volume: float) -> bool:
     return set_channel_gains({channel: volume})
 
 
-def set_channel_gains(volumes: dict[int, float]) -> bool:
+def set_channel_gains(volumes: dict[int, float], buses: tuple[int, ...] = MONITOR_MIX_BUSES) -> bool:
     """set_channel_gain for several channels at once — one USB session and
     at most one set_mix per bus, rather than reopening the device per
     channel. Used to monitor every input at once, or to mute every input
@@ -221,7 +229,7 @@ def set_channel_gains(volumes: dict[int, float]) -> bool:
     try:
         with _Scarlett2Device(usb.core, usb.util) as dev:
             dev.init()
-            for bus in MONITOR_MIX_BUSES:
+            for bus in buses:
                 gains = dev.get_mix(bus)
                 changed = False
                 for crosspoint, gain in targets.items():

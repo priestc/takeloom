@@ -31,13 +31,14 @@ from typing import Callable
 
 from .audio.filters import CompressorSettings
 from .audio.pitch import effective_tuning, nearest_target
-from .audio.scarlett2_direct_monitor import FOCUSRITE_DEVICE_NAME, set_channel_gains
+from .audio.scarlett2_direct_monitor import FOCUSRITE_DEVICE_NAME, monitor_mix_buses, set_channel_gains
 from .audio.stream_guard import close_stream, keep_alive
 from .config import DEFAULT_CONFIG_PATH, INSTRUMENT_LABELS, MAX_INSTRUMENT_VOLUME_PERCENT, Instrument, StudioConfig
 from .phone_camera.protocol import DEVICE_PREFIX, is_phone_device, phone_device_id
 from .project import Project, Setlist, TakeInfo, TrackEntry
 from .utils import atomic_write_text, ensure_dir, timestamp_now, wall_timestamp
 from .video.live_footer import footer_text as live_footer_text
+from .audio.sync_click import VERSION as SYNC_CLICK_VERSION
 
 
 class BackendError(Exception):
@@ -1856,6 +1857,17 @@ _vault_sync_lock = threading.Lock()
 # One session upload at a time: the background retry (retry_session_uploads)
 # and a just-processed session's own upload never send the same files at once.
 _session_upload_lock = threading.Lock()
+def _output_layout(config: "StudioConfig", out_info) -> dict:
+    """AudioEngine's output arguments: the speaker/headphone split
+    (config.speaker_split) on a device with 4 outputs or more, else the
+    configured number of outputs, every one the full mix."""
+    available = int(out_info["max_output_channels"])
+    if config.speaker_split and available >= 4:
+        return {"output_channels": 4, "speaker_channels": (0, 1), "headphone_channels": (2, 3),
+                "sync_clicks": config.sync_clicks}
+    return {"output_channels": max(1, min(config.output_channels, available))}
+
+
 def _by_ip_address(url: str) -> str:
     """`url` with its host name resolved here, to an IP address: a phone
     may not know the LAN's names (tank2.lan), and its OS only lets an app
@@ -4200,7 +4212,7 @@ class LocalBackend(Backend):
         if not volumes:
             return
         try:
-            set_channel_gains(volumes)
+            set_channel_gains(volumes, monitor_mix_buses(config.speaker_split))
         except Exception:
             pass
 
@@ -4221,7 +4233,7 @@ class LocalBackend(Backend):
         if not volumes:
             return
         try:
-            set_channel_gains(volumes)
+            set_channel_gains(volumes, monitor_mix_buses(config.speaker_split))
         except Exception:
             pass
 
@@ -4297,7 +4309,6 @@ class LocalBackend(Backend):
         if config.output_device and out_dev is None:
             raise BackendError(f"Output device '{config.output_device}' not found.")
         out_info = sd.query_devices(out_dev, "output")
-        output_channels = min(config.output_channels, out_info["max_output_channels"])
 
         input_info = None
         synth = None
@@ -4327,7 +4338,7 @@ class LocalBackend(Backend):
         engine = AudioEngine(
             sample_rate=config.sample_rate, buffer_size=config.buffer_size,
             input_device=in_dev, output_device=out_dev,
-            input_channels=input_channels, output_channels=max(1, output_channels),
+            input_channels=input_channels, **_output_layout(config, out_info),
             monitor_channel=monitor_channel,
             compressor_settings=config.compressor_for_label(inst.label),
             monitor_instrument=monitor_instrument, instrument_volume=instrument_volume,
@@ -4407,7 +4418,6 @@ class LocalBackend(Backend):
         if config.output_device and out_dev is None:
             raise BackendError(f"Output device '{config.output_device}' not found.")
         out_info = sd.query_devices(out_dev, "output")
-        output_channels = min(config.output_channels, out_info["max_output_channels"])
 
         in_dev = None
         max_in = 0
@@ -4457,7 +4467,7 @@ class LocalBackend(Backend):
                 sample_rate=config.sample_rate, buffer_size=config.buffer_size,
                 input_device=in_dev, output_device=out_dev,
                 input_channels=(max(channels) + 1) if channels else 1,
-                output_channels=max(1, output_channels),
+                **_output_layout(config, out_info),
                 monitor_instrument=self._monitoring_mode == "production",
                 monitor_channels=channels, extra_synths=synths,
             )
@@ -5513,13 +5523,12 @@ class LocalBackend(Backend):
                 f"but device only has {in_info['max_input_channels']} channels."
             )
         out_info = sd.query_devices(out_dev, "output")
-        output_channels = min(config.output_channels, out_info["max_output_channels"])
 
         from .audio.engine import AudioEngine
         engine = AudioEngine(
             sample_rate=config.sample_rate, buffer_size=config.buffer_size,
             input_device=in_dev, output_device=out_dev,
-            input_channels=max(input_info.channel, 1), output_channels=max(1, output_channels),
+            input_channels=max(input_info.channel, 1), **_output_layout(config, out_info),
             monitor_channel=input_info.channel - 1, compressor_settings=config.compressor_for_label(inst.label),
         )
         engine.start()
@@ -6526,13 +6535,13 @@ class LocalBackend(Backend):
                 from .video.stream_switcher import StreamSwitcher
                 stream_feeder = LiveAudioFeeder(
                     session_dir / "stream_audio.fifo",
-                    sample_rate=config.sample_rate, channels=engine.output_channels,
+                    sample_rate=config.sample_rate, channels=engine.mix_channels,
                 )
                 stream_feeder.start()
                 stream_switcher = StreamSwitcher(StreamTarget(
                     rtmp_url=youtube_rtmp_url(config.youtube_stream_key),
                     audio_fifo=stream_feeder.fifo_path,
-                    sample_rate=config.sample_rate, channels=engine.output_channels,
+                    sample_rate=config.sample_rate, channels=engine.mix_channels,
                     width=config.streaming_video_width, bitrate_kbps=config.streaming_bitrate_kbps,
                 ), program=self._resolve_program_camera(cameras), log_path=session_dir / "stream.log",
                     labels=dict(cameras),
@@ -7183,6 +7192,9 @@ class LocalBackend(Backend):
             "studio_location": session.studio_location,
             "sample_rate": session.engine.sample_rate,
             "mix_start_frame": session.mix_start_frame,
+            # Where each sync click started, on session.flac's timeline
+            # (audio/sync_click.py; phone_camera/sync.py matches them).
+            "sync_clicks": {"version": SYNC_CLICK_VERSION, "frames": session.engine.sync_click_frames},
             "has_video": session.session_video_raw is not None or bool(session.extra_cameras),
             **({"phone_camera": session.video_recorder.session_log_info(session.phone_mix_start_ns)}
                if session.phone_mix_start_ns is not None else {}),

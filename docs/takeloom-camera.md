@@ -125,6 +125,32 @@ client no longer authorized on the server loses its token within minutes.
 A remote laptop uses its token to fetch take audio and videos straight
 from the vault, when it can reach it.
 
+### Speakers, headphones, and sync clicks
+
+Step 2 only works if the phones hear something that's also in the session's
+audio. A MIDI keyboard or a DI'd bass heard only in headphones leaves the
+room silent, and the video falls back to clock sync: tens of ms off, with
+drift uncorrected (most sessions before this did). Two settings in
+Recording Devices fix that:
+
+- **Speakers play only the instrument.** The audio stream gets 4 outputs:
+  Playback 1-2 (the speakers) carries just the instrument, and Playback 3-4
+  (the headphones) the full mix with the backing track. The phones then
+  always hear the instrument, which matches `session.flac` exactly, and the
+  room's sound (the Atmospheric track) never has the copyrighted backing
+  track in it. On the Scarlett 4i4, set Focusrite Control 2's Routing to
+  Output 1-2 = Mix A and Headphones = Mix B. In the Mixer, put Playback 1-2
+  only in Mix A and Playback 3-4 only in Mix B. takeloom's automatic direct
+  monitor then sets the input's fader in both mixes. Close Focusrite Control 2
+  afterwards, since takeloom can't reach the device while it's open.
+- **Sync clicks.** With the split on, whenever the speakers have been quiet
+  for 20 seconds (and 2 seconds into the session), they play a 60 ms chirp.
+  Each one's position is logged (`sync_clicks` in `session_log.json`), and
+  alignment matches the phones' mics against the same chirps rebuilt from
+  the log. A session nobody could hear still lines up to well under a
+  millisecond, drift included. Clicks only happen in silences, never over
+  the instrument.
+
 If the upload never arrives (phone died, app killed), the session uses the
 live feed the server recorded, aligned by clock sync alone. That video may
 have gaps wherever Wi-Fi dropped frames. Recordings that haven't uploaded

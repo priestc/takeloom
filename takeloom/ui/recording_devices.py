@@ -130,6 +130,27 @@ class RecordingDevicesFrame(ttk.Frame):
         )
         row += 1
 
+        # The speaker/headphone split (config.speaker_split; audio/engine.py).
+        self.speaker_split_var = tk.BooleanVar(value=self.config_obj.speaker_split)
+        ttk.Checkbutton(
+            self, text="Speakers play only the instrument (backing tracks only in headphones)",
+            variable=self.speaker_split_var,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        row += 1
+        ttk.Label(
+            self, foreground="gray", wraplength=520, justify="left",
+            text="Uses 4 outputs: Playback 1-2 to the speakers, Playback 3-4 to the headphones. On the "
+                 "Scarlett 4i4, set Focusrite Control 2's Routing to Output 1-2 = Mix A and Headphones = "
+                 "Mix B, with Playback 1-2 only in Mix A and Playback 3-4 only in Mix B.",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", padx=(22, 0))
+        row += 1
+        self.sync_clicks_var = tk.BooleanVar(value=self.config_obj.sync_clicks)
+        ttk.Checkbutton(
+            self, text="Sync clicks through the speakers when they're quiet (lines up phone video)",
+            variable=self.sync_clicks_var,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        row += 1
+
         ttk.Label(self, text="Latency compensation (ms)").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
         default_comp = self.config_obj.latency_compensation_ms
         if default_comp == 0.0:
@@ -240,6 +261,8 @@ class RecordingDevicesFrame(ttk.Frame):
             self.config_obj.output_channels = int(self.output_channels_var.get())
         except (ValueError, tk.TclError):
             pass
+        self.config_obj.speaker_split = bool(self.speaker_split_var.get())
+        self.config_obj.sync_clicks = bool(self.sync_clicks_var.get())
         try:
             self.config_obj.latency_compensation_ms = float(self.latency_var.get())
         except ValueError:

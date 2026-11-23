@@ -41,6 +41,9 @@ class AudioEngine:
         synth: Synth | None = None,
         monitor_channels: list[int] | None = None,
         extra_synths: list[Synth] | None = None,
+        speaker_channels: tuple[int, ...] | None = None,
+        headphone_channels: tuple[int, ...] | None = None,
+        sync_clicks: bool = False,
     ) -> None:
         self.sample_rate = sample_rate
         self.buffer_size = buffer_size
@@ -48,6 +51,17 @@ class AudioEngine:
         self.output_device = output_device
         self.input_channels = input_channels
         self.output_channels = output_channels
+        # The speaker/headphone split (config.speaker_split): 0-based
+        # output channels (stereo pairs) for the speakers, which get only
+        # the instrument (and sync clicks), and for the headphones, which
+        # get the full mix with the backing track. None: every output gets
+        # the full mix, as before. The audio interface's own routing sends
+        # each pair to its physical output (see config.speaker_split).
+        self.speaker_channels = list(speaker_channels) if speaker_channels else None
+        self.headphone_channels = list(headphone_channels) if headphone_channels else None
+        # The shape of every mix this builds (and records/streams): stereo,
+        # unless the device has a single output.
+        self.mix_channels = 2 if (self.speaker_channels or output_channels == 2) else 1
         self.monitor_channel = monitor_channel
         # Whether the processed instrument input is added into the live
         # headphone mix ("production" monitoring mode) or left out of it
@@ -94,6 +108,13 @@ class AudioEngine:
         # drained yet.
         self._session_frames: int = 0
         self.mixer = Mixer(sample_rate)
+        # Sync clicks through the speakers when they're quiet (audio/
+        # sync_click.py) — only with the split, and only while a session
+        # records (its timeline is what they're logged on).
+        self.clicks = None
+        if sync_clicks and self.speaker_channels:
+            from .sync_click import ClickScheduler
+            self.clicks = ClickScheduler(sample_rate)
         self.compressor = Compressor(sample_rate, compressor_settings)
         self._stream: sd.Stream | None = None
         self._running = False
@@ -191,6 +212,8 @@ class AudioEngine:
     def start_session_recording(self, output_path: Path) -> None:
         """Start the continuous session-level recorder."""
         self._session_frames = 0
+        if self.clicks is not None:
+            self.clicks.reset()
         self.session_recorder = Recorder(output_path, self.sample_rate, 1)
         self.session_recorder.start()
 
@@ -203,7 +226,7 @@ class AudioEngine:
     def start_mix_recording(self, output_path: Path) -> None:
         """Start recording the full monitor mix (backing track + input), for
         muxing with a session video recording."""
-        self.mix_recorder = Recorder(output_path, self.sample_rate, self.output_channels)
+        self.mix_recorder = Recorder(output_path, self.sample_rate, self.mix_channels)
         self.mix_recorder.start()
 
     def stop_mix_recording(self) -> None:
@@ -322,7 +345,7 @@ class AudioEngine:
         # instrument in it, even when Recording Monitoring keeps it out of
         # the live headphone feed sent to outdata below.
         monitor_mono = compressed_mono * self.instrument_volume
-        if self.output_channels == 2:
+        if self.mix_channels == 2:
             full_mix = mix.copy()
             full_mix[:, 0] += monitor_mono[:, 0]
             full_mix[:, 1] += monitor_mono[:, 0]
@@ -333,15 +356,30 @@ class AudioEngine:
         # A synth has no hardware direct-monitor path, so "recording"
         # monitoring mode (monitor_instrument False) would leave a MIDI
         # keyboard silent — it's always kept in the live feed instead.
+        # `instrument_out`: the part of `heard` that's the instrument (what
+        # the speakers play, with the split); None: none of it is (the
+        # audio interface's direct monitor plays it instead).
         if self.monitor_instrument or self.synth is not None:
-            outdata[:] = full_mix
+            heard, instrument_out = full_mix, monitor_mono
         elif synth_mono is not None:
-            heard = mix[:, :self.output_channels].copy()
-            heard += synth_mono * self.instrument_volume
+            instrument_out = synth_mono * self.instrument_volume
+            heard = mix[:, :self.mix_channels].copy()
+            heard += instrument_out
             np.clip(heard, -1.0, 1.0, out=heard)
+        else:
+            heard, instrument_out = mix[:, :self.mix_channels], None
+
+        if self.speaker_channels is None:
             outdata[:] = heard
         else:
-            outdata[:] = mix[:, :self.output_channels]
+            outdata.fill(0.0)
+            outdata[:, self.headphone_channels] = heard
+            speaker = instrument_out if instrument_out is not None else np.zeros((frames, 1), dtype=np.float32)
+            if self.clicks is not None and self.session_recorder is not None:
+                click = self.clicks.process(speaker, self._session_frames - frames)
+                if click is not None:
+                    speaker = speaker + click
+            outdata[:, self.speaker_channels] = np.clip(speaker, -1.0, 1.0)
 
         if self.mix_recorder:
             self.mix_recorder.write(full_mix)
@@ -356,7 +394,7 @@ class AudioEngine:
             # second read() call, which would double-advance playback
             # position.
             stream_mix = self.mixer.read_excluding(mix_position, frames, exclude={"backing"})
-            if self.output_channels == 2:
+            if self.mix_channels == 2:
                 stream_mix[:, 0] += monitor_mono[:, 0]
                 stream_mix[:, 1] += monitor_mono[:, 0]
             else:
@@ -451,6 +489,11 @@ class AudioEngine:
         if self.recorder:
             return self.recorder.elapsed_seconds
         return 0.0
+
+    @property
+    def sync_click_frames(self) -> list[int]:
+        """Where each sync click started, on the session's timeline."""
+        return list(self.clicks.frames) if self.clicks is not None else []
 
     @property
     def session_frames(self) -> int:

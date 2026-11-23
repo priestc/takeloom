@@ -310,6 +310,21 @@ class StudioConfig:
     # vault storage, and only when the vault says it can (ffmpeg with
     # libx264); otherwise this machine encodes as usual.
     video_encoding: str = "local"
+    # Speakers play only the instrument; the headphones get the full mix
+    # with the backing track (audio/engine.py's speaker_channels). The
+    # audio stream then has 4 outputs: playback 1-2 is the speakers', 3-4
+    # the headphones'. It needs the audio interface routed to match — on
+    # the studio's Scarlett 4i4, in Focusrite Control 2: Output 1-2 from
+    # Mix A (inputs + Playback 1-2), Headphones from Mix B (inputs +
+    # Playback 3-4); see audio/scarlett2_direct_monitor.py. Keeps the
+    # backing track (copyrighted) out of the room, so the phones' mics
+    # (the "atmospheric" sound) only ever hear the instrument, which is
+    # also what lines their video up (phone_camera/sync.py).
+    speaker_split: bool = False
+    # With speaker_split: a short chirp through the speakers whenever
+    # they've been quiet for a while (audio/sync_click.py), so the phones
+    # always hear something to line their video up with.
+    sync_clicks: bool = True
     session_vault_path: str = str(Path.home() / "Documents" / "Takeloom Studio Vault")
     # The remote vault: a `takeloom-vault` server (this repo's vault_server/
     # folder), e.g. "http://tank2.lan:51824" — see takeloom/vault_client.py.
