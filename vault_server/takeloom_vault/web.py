@@ -895,7 +895,7 @@ def projects_page(pending: list[PairingRequest]) -> str:
         "<button data-tab='t-insp'>Inspiration</button><button data-tab='t-set'>Song set</button></div>"
         "<div class='tab' id='t-file'><p>An audio or video file (a video's sound is used). "
         "<input type='file' id='add-file' accept='audio/*,video/*'> "
-        "Name <input id='add-file-name' placeholder='(the file's name)'> <button class='ok' id='add-file-go'>Add</button></p></div>"
+        "Name <input id='add-file-name' placeholder='(the file name)'> <button class='ok' id='add-file-go'>Add</button></p></div>"
         "<div class='tab' id='t-yt' style='display:none'><p>YouTube URL <input id='add-yt' style='width:28em'> "
         "<button class='ok' id='add-yt-go'>Add</button></p><p class='muted small'>The node downloads the whole video.</p></div>"
         "<div class='tab' id='t-insp' style='display:none'><p>"
