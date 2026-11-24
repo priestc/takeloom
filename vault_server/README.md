@@ -53,13 +53,22 @@ revokes one itself once its device is no longer authorized there.
 - `/sessions/<name>`: the session's video (`session_video.mp4`), with a jump button for
   each song's start; the takes it filed (linked to their audio/video in `completed_takes/`);
   and its raw files (FLAC with an inline player, MIDI, the log).
+  **Delete session…** removes it and the takes it filed (takeloom drops them from its setlists
+  on its next sync).
+- `/completed`: every completed take, grouped by song, with a mixer that plays a song's takes
+  and backing track together in the browser: a fader, Mute and Solo per instrument, **Save
+  mix** (`mixes/`), **Export mix…** (an MP3 in `final_mixes/`, from the takes' lossless
+  originals), each instrument's preferred take, and the backing-track trim. Setlists are
+  takeloom's, so those last two are queued (`setlist_edits.json`) and shown straight away;
+  takeloom makes them on its next sync and acknowledges them. Per-instrument compressor
+  settings (takeloom's Studio Setup) aren't applied here.
 
 No login: anyone on the local network can browse. The API needs a paired token.
 
 ## What it stores
 
 Everything takeloom keeps in its vault: `sessions/`, `completed_takes/`, `backing_tracks/`,
-`mixes/` (the Completed Takes mixer's saved mixes), `final_mixes/` (exported song mixes),
+`mixes/` (the Completed Takes page's saved mixes), `final_mixes/` (exported song mixes),
 `projects/` (setlists), and the root files `inspiration_takes.json` and `backing_tuning.json`.
 Takeloom keeps them in sync after each session (`takeloom vault sync`).
 

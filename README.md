@@ -148,10 +148,12 @@ The session plays the backing track through your speakers, monitors your instrum
 
 **Completing a take:** Press `r` to start, then `e` when the song finishes. The take is saved to the vault's `completed_takes/` (as an MP3, which records where its lossless original sits in the session) and set as the preferred take in the setlist.
 
-**Exporting a mix:** in the Completed Takes tab's mixer, **Export mix...** renders what you're
-hearing (faders, mutes, solo, trim) to an MP3 wherever you choose, and keeps a copy in the
-vault's `final_mixes/`. Each take comes from its lossless original in the session recording,
-not from its MP3.
+**Completed takes and mixing** are on the vault's web UI (`/completed`): every completed take
+by song, a mixer that plays them together in the browser (faders, mutes, solo, saved mixes),
+each song's preferred take per instrument and its backing-track trim. **Export mix…** renders
+what you're hearing to an MP3 in the vault's `final_mixes/`, from each take's lossless original
+in the session recording rather than its MP3. A preferred-take or trim change is queued on the
+vault and made in takeloom's setlists on its next sync, and always before a session opens.
 
 **Restarting a take:** Press `b` to loop back to the beginning. The backing track restarts and a new take file begins.
 

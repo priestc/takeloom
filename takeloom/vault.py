@@ -587,7 +587,10 @@ _PRUNABLE = {
 }
 # Synced, never pruned. A take's audio is never overwritten on the vault
 # (its name is unique: see utils.next_take_number); a mismatch is reported.
-_SYNCED_DIRS = ("completed_takes", "backing_tracks", "mixes", "final_mixes")
+# Not mixes/: song mixes are the vault's own now (its Completed Takes page
+# saves them; nothing here writes them any more), so an old copy here must
+# never overwrite one saved there.
+_SYNCED_DIRS = ("completed_takes", "backing_tracks", "final_mixes")
 _ROOT_FILES = (_INDEX_FILENAME, "backing_tuning.json")
 
 

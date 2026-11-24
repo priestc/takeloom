@@ -13,7 +13,6 @@ from tkinterdnd2 import TkinterDnD
 from ..backend import BackendError
 from ..device_check import check_configured_devices
 from .app_state import AppState
-from .completed_takes import CompletedTakesFrame
 from .platform_style import normalize as normalize_platform_style
 from .record import RecordFrame
 from .recording_devices import RecordingDevicesFrame
@@ -23,13 +22,12 @@ from .studio_setup import StudioSetupFrame
 # (title, frame class, persistent). Persistent tabs are built once and never
 # torn down on tab switches — needed for Record, which holds a live audio
 # stream / ffmpeg process / camera handle that a rebuild would kill outright;
-# for Remote, which holds the connected RemoteClient; and for Completed Takes,
-# which is slow to rebuild and keeps its player bar playing across switches.
+# and for Remote, which holds the connected RemoteClient. (Completed takes,
+# and their mixer, are on the vault's web UI now.)
 TABS = [
     ("Record", RecordFrame, True),
     ("Studio Setup", StudioSetupFrame, False),
     ("Recording Devices", RecordingDevicesFrame, False),
-    ("Completed Takes", CompletedTakesFrame, True),
     ("Remote", RemoteFrame, True),
 ]
 

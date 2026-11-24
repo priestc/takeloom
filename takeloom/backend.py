@@ -3109,12 +3109,12 @@ class LocalBackend(Backend):
                 raise BackendError("This session is still recording — wait for it to end first.")
         from .processing.splicer import process_session
         summary = process_session(session_dir=session_dir_path, config=config)
-        from .vault import sync_and_maybe_prune, sync_vault_files
+        from .vault import sync_and_maybe_prune
         with _session_upload_lock:
             sync_and_maybe_prune(config, session_dir_path,
                                  log=lambda msg: self._emit("vault_status", {"status": msg}))
         with _vault_sync_lock:
-            sync_vault_files(config, prune=not self.is_session_active())
+            self._sync_vault(config, prune=not self.is_session_active())
         return summary
 
     def delete_session(self, session_dir: str) -> dict:
@@ -3702,22 +3702,108 @@ class LocalBackend(Backend):
             pass
         return files
 
+    # --- changes made on the vault's web UI ---
+
+    _APPLIED_EDITS = ".setlist_edits_applied.json"
+
+    def _apply_vault_setlist_edits(self, config: StudioConfig, client, log) -> list[str]:
+        """Make the setlist changes queued from the vault's Completed Takes
+        page (vault_server/takeloom_vault/completed.py) here, in order, each
+        once: a song's preferred take for an instrument (set_preferred_take)
+        or its backing-track trim (edit_backing_track). One that no longer
+        applies (its take was replaced meanwhile...) is logged and dropped.
+        Returns the ids of every queued edit now made here — to acknowledge
+        once the setlists have gone up (_sync_vault). Only while no session
+        is open: an open session's setlist could write them back."""
+        from .utils import atomic_write_text
+        from .vault import vault_root
+        edits = client.setlist_edits()
+        if not edits:
+            return []
+        path = vault_root(config) / self._APPLIED_EDITS
+        try:
+            applied = set(json.loads(path.read_text()))
+        except (OSError, ValueError, TypeError):
+            applied = set()
+        queued = {e["id"] for e in edits}
+        fresh = [e for e in edits if e["id"] not in applied]
+        self._applying_vault_edits = True
+        try:
+            for e in fresh:
+                song = e.get("song") or e.get("take_filename")
+                try:
+                    if e.get("type") == "preferred_take":
+                        self.set_preferred_take(str(e.get("take_filename") or ""), str(e.get("instrument") or ""),
+                                                e.get("new_filename") or None)
+                        log(f"From the vault's web UI: '{song}' {e.get('instrument')} take is now "
+                            f"{e.get('new_filename') or 'none'}.")
+                    elif e.get("type") == "trim":
+                        self.edit_backing_track(str(e.get("take_filename") or ""),
+                                                float(e.get("trim_start_seconds") or 0.0),
+                                                float(e.get("trim_end_seconds") or 0.0))
+                        log(f"From the vault's web UI: '{song}' trimmed to "
+                            f"{e.get('trim_start_seconds')}s / {e.get('trim_end_seconds')}s.")
+                    else:
+                        log(f"Skipped an unknown change from the vault's web UI ({e.get('type')!r}).")
+                except (BackendError, OSError, ValueError) as err:
+                    log(f"Couldn't make a change from the vault's web UI to '{song}': {err} — dropped it.")
+                applied.add(e["id"])
+        finally:
+            self._applying_vault_edits = False
+        atomic_write_text(path, json.dumps(sorted(applied & queued), indent=2))
+        return sorted(applied & queued)
+
+    def _sync_vault(self, config: StudioConfig, log=None, prune: bool = True) -> dict | None:
+        """vault.sync_vault_files, catching up first (when no session is
+        open — `prune`) on what was changed on the vault's web UI, and then
+        taking those changes off its queue once the setlists are up."""
+        from .vault import remote_vault, sync_vault_files
+        log = log or (lambda msg: print(f"takeloom: {msg}"))
+        client = remote_vault(config) if prune else None
+        done: list[str] = []
+        if client is not None:
+            try:
+                done = self._apply_vault_setlist_edits(config, client, log)
+            except Exception as e:  # noqa: BLE001 — best-effort, like the sync itself
+                log(f"Couldn't catch up on changes made on the vault's web UI: {type(e).__name__}: {e}")
+        counts = sync_vault_files(config, log=log, prune=prune)
+        if client is not None and done and counts is not None and not counts["failed"]:
+            client.ack_setlist_edits(done)
+        return counts
+
+    def _vault_changed_on_web(self, config: StudioConfig) -> bool:
+        """Whether the vault's web UI has changed something since: a queued
+        setlist edit (made here or not, until it's acknowledged) or a
+        deleted session not caught up on yet."""
+        from .vault import _APPLIED_DELETIONS, _vault_deletions, remote_vault, vault_root
+        client = remote_vault(config)
+        if client is None:
+            return False
+        if client.setlist_edits():
+            return True
+        try:
+            caught_up = set(json.loads((vault_root(config) / _APPLIED_DELETIONS).read_text()))
+        except (OSError, ValueError, TypeError):
+            caught_up = set()
+        return any(d["session"] not in caught_up for d in _vault_deletions(client))
+
     def _sync_vault_soon(self) -> None:
         """Mirror the vault to the remote one (vault.sync_vault_files) on a
         background thread, after a change made outside a session (a saved
         mix, a preferred take...). Never while a session is open: that
         waits for the sync at its end (no network work mid-session)."""
+        if getattr(self, "_applying_vault_edits", False):
+            return  # _sync_vault syncs once they're all made
         if self.is_session_active():
             return
         config = self.get_config()
-        from .vault import remote_vault, sync_vault_files
+        from .vault import remote_vault
         if remote_vault(config) is None:
             return
 
         def run() -> None:
             with _vault_sync_lock:
-                sync_vault_files(config, log=lambda msg: print(f"takeloom: {msg}"),
-                                 prune=not self.is_session_active())
+                self._sync_vault(config, prune=not self.is_session_active())
 
         threading.Thread(target=run, daemon=True, name="vault-sync").start()
 
@@ -6556,6 +6642,17 @@ class LocalBackend(Backend):
         self._close_active_monitor()  # always opens its own engine, never reuses the ambient one
 
         config = self.get_config()
+        # Changes made on the vault's web UI (a song's preferred take, its
+        # trim) into the setlists before this session reads them — part of
+        # the session-open prefetch, never mid-session. Best-effort.
+        from .vault import remote_vault
+        client = remote_vault(config)
+        if client is not None:
+            try:
+                self._apply_vault_setlist_edits(
+                    config, client, lambda msg: self._emit("recording_status", {"status": msg}))
+            except Exception as e:  # noqa: BLE001
+                print(f"takeloom: couldn't catch up on the vault's web UI changes: {type(e).__name__}: {e}")
         project = self._open_project(project_name)
         # Best-effort: pulls back anything "remote" vault mode pruned
         # locally after an earlier session — see vault.py. A no-op in
@@ -7079,14 +7176,14 @@ class LocalBackend(Backend):
         # into its project — sync_and_maybe_prune can delete session_dir
         # entirely in "remote" vault mode, which splicing still needs to
         # read from above.
-        from .vault import sync_and_maybe_prune, sync_vault_files
+        from .vault import sync_and_maybe_prune
         with _session_upload_lock:
             uploaded = sync_and_maybe_prune(config, session_dir, log=status)
         # Then the takes it filed, its backing tracks, the metadata and the
         # setlists — and, under "Remote only", their local media removed,
         # unless a new session has opened meanwhile (it may need them).
         with _vault_sync_lock:
-            sync_vault_files(config, log=status, prune=not self.is_session_active())
+            self._sync_vault(config, log=status, prune=not self.is_session_active())
         from .video import render_jobs
         if not uploaded and render_jobs.needs_vault(session_dir):
             status("The vault didn't get this session yet; it's kept here until it does (the vault has its "
@@ -7121,7 +7218,7 @@ class LocalBackend(Backend):
         if self._busy_with_a_session():
             return 0
         config = self.get_config()
-        from .vault import sessions_awaiting_upload, sync_and_maybe_prune, sync_vault_files
+        from .vault import sessions_awaiting_upload, sync_and_maybe_prune
         log = lambda msg: self._emit("vault_status", {"status": msg})  # noqa: E731
         done = 0
         with _session_upload_lock:
@@ -7136,7 +7233,13 @@ class LocalBackend(Backend):
                     done += 1
             if done:
                 with _vault_sync_lock:
-                    sync_vault_files(config, log=log, prune=not self._busy_with_a_session())
+                    self._sync_vault(config, log=log, prune=not self._busy_with_a_session())
+        if not done and not self._busy_with_a_session() and self._vault_changed_on_web(config):
+            # Something changed on the vault's web UI (a take picked, a
+            # trim, a session deleted): catch up now rather than at the
+            # next session.
+            with _vault_sync_lock:
+                self._sync_vault(config, log=log, prune=not self._busy_with_a_session())
         return done
 
     # --- phone recordings that arrive after their session was processed ---

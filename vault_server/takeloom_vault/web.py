@@ -41,6 +41,29 @@ video { width: 100%; max-height: 70vh; background: #000; border-radius: 6px; }
 audio { width: 100%; max-width: 520px; }
 .songs button { font-size: .85em; padding: .1em .6em; }
 form { display: inline; }
+.badge { display: inline-block; color: #fff; font-size: .75em; font-weight: 600; padding: .05em .45em; border-radius: 4px; margin-right: .25em; }
+.ct { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1.6em; align-items: start; }
+@media (max-width: 800px) { .ct { grid-template-columns: 1fr; } }
+#mixer { position: sticky; top: .5em; border: 1px solid var(--line); border-radius: 8px; padding: .8em 1em; }
+#mixer h2 { margin-top: 0; }
+h1 button { font-size: .55em; vertical-align: middle; }
+.transport { display: flex; gap: .6em; align-items: center; margin-bottom: .8em; }
+.transport input[type=range] { flex: 1; }
+.strips { display: flex; gap: 1em; overflow-x: auto; padding-bottom: .4em; }
+.strip { display: flex; flex-direction: column; align-items: center; gap: .3em; min-width: 5.5em; font-size: .85em; }
+.strip.empty { justify-content: flex-end; }
+.strip label { align-self: flex-start; }
+.fader { writing-mode: vertical-lr; direction: rtl; height: 170px; width: 1.6em; }
+.pct { font-variant-numeric: tabular-nums; }
+.buttons { display: flex; gap: .5em; align-items: center; flex-wrap: wrap; margin-top: .8em; }
+.trim { margin-top: 1em; border-top: 1px solid var(--line); padding-top: .6em; }
+.trim summary { cursor: pointer; font-weight: 600; }
+.trimrow { display: flex; gap: .6em; align-items: center; flex-wrap: wrap; }
+.trimrow input { width: 5.5em; }
+.filters { display: flex; gap: 1em; align-items: center; flex-wrap: wrap; margin-bottom: .6em; }
+tr.song { cursor: pointer; } tr.song:hover { background: #8881; } tr.song.on b { color: var(--accent); }
+tr.take td { border-bottom: none; padding: .15em .6em .15em 2.2em; font-size: .85em; }
+.tri { display: inline-block; width: 1.3em; color: var(--muted); }
 """
 
 
@@ -50,7 +73,7 @@ def page(title: str, body: str) -> str:
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         f"<title>{escape(title)} · Takeloom Vault</title><style>{_CSS}</style></head><body>"
         "<header><a class='brand' href='/'>Takeloom Vault</a><a href='/'>Sessions</a>"
-        "<a href='/clients'>Paired devices</a></header>"
+        "<a href='/completed'>Completed takes</a><a href='/clients'>Paired devices</a></header>"
         f"{body}</body></html>"
     )
 
@@ -806,6 +829,29 @@ def session_page(vault: Vault, name: str, data: dict, editor=None, publisher=Non
         "v.removeEventListener('loadedmetadata',f);v.currentTime=t;if(p)v.play();});}</script>"
     )
     return page(name, "".join(parts))
+
+
+_COMPLETED_JS = Path(__file__).with_name("completed_page.js")
+
+
+def completed_page(pending: list[PairingRequest]) -> str:
+    """Every completed take across the vault, by song, with a mixer — the
+    page's data comes from GET /completed/data (completed.py), its
+    workings are completed_page.js."""
+    body = (
+        _pairing_banner(pending)
+        + "<h1>Completed takes <span id='ct-count' class='muted small'></span> "
+          "<button id='ct-reload'>⟳ Reload</button> <span id='ct-loaded' class='muted small'></span></h1>"
+        "<p class='muted small'>Every completed take across the whole vault, grouped by song. "
+        "Click a song to load its takes into the mixer. <span id='ct-pending'></span></p>"
+        "<div class='ct'><div id='mixer'></div><div>"
+        "<div class='filters'><label>Filter by title <input id='ct-title' type='search'></label>"
+        "<label>Project <select id='ct-project'><option value=''>All projects</option></select></label></div>"
+        "<table><thead><tr><th>Name</th><th>Backing source</th><th>Instruments</th></tr></thead>"
+        "<tbody id='ct-songs'></tbody></table></div></div>"
+        f"<script>{_COMPLETED_JS.read_text()}</script>"
+    )
+    return page("Completed takes", body)
 
 
 def clients_page(clients: list[PairedClient], pending: list[PairingRequest]) -> str:

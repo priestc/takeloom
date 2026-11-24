@@ -11,6 +11,9 @@ API — every route except /api/pair* needs `Authorization: Bearer <token>`:
                                            from render_jobs.json — render.py;
                                            "camera_uploads": phones can upload here directly)
     GET    /api/sessions                -> {"sessions": {name: session_log, ...}}
+    GET    /api/setlist-edits           -> {"edits": [...]}: changes queued from the Completed Takes
+                                           page for takeloom to make to its setlists (completed.py)
+    POST   /api/setlist-edits/ack       {"ids": [...]} -> {"removed"}: made, and uploaded
     GET    /api/deleted-sessions        -> {"deleted": [{"session", "takes", "deleted_at"}]}: sessions
                                            deleted from the web UI, for takeloom to drop too
     GET    /api/sessions/<name>/log     -> session_log.json
@@ -50,6 +53,9 @@ Browser UI:
 
     GET  /                       session list (+ pending pairing requests)
     GET  /sessions/<name>        one session: video, songs, files
+    GET  /completed              every completed take, by song, with a mixer (completed.py; its
+                                 data from GET /completed/data)
+    POST /completed/mix|preferred-take|trim|export,  GET /completed/backing/<file>, /completed/export-status
     GET  /clients                paired devices
     GET  /media/<vault path>     file download/stream, with Range support (for <video> seeking)
     GET  /takes/<filename>/video  a take's video (as the API route above)
@@ -78,6 +84,7 @@ from .camera_uploads import CameraUploads, UploadConflict
 from .edit import EditRenderer
 from .render import Renderer
 from .youtube import Publisher
+from .completed import EditError, Library
 from .store import Vault, VaultPathError
 from .takes import TakeVideoCache, TakeVideoError
 
@@ -136,6 +143,7 @@ class VaultHTTPServer(ThreadingHTTPServer):
         self.camera_uploads = CameraUploads(vault)
         self.session_cameras = CameraUploads(vault, in_session=True)
         self.aligner = Aligner(vault, log)
+        self.library = Library(vault, take_videos.dir.parent / "backing-playback", take_videos, log)
         super().__init__(address, _Handler)
 
 
@@ -317,6 +325,8 @@ class _Handler(BaseHTTPRequestHandler):
                     raise _HTTPError(HTTPStatus.NOT_FOUND, f"No session named {name!r}") from None
                 log(f"Session {name} deleted via web UI from {self.ip}, with its {len(takes)} take(s)")
                 return self._redirect("/")
+            if path.startswith("/completed/"):
+                return self._completed_post(path[len("/completed/"):])
             if m := re.fullmatch(r"/clients/(\w+)/revoke", path):
                 if auth.revoke(m.group(1)):
                     log(f"Paired client {m.group(1)} revoked via web UI from {self.ip}")
@@ -328,6 +338,19 @@ class _Handler(BaseHTTPRequestHandler):
             return self._html(web.sessions_page(vault, vault.all_session_logs(), auth.pending_requests()))
         if path == "/clients":
             return self._html(web.clients_page(list(auth.clients), auth.pending_requests()))
+        if path == "/completed":
+            return self._html(web.completed_page(auth.pending_requests()))
+        if path == "/completed/data":
+            songs, projects = self.server.library.songs()
+            return self._json({"songs": songs, "projects": projects, "pending": len(self.server.library.edits())})
+        if m := re.fullmatch(r"/completed/backing/([^/]+)", path):
+            try:
+                return self._send_file(self.server.library.backing_playback(m.group(1)))
+            except EditError as e:
+                raise _HTTPError(HTTPStatus.NOT_FOUND, str(e)) from e
+        if path == "/completed/export-status":
+            song = (parse_qs(urlsplit(self.path).query).get("song") or [""])[0]
+            return self._json(self.server.library.export_status(song))
         if m := re.fullmatch(r"/sessions/([^/]+)/edit-status", path):
             return self._json(self.server.editor.status(m.group(1)))
         if m := re.fullmatch(r"/sessions/([^/]+)/publish-status", path):
@@ -383,6 +406,16 @@ class _Handler(BaseHTTPRequestHandler):
             return self._camera_upload(method, m.group(1), m.group(2), "", label, in_session=True)
         if path == "/sessions" and method == "GET":
             return self._json({"sessions": vault.all_session_logs()})
+        if path == "/setlist-edits" and method == "GET":
+            return self._json({"edits": self.server.library.edits()})
+        if path == "/setlist-edits/ack" and method == "POST":
+            ids = self._read_json().get("ids") or []
+            if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+                raise _HTTPError(HTTPStatus.BAD_REQUEST, "'ids' must be a list of strings")
+            removed = self.server.library.ack(ids)
+            if removed:
+                log(f"{label} ({self.ip}) applied {removed} queued setlist edit(s)")
+            return self._json({"removed": removed})
         if path == "/deleted-sessions" and method == "GET":
             return self._json({"deleted": vault.deleted_sessions()})
         if m := re.fullmatch(r"/sessions/([^/]+)/log", path):
@@ -433,6 +466,38 @@ class _Handler(BaseHTTPRequestHandler):
             log(f"{label} ({self.ip}) deleted: {', '.join(paths)}")
             return self._json({})
         raise _HTTPError(HTTPStatus.NOT_FOUND, f"No API route {method} /api{path}")
+
+    # --- the Completed Takes page's changes (completed.py) ---
+
+    def _completed_post(self, what: str) -> None:
+        library, body = self.server.library, self._read_json()
+        try:
+            if what == "mix":
+                volumes, muted = body.get("volumes") or {}, body.get("muted") or []
+                if not isinstance(volumes, dict) or not isinstance(muted, list):
+                    raise EditError("'volumes' must be an object and 'muted' a list")
+                return self._json(library.save_mix(str(body.get("track_name") or ""), volumes, muted))
+            if what == "preferred-take":
+                edit = library.set_preferred_take(
+                    str(body.get("take_filename") or ""), str(body.get("instrument") or ""),
+                    str(body.get("new_filename") or "") or None)
+                log(f"Queued from {self.ip}: {edit['song']!r} {edit['instrument']} take -> {edit['new_filename']}")
+                return self._json(edit)
+            if what == "trim":
+                edit = library.set_trim(str(body.get("take_filename") or ""),
+                                        float(body.get("trim_start_seconds") or 0), float(body.get("trim_end_seconds") or 0))
+                log(f"Queued from {self.ip}: {edit['song']!r} trim {edit['trim_start_seconds']}s/{edit['trim_end_seconds']}s")
+                return self._json(edit)
+            if what == "export":
+                tracks = body.get("tracks") or []
+                if not isinstance(tracks, list) or not all(isinstance(t, dict) for t in tracks):
+                    raise EditError("'tracks' must be a list of objects")
+                return self._json(library.export(
+                    str(body.get("track_name") or ""), tracks,
+                    float(body.get("trim_start_seconds") or 0), float(body.get("trim_end_seconds") or 0)))
+        except (EditError, TypeError, ValueError) as e:
+            return self._json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
+        raise _HTTPError(HTTPStatus.NOT_FOUND, "Not found")
 
     # --- a phone's recording, uploaded here directly ---
 

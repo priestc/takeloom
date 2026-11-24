@@ -178,6 +178,27 @@ class VaultClient:
             return None
         return [d for d in deleted if isinstance(d, dict)] if isinstance(deleted, list) else None
 
+    def setlist_edits(self) -> list[dict] | None:
+        """Setlist changes queued from the vault's Completed Takes page
+        ({"id", "type": "preferred_take"|"trim", "take_filename", ...}), in
+        the order made — for Backend._apply_vault_setlist_edits. None if
+        the vault couldn't be reached, or predates them (takeloom-vault < 0.16)."""
+        try:
+            edits = self._json("GET", "/api/setlist-edits").get("edits")
+        except VaultError:
+            return None
+        return [e for e in edits if isinstance(e, dict) and e.get("id")] if isinstance(edits, list) else None
+
+    def ack_setlist_edits(self, ids: list[str]) -> bool:
+        """Take edits this machine has made and uploaded off the vault's queue."""
+        if not ids:
+            return True
+        try:
+            self._json("POST", "/api/setlist-edits/ack", {"ids": ids})
+            return True
+        except VaultError:
+            return False
+
     def set_youtube(self, data: dict) -> None:
         """Give the vault this machine's YouTube account (or "" refresh_token
         to forget it), for publishing edits from there (the vault's
