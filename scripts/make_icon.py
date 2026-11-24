@@ -5,7 +5,11 @@ audio waveform being "woven" through them like weft yarn. Everything is drawn
 with jittered strokes, uneven widths, and coloring that doesn't quite stay in
 the lines — deliberately homemade.
 
-Also draws the Takeloom Camera app's icon (camera_app/): the same loom, with
+This used to be takeloom's own app icon; that's now the logo's T scrap
+(takeloom/data/icon.png, from scripts/render_logo.sh), so this no longer
+writes it.
+
+It still draws the Takeloom Camera app's icon (camera_app/): the same loom, with
 a hand-drawn camera inside the frame in place of the waveform, written out as
 the iOS app icon and the Android adaptive-icon foreground.
 """
@@ -240,10 +244,6 @@ def draw_icon(camera: bool = False) -> Image.Image:
 
 def write_icons() -> None:
     root = Path(__file__).resolve().parent.parent
-
-    out = root / "takeloom" / "data" / "icon.png"
-    draw_icon().resize((512, 512), Image.LANCZOS).save(out)
-    print(f"wrote {out}")
 
     sticker = draw_icon(camera=True)
 
