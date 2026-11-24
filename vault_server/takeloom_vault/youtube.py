@@ -1,8 +1,9 @@
 """Publishing a session's edit to YouTube, from the vault.
 
-What's uploaded is the edit with the footer drawn in (edit.py's
-render_for_youtube, rendered just before the upload and deleted after):
-the footer is only ever on YouTube, never in edit.mp4 itself.
+What's uploaded is the edit with the footer and the Takeloom logo
+watermark drawn in (edit.py's render_for_youtube, rendered just before the
+upload and deleted after): they're only ever on YouTube, never in edit.mp4
+itself.
 
 The video is here, so it's uploaded from here rather than copied back to
 the studio machine first. The YouTube account is takeloom's: when it's
@@ -194,7 +195,7 @@ class Publisher:
     def __init__(self, vault: Vault, log: Callable[[str], None], editor=None) -> None:
         self.vault = vault
         self.log = log
-        self.editor = editor  # edit.py's EditRenderer: adds the footer before uploading
+        self.editor = editor  # edit.py's EditRenderer: adds the footer and logo before uploading
         self._lock = threading.Lock()
         self._status: dict[str, dict] = {}
 

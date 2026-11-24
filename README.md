@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo/takeloom-logo.png" alt="Takeloom" width="640"></p>
+
 # Takeloom
 
 A CLI application for musicians to record instruments over backing tracks, manage songs/albums, and track completed takes.

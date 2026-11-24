@@ -24,10 +24,12 @@ whichever camera does instead. The frame is the largest camera's size.
 
 Stretches are snapped to whole frames (FPS) and each is encoded to exactly
 its frame count, so the picture never drifts from the sound however many
-cuts there are. edit.mp4 is clean: the footer (footer.py) is only for
+cuts there are. edit.mp4 is clean: the footer (footer.py) and the
+Takeloom logo watermark (logo.png, in the top right corner) are only for
 YouTube, so publishing renders the same plan again, from the same sources
-(one encode, never an encode of edit.mp4), with it drawn in, naming each
-stretch's camera, as edit_youtube.mp4 (render_for_youtube).
+(one encode, never an encode of edit.mp4), with them drawn in, the footer
+naming each stretch's camera, as edit_youtube.mp4 (render_for_youtube).
+logo.png is rendered from docs/logo/logo.html by scripts/render_logo.sh.
 
 Each stretch is its own short ffmpeg encode (frame-accurate seek, scaled to
 the frame size), then they're joined without re-encoding and the sound
@@ -52,7 +54,10 @@ from .store import Vault
 
 PLAN_FILE = "edit.json"
 OUTPUT_FILE = "edit.mp4"
-YOUTUBE_FILE = "edit_youtube.mp4"  # edit.mp4 with the footer, made to publish (render_for_youtube)
+YOUTUBE_FILE = "edit_youtube.mp4"  # edit.mp4 with the footer and logo, made to publish (render_for_youtube)
+LOGO = Path(__file__).with_name("logo.png")  # the watermark on YouTube videos
+LOGO_WIDTH = 0.16  # of the frame's width
+LOGO_OPACITY = 0.85
 FPS = 30
 MAX_CUTS = 5000
 _FONTS = ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/System/Library/Fonts/Helvetica.ttc")
@@ -91,6 +96,16 @@ def footer_filters(entries: list[list], start: float, end: float, camera: str, h
             f"x=14:y=h-{bar}+({bar}-th)/2:enable='between(t,{a - start:.3f},{b - start:.3f})'"
         )
     return ",".join(parts)
+
+
+def watermark_filter(width: int, height: int) -> str:
+    """The logo (input 1) scaled to LOGO_WIDTH of the frame, made a little
+    translucent and laid over [v] in the top right corner, as [out]: kept
+    clear of the footer along the bottom."""
+    logo_w = max(64, round(width * LOGO_WIDTH))
+    margin = max(8, height // 32)
+    return (f"[1:v]scale={logo_w}:-1:flags=lanczos,format=rgba,colorchannelmixer=aa={LOGO_OPACITY}[logo];"
+            f"[v][logo]overlay=W-w-{margin}:{margin}:format=auto[out]")
 
 
 def time_shift(entry_offset_ms) -> float:
@@ -270,21 +285,23 @@ class EditRenderer:
             self._status[name] = status
 
     def render_for_youtube(self, name: str, on_progress: Callable[[float], None]) -> Path:
-        """The edit with the footer drawn in (see the module docstring), as
-        YOUTUBE_FILE, rendered now on the calling thread. Just edit.mp4 for a
-        session whose videos carry their own footer already, or if this
-        ffmpeg can't draw text."""
+        """The edit with the footer and the logo drawn in (see the module
+        docstring), as YOUTUBE_FILE, rendered now on the calling thread. No
+        footer for a session whose videos carry their own already, or if
+        this ffmpeg can't draw text; just edit.mp4 if there's nothing to
+        add at all."""
         directory = self.vault.session_dir(name)
         data = self.vault.read_session_log(name) or {}
-        if not footer.wanted(data):
-            return directory / OUTPUT_FILE
-        if not self.draws_text:
+        if footer.wanted(data) and not self.draws_text:
             self.log(f"{name}'s YouTube video: no footer (this ffmpeg has no drawtext)")
-            return directory / OUTPUT_FILE
-        self._render(name, with_footer=True, output=YOUTUBE_FILE, on_progress=on_progress)
+        if not LOGO.is_file():
+            self.log(f"{name}'s YouTube video: no logo watermark ({LOGO} is missing)")
+            if not (footer.wanted(data) and self.draws_text):
+                return directory / OUTPUT_FILE
+        self._render(name, for_youtube=True, output=YOUTUBE_FILE, on_progress=on_progress)
         return directory / YOUTUBE_FILE
 
-    def _render(self, name: str, with_footer: bool = False, output: str = OUTPUT_FILE,
+    def _render(self, name: str, for_youtube: bool = False, output: str = OUTPUT_FILE,
                 on_progress: Callable[[float], None] | None = None) -> None:
         progress = on_progress or (lambda fraction: self._set(name, state="rendering", progress=fraction))
         directory = self.vault.session_dir(name)
@@ -312,13 +329,15 @@ class EditRenderer:
             else:
                 stretches.append([start, end, cam])
 
-        work = directory / (".edit-work-youtube" if with_footer else ".edit-work")
+        work = directory / (".edit-work-youtube" if for_youtube else ".edit-work")
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir()
-        entries = footer.schedule(data) if with_footer and footer.wanted(data) and self.draws_text else None
+        entries = footer.schedule(data) if for_youtube and footer.wanted(data) and self.draws_text else None
+        logo = LOGO if for_youtube and LOGO.is_file() else None
         nice = ["nice", "-n", "10"] if shutil.which("nice") else []
         started = time.monotonic()
-        what = "YouTube video (with the footer)" if entries is not None else "edit"
+        extras = [w for w, on in (("the footer", entries is not None), ("the logo", logo is not None)) if on]
+        what = f"YouTube video (with {' and '.join(extras)})" if for_youtube else "edit"
         self.log(f"Rendering {name}'s {what}: {len(stretches)} stretches, {total:.0f}s")
         try:
             names = []
@@ -335,14 +354,14 @@ class EditRenderer:
                 for candidate in [cam] + [c for c in fallback if c != cam]:
                     seek = cameras[candidate].file_time(start)
                     if seek >= 0 and self._encode_stretch(nice, cameras[candidate].path, seek, frames, width, height,
-                                                          part, overlay(candidate), work):
+                                                          part, overlay(candidate), work, logo):
                         break
                 else:
                     # No camera has started yet (the very start of a session):
                     # this one, black until it does.
                     seek = cameras[cam].file_time(start)
                     if not self._encode_stretch(nice, cameras[cam].path, seek, frames, width, height, part,
-                                                overlay(cam), work):
+                                                overlay(cam), work, logo):
                         raise RuntimeError(f"no camera has picture at {start:.1f}-{end:.1f}s")
                 names.append(part.name)
             (work / "parts.txt").write_text("".join(f"file '{n}'\n" for n in names))
@@ -408,10 +427,11 @@ class EditRenderer:
 
     @staticmethod
     def _encode_stretch(nice: list[str], src: Path, seek: float, frames: int, width: int, height: int,
-                        out: Path, overlay: str = "", work: Path | None = None) -> bool:
+                        out: Path, overlay: str = "", work: Path | None = None, logo: Path | None = None) -> bool:
         """Exactly `frames` frames of `src` from `seek`, at FPS and the
         edit's frame size (the last frame held if the source runs out), with
-        `overlay`'s filters (the footer) on top; run in `work`."""
+        `overlay`'s filters (the footer) and `logo` (the watermark) on top;
+        run in `work`."""
         lead = max(0.0, -seek)  # starts before the camera did: black until it's there
         vf = (f"fps={FPS},scale={width}:{height}:force_original_aspect_ratio=decrease,"
               f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
@@ -420,9 +440,14 @@ class EditRenderer:
         seek = max(0.0, seek)
         if overlay:
             vf += "," + overlay
-        cmd = [*nice, "ffmpeg", "-v", "error", "-y", "-ss", f"{seek:.6f}", "-i", str(src),
-               "-map", "0:v:0", "-vf", vf, "-frames:v", str(frames),
-               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
-               "-video_track_timescale", "90000", "-an", str(out)]
+        cmd = [*nice, "ffmpeg", "-v", "error", "-y", "-ss", f"{seek:.6f}", "-i", str(src)]
+        if logo is not None:
+            cmd += ["-i", str(logo), "-filter_complex", f"[0:v:0]{vf}[v];" + watermark_filter(width, height),
+                    "-map", "[out]"]
+        else:
+            cmd += ["-map", "0:v:0", "-vf", vf]
+        cmd += ["-frames:v", str(frames),
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+                "-video_track_timescale", "90000", "-an", str(out)]
         result = subprocess.run(cmd, capture_output=True, cwd=work)
         return result.returncode == 0 and out.exists() and out.stat().st_size > 0
