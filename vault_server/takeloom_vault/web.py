@@ -34,6 +34,8 @@ th { font-weight: 600; font-size: .85em; color: var(--muted); }
 .code { font: 600 1.3em ui-monospace, monospace; letter-spacing: .12em; }
 button { font: inherit; padding: .25em .9em; border-radius: 6px; border: 1px solid var(--line); cursor: pointer; }
 button.ok { background: #2e9d4f; color: #fff; border-color: #2e9d4f; }
+button.danger { color: #c44f6d; border-color: #c44f6d; background: none; }
+button.danger:hover { background: #c44f6d; color: #fff; }
 button.cam.on { background: #2a6db0; color: #fff; border-color: #2a6db0; }
 video { width: 100%; max-height: 70vh; background: #000; border-radius: 6px; }
 audio { width: 100%; max-width: 520px; }
@@ -776,6 +778,23 @@ def session_page(vault: Vault, name: str, data: dict, editor=None, publisher=Non
             f"<td class='muted small'>{_format_size(f.stat().st_size)}</td></tr>"
         )
     parts.append("<h2>Files</h2><table>" + "".join(files) + "</table>")
+    take_count = len({t.get("filename") for entries in takes_by_index.values() for t in entries if t.get("filename")})
+    warning = f"Permanently delete this session ({_format_size(vault.session_size(name))})"
+    if take_count:
+        warning += (f" and the {take_count} take{'s' if take_count != 1 else ''} it recorded? "
+                    "Those songs will be left with no take from it.")
+    else:
+        warning += "?"
+    warning += " This can't be undone."
+    parts.append(
+        "<h2>Delete</h2>"
+        f"<form method='post' action='/sessions/{quote(name, safe='')}/delete' "
+        f"onsubmit='return confirm({escape(json.dumps(warning))})'>"
+        "<button class='danger'>Delete session…</button></form>"
+        f" <span class='muted small'>Removes it from the vault"
+        + (f", with its {take_count} take{'s' if take_count != 1 else ''}" if take_count else "")
+        + "; takeloom drops it from its setlists on its next sync.</span>"
+    )
     parts.append(
         "<script>function seek(t){if(window.STAGE){STAGE.seek(t);STAGE.play();"
         "STAGE.element().scrollIntoView({behavior:'smooth'});return;}"

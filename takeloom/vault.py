@@ -425,6 +425,77 @@ def upload_summary(name: str, url: str, stats: dict) -> str:
     return line + "."
 
 
+# --- sessions deleted elsewhere ---
+
+TAKE_FILE_EXTENSIONS = (".mp3", ".flac", ".mp4", ".mid", ".video.json")
+# The vault's deletions this machine has already caught up on.
+_APPLIED_DELETIONS = ".deleted_sessions_applied.json"
+
+
+def forget_takes(config: StudioConfig, filenames: set[str]) -> None:
+    """Drop every take in `filenames` from every project setlist and the
+    shared inspiration-take index (each such track is left with no take
+    for that label — an older take of the same song isn't promoted in its
+    place), and delete its files from the local vault."""
+    if not filenames:
+        return
+    root = vault_root(config)
+
+    def drop(entry: TrackEntry) -> bool:
+        stale = [label for label, take in entry.preferred_takes.items() if take.filename in filenames]
+        for label in stale:
+            del entry.preferred_takes[label]
+        return bool(stale)
+
+    for path in Project.list_projects(Path(config.projects_dir)):
+        try:
+            project = Project.open(path, root)
+        except Exception:
+            continue
+        if any([drop(track) for track in project.setlist.tracks]):
+            project.save_setlist()
+    index = load_inspiration_index(root)
+    if any([drop(entry) for entry in index.values()]):
+        save_inspiration_index(root, index)
+    for filename in filenames:
+        for ext in TAKE_FILE_EXTENSIONS:
+            (root / "completed_takes" / f"{Path(filename).stem}{ext}").unlink(missing_ok=True)
+
+
+def _vault_deletions(client: "VaultClient") -> list[dict]:
+    return [d for d in client.deleted_sessions() or []
+            if isinstance(d.get("session"), str) and d["session"] and "/" not in d["session"]]
+
+
+def apply_vault_deletions(config: StudioConfig, client: "VaultClient", log: LogFn | None = None,
+                          deletions: list[dict] | None = None) -> None:
+    """Catch up on sessions deleted from the vault's web UI: forget the
+    takes each filed (forget_takes) and delete any local copy of the
+    session, once each. Callers make sure no session is open (its
+    in-memory setlist could write the takes back)."""
+    log = log or (lambda msg: None)
+    root = vault_root(config)
+    if deletions is None:
+        deletions = _vault_deletions(client)
+    if not deletions:
+        return
+    applied_path = root / _APPLIED_DELETIONS
+    try:
+        applied = set(json.loads(applied_path.read_text()))
+    except (OSError, ValueError, TypeError):
+        applied = set()
+    todo = [d for d in deletions if d["session"] not in applied]
+    if not todo:
+        return
+    for d in todo:
+        forget_takes(config, {t for t in d.get("takes") or [] if isinstance(t, str) and t})
+        shutil.rmtree(root / "sessions" / d["session"], ignore_errors=True)
+        applied.add(d["session"])
+        log(f"Session '{d['session']}' was deleted on the vault at {client.url}; removed it here too.")
+    ensure_dir(root)
+    atomic_write_text(applied_path, json.dumps(sorted(applied), indent=2))
+
+
 def sync_and_maybe_prune(
     config: StudioConfig, session_dir: Path, log: LogFn | None = None,
     should_stop: Callable[[], bool] | None = None,
@@ -485,6 +556,10 @@ def sessions_awaiting_upload(config: StudioConfig) -> list[Path]:
             continue
         if "takes" in data:
             candidates.append(d)
+    if candidates:
+        # Deleted from the vault's web UI: never sent back up.
+        deleted = {d["session"] for d in _vault_deletions(client)}
+        candidates = [d for d in candidates if d.name not in deleted]
     if not candidates or config.session_vault_mode == "remote":
         return candidates
     remote = set(client.list_session_logs())
@@ -546,6 +621,20 @@ def sync_vault_files(config: StudioConfig, log: LogFn | None = None, prune: bool
     root = vault_root(config)
     counts = {"uploaded": 0, "pruned": 0, "failed": 0, "conflicts": 0}
 
+    # Sessions deleted from the vault's web UI: drop their takes here first
+    # (not while a session is open — prune=False — whose setlist could
+    # write them back), and never upload them again either way.
+    deletions = _vault_deletions(client)
+    if prune and deletions:
+        try:
+            apply_vault_deletions(config, client, log, deletions)
+        except Exception as e:  # noqa: BLE001 — best-effort, like the rest of sync
+            log(f"Vault sync: couldn't catch up on sessions deleted on the vault: {type(e).__name__}: {e}")
+    deleted_takes = {
+        f"{Path(t).stem}{ext}" for d in deletions for t in d.get("takes") or [] if isinstance(t, str)
+        for ext in TAKE_FILE_EXTENSIONS
+    } | {t for d in deletions for t in d.get("takes") or [] if isinstance(t, str)}
+
     def upload(path: Path, relative: str) -> bool:
         st = path.stat()
         try:
@@ -587,6 +676,8 @@ def sync_vault_files(config: StudioConfig, log: LogFn | None = None, prune: bool
             continue
         remote = {f["name"]: f for f in listing}
         for path in local:
+            if folder == "completed_takes" and path.name in deleted_takes:
+                continue
             relative = f"{folder}/{path.name}"
             st = path.stat()
             there = remote.get(path.name)

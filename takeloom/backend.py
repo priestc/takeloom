@@ -3128,8 +3128,6 @@ class LocalBackend(Backend):
             raise BackendError("A session is still being processed — try again once it's done.")
 
         config = self.get_config()
-        from .vault import load_inspiration_index, save_inspiration_index, vault_root
-        root = vault_root(config)
         local_dir = self._local_session_dir_path(session_dir)
         try:
             _, data = self._read_session_log(session_dir)
@@ -3143,10 +3141,8 @@ class LocalBackend(Backend):
             (t.get("instrument", ""), t["filename"])
             for entries in (data.get("takes") or {}).values() for t in entries if t.get("filename")
         ]
-        take_files = [
-            f"{Path(filename).stem}{ext}" for _, filename in takes
-            for ext in (".mp3", ".flac", ".mp4", ".mid", ".video.json")
-        ]
+        from .vault import TAKE_FILE_EXTENSIONS
+        take_files = [f"{Path(filename).stem}{ext}" for _, filename in takes for ext in TAKE_FILE_EXTENSIONS]
 
         from .vault import remote_vault
         client = remote_vault(config)
@@ -3156,26 +3152,8 @@ class LocalBackend(Backend):
                 raise BackendError(f"Could not delete '{session_dir}' from the vault at {client.url} — nothing was deleted.")
 
         filenames = {filename for _, filename in takes}
-
-        def drop(entry: TrackEntry) -> bool:
-            stale = [label for label, take in entry.preferred_takes.items() if take.filename in filenames]
-            for label in stale:
-                del entry.preferred_takes[label]
-            return bool(stale)
-
-        if filenames:
-            for path in Project.list_projects(Path(config.projects_dir)):
-                try:
-                    project = Project.open(path, root)
-                except Exception:
-                    continue
-                if any([drop(track) for track in project.setlist.tracks]):
-                    project.save_setlist()
-            index = load_inspiration_index(root)
-            if any([drop(entry) for entry in index.values()]):
-                save_inspiration_index(root, index)
-            for name in take_files:
-                (root / "completed_takes" / name).unlink(missing_ok=True)
+        from .vault import forget_takes
+        forget_takes(config, filenames)
 
         if local_dir is not None:
             shutil.rmtree(local_dir)

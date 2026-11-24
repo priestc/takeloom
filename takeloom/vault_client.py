@@ -167,6 +167,17 @@ class VaultClient:
         except VaultError:
             return None
 
+    def deleted_sessions(self) -> list[dict] | None:
+        """[{"session", "takes", "deleted_at"}]: sessions deleted from the
+        vault's web UI, for this machine to drop too (vault.py's
+        apply_vault_deletions). None if the vault couldn't be reached, or
+        predates that (takeloom-vault < 0.15)."""
+        try:
+            deleted = self._json("GET", "/api/deleted-sessions").get("deleted")
+        except VaultError:
+            return None
+        return [d for d in deleted if isinstance(d, dict)] if isinstance(deleted, list) else None
+
     def set_youtube(self, data: dict) -> None:
         """Give the vault this machine's YouTube account (or "" refresh_token
         to forget it), for publishing edits from there (the vault's

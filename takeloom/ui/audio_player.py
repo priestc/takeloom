@@ -1,6 +1,6 @@
 """Built-in audio player bar — plays a take, or several takes mixed live,
 right inside the app instead of handing the file to the OS's default
-player (VLC etc.). Used by the Sessions tab (one take) and the Completed
+player (VLC etc.). Used by the Completed
 Takes tab's mixer (ui/song_mixer.py — every take on a song, each with its
 own gain, changeable while playing): the backend's get_take_playback_path
 produces a local file on whichever machine the UI is running on (fetched
@@ -11,8 +11,7 @@ sounddevice.
 Plays on the machine looking at the UI — over a Remote connection that's
 the laptop's own speakers, same as VLC used to — never the studio's
 interface. On Completed Takes (a persistent tab) playback keeps going
-across tab switches; on Sessions (rebuilt on every switch) leaving the tab
-tears it down — destroy() closes the stream — and playback stops with it.
+across tab switches.
 """
 
 from __future__ import annotations

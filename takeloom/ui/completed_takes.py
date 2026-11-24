@@ -1,5 +1,5 @@
 """Completed Takes tab: browse every completed take across the whole vault
-— not scoped to one session or project, unlike the Sessions tab (see
+— not scoped to one session or project (see
 backend.py's list_completed_takes for exactly what's gathered and why).
 
 Two panes: on the left a mixer (ui/song_mixer.py), on the right the song

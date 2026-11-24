@@ -18,7 +18,6 @@ from .platform_style import normalize as normalize_platform_style
 from .record import RecordFrame
 from .recording_devices import RecordingDevicesFrame
 from .remote import RemoteFrame
-from .sessions import SessionsFrame
 from .studio_setup import StudioSetupFrame
 
 # (title, frame class, persistent). Persistent tabs are built once and never
@@ -30,7 +29,6 @@ TABS = [
     ("Record", RecordFrame, True),
     ("Studio Setup", StudioSetupFrame, False),
     ("Recording Devices", RecordingDevicesFrame, False),
-    ("Sessions", SessionsFrame, False),
     ("Completed Takes", CompletedTakesFrame, True),
     ("Remote", RemoteFrame, True),
 ]

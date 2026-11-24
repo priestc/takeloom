@@ -905,7 +905,7 @@ class StudioSetupFrame(ttk.Frame):
             text="Per instrument label, not per specific instrument — a Stratocaster and a Telecaster "
                  "both sharing \"electric-guitar\" share one set of settings here too, the same way they "
                  "share one take-number sequence. Recorded takes are always stored raw; this only shapes "
-                 "what's actually heard, live while recording or on playback (Sessions/Completed Takes' "
+                 "what's actually heard, live while recording or on playback (Completed Takes' "
                  "Play button). \"Benchmark modifiers\" times whatever's currently saved (click Save "
                  "first if you've just changed something below) against this studio's real audio block "
                  "size, on whichever machine would actually run it.",

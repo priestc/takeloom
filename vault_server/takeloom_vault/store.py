@@ -6,6 +6,7 @@ takeloom/vault.py describes it:
     ├── backing_tracks/<filename>
     ├── completed_takes/<filename>                 .mp3 (LAME V2), .video.json, .mid
     ├── backing_tuning.json, inspiration_takes.json
+    ├── deleted_sessions.json                      sessions deleted from the web UI (delete_session)
     ├── mixes/<song>.json                          the Completed Takes mixer's saved mixes
     ├── final_mixes/<song>.mp3                     exported song mixes
     ├── projects/<project>.json                    setlist backups
@@ -19,6 +20,7 @@ what keeps a client-supplied path from ever escaping the vault root.
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import os
@@ -46,6 +48,9 @@ PARTIAL_PREFIX = ".upload-"
 SESSION_LOG = "session_log.json"
 
 CHUNK = 1024 * 1024
+
+# Sessions deleted from the web UI, for takeloom to catch up on (delete_session).
+DELETED_SESSIONS = "deleted_sessions.json"
 
 
 class VaultPathError(ValueError):
@@ -169,9 +174,57 @@ class Vault:
             elif target.exists():
                 target.unlink()
 
+    def delete_session(self, name: str) -> list[str]:
+        """Permanently delete session `name`: its folder, any phone
+        recordings still waiting in camera_uploads/ for it, and every take
+        it filed (completed_takes/<stem>.*). Recorded in
+        deleted_sessions.json so takeloom, on its next sync, drops those
+        takes from its setlists and the inspiration index and deletes its
+        own copies instead of uploading them again (takeloom/vault.py's
+        apply_vault_deletions). Returns the take filenames it filed.
+        FileNotFoundError if there's no such session."""
+        directory = self.session_dir(name)
+        if not directory.is_dir():
+            raise FileNotFoundError(name)
+        data = self.read_session_log(name) or {}
+        takes = sorted({
+            t["filename"] for entries in (data.get("takes") or {}).values()
+            for t in entries if isinstance(t, dict) and t.get("filename")
+        })
+        # Record it first: a crash part-way still leaves takeloom told.
+        deleted = self.deleted_sessions()
+        if not any(d.get("session") == name for d in deleted):
+            deleted.append({"session": name, "takes": takes,
+                            "deleted_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds")})
+            _atomic_write(self.root / DELETED_SESSIONS, json.dumps(deleted, indent=2).encode())
+        for name_ in take_files(takes):
+            (self.root / "completed_takes" / name_).unlink(missing_ok=True)
+        shutil.rmtree(self.root / "camera_uploads" / name, ignore_errors=True)
+        shutil.rmtree(directory)
+        return takes
+
+    def deleted_sessions(self) -> list[dict]:
+        """[{"session", "takes", "deleted_at"}] for every session deleted
+        here (delete_session), oldest first."""
+        try:
+            data = json.loads((self.root / DELETED_SESSIONS).read_text())
+        except (OSError, ValueError):
+            return []
+        return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
+
     def session_size(self, name: str) -> int:
         directory = self.session_dir(name)
         return sum(f.stat().st_size for f in directory.iterdir() if f.is_file())
+
+
+# Every file a completed take can have beside it (as takeloom's
+# Backend.delete_session).
+TAKE_EXTENSIONS = (".mp3", ".flac", ".mp4", ".m4a", ".wav", ".mid", ".video.json")
+
+
+def take_files(takes: list[str]) -> list[str]:
+    takes = [t for t in takes if "/" not in t and "\\" not in t and not t.startswith(".")]
+    return sorted({t for t in takes} | {Path(t).stem + ext for t in takes for ext in TAKE_EXTENSIONS})
 
 
 def _atomic_write(path: Path, data: bytes) -> None:

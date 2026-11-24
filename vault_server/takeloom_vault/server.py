@@ -11,6 +11,8 @@ API — every route except /api/pair* needs `Authorization: Bearer <token>`:
                                            from render_jobs.json — render.py;
                                            "camera_uploads": phones can upload here directly)
     GET    /api/sessions                -> {"sessions": {name: session_log, ...}}
+    GET    /api/deleted-sessions        -> {"deleted": [{"session", "takes", "deleted_at"}]}: sessions
+                                           deleted from the web UI, for takeloom to drop too
     GET    /api/sessions/<name>/log     -> session_log.json
     PUT    /api/sessions/<name>/log     <- session_log.json (existing session only)
     GET    /api/list/<dir>              -> {"files": [{"name", "size"}]}
@@ -52,6 +54,7 @@ Browser UI:
     GET  /media/<vault path>     file download/stream, with Range support (for <video> seeking)
     GET  /takes/<filename>/video  a take's video (as the API route above)
     POST /pairing/<id>/approve|deny,  POST /clients/<id>/revoke
+    POST /sessions/<name>/delete  delete a session and the takes it filed (store.py's delete_session)
 """
 
 from __future__ import annotations
@@ -295,6 +298,25 @@ class _Handler(BaseHTTPRequestHandler):
                 except ValueError as e:
                     return self._json({"state": "failed", "error": str(e)}, HTTPStatus.BAD_REQUEST)
                 return self._json(status)
+            if m := re.fullmatch(r"/sessions/([^/]+)/delete", path):
+                name = m.group(1)
+                if vault.read_session_log(name) is None and not vault.session_dir(name).is_dir():
+                    raise _HTTPError(HTTPStatus.NOT_FOUND, f"No session named {name!r}")
+                busy = (
+                    "its videos are encoding" if self.server.renderer.status(name) in ("encoding", "queued") else
+                    "its edit is rendering" if self.server.editor.status(name).get("state") in ("queued", "rendering") else
+                    "it's uploading to YouTube" if self.server.publisher is not None
+                    and self.server.publisher.status(name).get("state") in ("preparing", "uploading") else ""
+                )
+                if busy:
+                    raise _HTTPError(HTTPStatus.CONFLICT, f"Can't delete this session while {busy} — try again once that's done.")
+                try:
+                    with self.server.aligner.lock:
+                        takes = vault.delete_session(name)
+                except FileNotFoundError:
+                    raise _HTTPError(HTTPStatus.NOT_FOUND, f"No session named {name!r}") from None
+                log(f"Session {name} deleted via web UI from {self.ip}, with its {len(takes)} take(s)")
+                return self._redirect("/")
             if m := re.fullmatch(r"/clients/(\w+)/revoke", path):
                 if auth.revoke(m.group(1)):
                     log(f"Paired client {m.group(1)} revoked via web UI from {self.ip}")
@@ -361,6 +383,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._camera_upload(method, m.group(1), m.group(2), "", label, in_session=True)
         if path == "/sessions" and method == "GET":
             return self._json({"sessions": vault.all_session_logs()})
+        if path == "/deleted-sessions" and method == "GET":
+            return self._json({"deleted": vault.deleted_sessions()})
         if m := re.fullmatch(r"/sessions/([^/]+)/log", path):
             name = m.group(1)
             if method == "GET":
