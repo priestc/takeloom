@@ -90,7 +90,7 @@
       }});
       var badges = el("td", {}, song.takes.map(function (t) { return badge(t.instrument); }));
       var row = el("tr", {"class": "song" + (mixer && mixer.song.name === song.name ? " on" : ""),
-                          onclick: function () { loadSong(song.name, true); }}, [
+                          onclick: function () { loadSong(song.name, false); }}, [
         el("td", {}, [toggle, el("b", {text: song.name})]),
         el("td", {"class": "muted small", text: SOURCES[song.backing_source] || "—"}),
         badges
@@ -129,7 +129,8 @@
       url: "/completed/backing/" + encodeURIComponent(song.backing_track)});
     strips.forEach(function (s) {
       s.gain = Math.min(MAX_GAIN, Math.max(0, mix.volumes[s.key] != null ? mix.volumes[s.key] : 1));
-      s.muted = mix.muted.indexOf(s.key) >= 0; s.solo = false;
+      // The backing track always starts muted: Unmute to hear it.
+      s.muted = s.backing || mix.muted.indexOf(s.key) >= 0; s.solo = false;
     });
     var token = {};
     mixer = {song: song, strips: strips, token: token, playing: false, offset: song.trim_start_seconds, full: 0,
