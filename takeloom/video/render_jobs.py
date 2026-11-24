@@ -23,11 +23,11 @@ so a job file can't get it to run anything else or touch other files.
      "staged_inputs": ["Camera_2_phone.mp4", ...],
      "error": "..."}   (only after a failed run)
 
-A phone recording uploaded straight to the vault (phone_camera/sync.py's
-VaultCameraUploads) adds a "normalize" and a "mic" job ahead of the
-encodes, and is a "staged input": the vault moves it from its
-camera_uploads/ into the session first. Such a session can only have its
-videos made there (needs_vault).
+A session processed by an older takeloom may also have "normalize" and
+"mic" jobs and "staged inputs" (a phone recording it uploaded to the
+vault's camera_uploads/): the vault still runs those, and such a session
+can only have its videos made there (needs_vault). Today's sessions don't
+make camera videos at all: their cameras are sources.
 
 Each job writes OUTPUT + ".encoding.mp4" and is renamed to OUTPUT only once
 ffmpeg succeeds, so a half-written video never takes the final name. If the

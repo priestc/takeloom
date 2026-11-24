@@ -1,7 +1,7 @@
 """The live stream's footer text: what's showing right now.
 
 The footer (musician, instrument, when, song, camera) is only ever on
-YouTube: drawn into the live stream (stream_switcher.py) and into a
+YouTube: drawn into the live stream (the vault's live_stream.py) and into a
 session's edit when it's published (vault_server/takeloom_vault/edit.py).
 This is the live half: the same text as the vault's footer.py schedule
 gives for the moment just past the latest event — keep the two in step.
@@ -37,7 +37,3 @@ def footer_parts(musician: str, instrument: str, events, session_start: str = ""
         song = name
         parts = [musician, get(e, "instrument") or instrument, get(e, "wall_time") or "", name]
     return [p for p in parts if p], song
-
-
-def footer_text(musician: str, instrument: str, events, session_start: str = "") -> str:
-    return join(*footer_parts(musician, instrument, events, session_start)[0])

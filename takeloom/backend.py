@@ -36,7 +36,6 @@ from .config import DEFAULT_CONFIG_PATH, INSTRUMENT_LABELS, MAX_INSTRUMENT_VOLUM
 from .phone_camera.protocol import DEVICE_PREFIX, is_phone_device, phone_device_id
 from .project import Project, Setlist, TakeInfo, TrackEntry
 from .utils import atomic_write_text, ensure_dir, timestamp_now, wall_timestamp
-from .video.live_footer import footer_text as live_footer_text
 from .audio.sync_click import VERSION as SYNC_CLICK_VERSION
 
 
@@ -1645,8 +1644,7 @@ class _ActiveSession:
     video_recorder: object | None = None
     session_video_raw: Path | None = None
     session_mix_flac: Path | None = None
-    stream_feeder: object | None = None  # LiveAudioFeeder, when streaming to YouTube is on for this session
-    stream_switcher: object | None = None  # video/stream_switcher.py's StreamSwitcher, likewise
+    stream_switcher: object | None = None  # phone_camera/vault_stream.py's VaultStream, when streaming
     youtube_broadcast_id: str | None = None  # set when a titled broadcast was created/bound for this session
     video_start_wall_time: str | None = None
     video_start_track_name: str = ""
@@ -1877,23 +1875,6 @@ def _output_layout(config: "StudioConfig", out_info) -> dict:
     return {"output_channels": max(1, min(config.output_channels, available))}
 
 
-def _by_ip_address(url: str) -> str:
-    """`url` with its host name resolved here, to an IP address: a phone
-    may not know the LAN's names (tank2.lan), and its OS only lets an app
-    use plain HTTP to local-network addresses. Unchanged if it won't resolve."""
-    import socket
-    from urllib.parse import urlsplit, urlunsplit
-    parts = urlsplit(url)
-    try:
-        address = socket.gethostbyname(parts.hostname or "")
-    except OSError:
-        return url
-    netloc = address + (f":{parts.port}" if parts.port else "")
-    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
-
-
-_late_upload_lock = threading.Lock()
-_camera_route_lock = threading.Lock()
 
 
 def _file_signature(path: Path) -> tuple:
@@ -2019,14 +2000,9 @@ class LocalBackend(Backend):
             lambda: [device for device, _label in self.session_cameras()], on_error=self._on_preview_error,
             on_full_wanted=self._on_full_preview_wanted,
         )
-        self._phone_hub = None  # PhoneCameraHub, when attach_phone_camera_hub() is called
-        # session id -> the VaultClient its phones upload straight to, or
-        # None (here): see _camera_upload_route.
-        self._camera_upload_routes: dict[str, object] = {}
-        # phone camera_device -> PhoneFullPreview decoding its live feed, for
-        # whoever wants it at full resolution (see _on_full_preview_wanted).
-        self._phone_full_previews: dict = {}
-        self._phone_full_previews_lock = threading.Lock()
+        # phone_camera/vault_hub.py's VaultCameraHub: the vault's phones
+        # (connect_vault_cameras), None without a remote vault.
+        self._phone_hub = None
         self._framing_lock = threading.Lock()
         # Per phone (device_id): its BatteryTracker, learned drain rate, and
         # the summary last announced (phone_camera/battery.py).
@@ -2339,6 +2315,8 @@ class LocalBackend(Backend):
             return False
         try:
             if not client.ping().get("camera_hub", False):
+                log(f"The vault at {client.url} is too old to have the Takeloom Camera phones "
+                    "(it needs takeloom-vault 0.18+); upgrade it.")
                 return False
         except Exception as e:  # noqa: BLE001 — unreachable for now: the hub keeps trying
             log(f"Couldn't reach the vault at {client.url} to check for its camera hub ({e}); "
@@ -2363,184 +2341,17 @@ class LocalBackend(Backend):
         self._send_phone_framings()
 
     def attach_phone_camera_hub(self, hub) -> None:
-        """Use Takeloom Camera phones connected to `hub` (phone_camera/
-        hub.py) as cameras — only `takeloom server` runs one."""
+        """Use the Takeloom Camera phones `hub` (phone_camera/vault_hub.py's
+        VaultCameraHub) sees on the vault as cameras."""
         self._phone_hub = hub
-        if hasattr(hub, "backend"):
-            hub.backend = self  # the vault's web UI runs operations here through it (node_rpc.py)
+        hub.backend = self  # the vault's web UI runs operations here through it (node_rpc.py)
         hub.set_callbacks(
             on_preview=self._on_phone_preview,
             on_change=self._on_phone_cameras_changed,
-            session_dir_resolver=self._local_session_dir_path,
             on_live_change=self._on_phone_status_changed,
             on_framing=self._on_phone_framing,
             on_status=self._on_phone_status,
-            late_upload_target=self._late_upload_target,
-            on_late_upload=self._on_late_upload,
-            upload_redirect=self._camera_upload_redirect,
-            vault_progress=self._camera_upload_progress,
-            sources_upload_target=self._sources_upload_target,
-            on_upload_complete=self._on_camera_recording_here,
         )
-
-    # --- cameras as sources (phone_camera/sources.py; config.camera_sources) ---
-
-    @staticmethod
-    def _phone_entry(data: dict, device_id: str) -> dict | None:
-        return next((c for c in data.get("extra_cameras") or []
-                     if (c.get("phone_camera") or {}).get("device_id") == device_id and c.get("upload_file")), None)
-
-    def _sources_upload_target(self, session_id: str, device_id: str) -> tuple[Path, str] | None:
-        """PhoneCameraHub's sources_upload_target: with cameras as sources,
-        a phone's recording is welcome for any session this server knows,
-        at any time. Into its session's folder here if that's still here
-        (sent on to the vault with the session, or straight there by the
-        redirect); else, for a session only in the vault, a folder here
-        that only ever holds its metadata (it goes straight to the vault)."""
-        config = self.get_config()
-        if not config.camera_sources:
-            return None
-        local = self._local_session_dir_path(session_id)
-        if local is not None:
-            try:
-                data = json.loads((local / "session_log.json").read_text())
-            except (OSError, ValueError):
-                return None
-            entry = self._phone_entry(data, device_id)
-            return (local, entry["upload_file"]) if entry else None
-        from .vault import remote_vault
-        client = remote_vault(config)
-        data = client.fetch_session_log(session_id) if client is not None else None
-        if not data or not data.get("camera_sources"):
-            return None
-        entry = self._phone_entry(data, device_id)
-        if entry is None:
-            return None
-        directory = self._late_uploads_root(config) / session_id
-        directory.mkdir(parents=True, exist_ok=True)
-        return directory, entry["upload_file"]
-
-    def _sources_route(self):
-        """The VaultClient phones upload into session folders of, or None."""
-        from .vault import remote_vault
-        client = remote_vault(self.get_config())
-        if client is None:
-            return None
-        try:
-            return client if client.ping().get("camera_sources") else None
-        except Exception:  # noqa: BLE001
-            return None
-
-    def _on_camera_recording_here(self, session_id: str, device_id: str, directory: Path, file_name: str) -> None:
-        """A phone's recording came in here in full (an app without HTTP
-        uploads, or no remote vault). With cameras as sources: for a session
-        that's been processed, line it up now (and its live feed goes); for
-        one only in the vault, send it there, where it's lined up."""
-        config = self.get_config()
-        if not config.camera_sources:
-            return
-        log = lambda msg: self._emit("vault_status", {"status": msg})  # noqa: E731
-        local = self._local_session_dir_path(session_id)
-        if local is not None and local == directory:
-            log_path = local / "session_log.json"
-            try:
-                data = json.loads(log_path.read_text())
-            except (OSError, ValueError):
-                return
-            if not data.get("camera_sources"):
-                return  # not processed yet: processing lines it up
-            from .phone_camera.sources import phone_source
-            from .processing.splicer import MIX_REFERENCE
-            entry = self._phone_entry(data, device_id)
-            if entry is None:
-                return
-            mix = local / MIX_REFERENCE if (local / MIX_REFERENCE).exists() else local / "session_mix.flac"
-            source = phone_source(entry, local, data, mix)
-            entry["sources"] = [source] + [s for s in entry.get("sources") or [] if s.get("kind") not in ("phone", "live")]
-            if entry.get("file"):
-                (local / entry["file"]).unlink(missing_ok=True)  # its live feed: superseded
-            atomic_write_text(log_path, json.dumps(data, indent=2))
-            log(f"{entry.get('label') or file_name} of {session_id}: {source['state']}"
-                + (f" by {source['align']['method']}" if source.get("align") else ""))
-            return
-        # Only in the vault: send it there (with its metadata); the vault
-        # lines it up the moment it's in.
-        from .phone_camera.hub import upload_paths
-        from .vault import remote_vault
-        client = remote_vault(config)
-        uploaded, _part, meta_path = upload_paths(directory, file_name)
-        if client is None or not uploaded.exists():
-            return
-        try:
-            if meta_path.exists():
-                client.upload_file(meta_path, f"sessions/{session_id}/{meta_path.name}")
-            client.upload_file(uploaded, f"sessions/{session_id}/{file_name}")
-        except Exception as e:  # noqa: BLE001 — kept here; the upload retry loop doesn't know it, so say so
-            log(f"Couldn't send {file_name} of {session_id} to the vault ({e}); it's kept in {directory}")
-            return
-        uploaded.unlink(missing_ok=True)
-        meta_path.unlink(missing_ok=True)
-        log(f"Sent {file_name} of {session_id} to the vault, which lines it up")
-
-    # --- phone recordings uploaded straight to the remote vault ---
-
-    def _camera_upload_route(self, session_id: str):
-        """The VaultClient this session's phone recordings go straight to
-        (vault.py's phones_upload_to_vault), or None for here — decided
-        once per session, by the first phone to ask, so every phone of it
-        goes the same way."""
-        routes = self._camera_upload_routes
-        with _camera_route_lock:
-            if session_id not in routes:
-                from .vault import phones_upload_to_vault
-                log = lambda msg: self._emit("vault_status", {"status": msg})  # noqa: E731
-                routes[session_id] = phones_upload_to_vault(self.get_config(), log=log)
-            return routes[session_id]
-
-    def _camera_upload_redirect(self, session_id: str, device_id: str, file_name: str, phone_token: str) -> dict | None:
-        """PhoneCameraHub's upload_redirect: the vault URL and token for a
-        phone to upload `file_name` of `session_id` to, or None to take it
-        here. The token is the phone's own, which this server vouches for
-        (vault.py's vault_access_for) — pairing with this server is all a
-        phone ever has to do."""
-        sources = self.get_config().camera_sources
-        client = self._sources_route() if sources else self._camera_upload_route(session_id)
-        if client is None:
-            return None
-        from .vault import vault_access_for
-        log = lambda msg: self._emit("vault_status", {"status": msg})  # noqa: E731
-        access = vault_access_for(self.get_config(), phone_token, self.save_config, log=log)
-        if access is None:
-            return None
-        if sources:
-            # Its metadata goes to the vault now too: the session may have
-            # gone there already (it's what lining the recording up uses).
-            from .phone_camera.hub import upload_paths
-            local = self._local_session_dir_path(session_id)
-            directory = local if local is not None else self._late_uploads_root(self.get_config()) / session_id
-            meta_path = upload_paths(directory, file_name)[2]
-            if meta_path.exists():
-                try:
-                    client.upload_file(meta_path, f"sessions/{session_id}/{meta_path.name}")
-                except Exception as e:  # noqa: BLE001
-                    log(f"Couldn't send {meta_path.name} to the vault: {e}")
-            url = client.session_camera_url(session_id, file_name)
-        else:
-            url = client.camera_upload_url(session_id, file_name)
-        return {"url": _by_ip_address(url), "token": access["token"]}
-
-    def _camera_upload_progress(self, session_id: str, file_name: str) -> dict | None:
-        sources = self.get_config().camera_sources
-        client = self._sources_route() if sources else self._camera_upload_route(session_id)
-        if client is None:
-            return None
-        from .vault_client import VaultError
-        try:
-            if sources:
-                return client.session_camera_status(session_id, file_name)
-            return client.camera_upload_status(session_id, file_name)
-        except VaultError:
-            return None
 
     def _on_phone_cameras_changed(self) -> None:
         self._scan_cameras(force=True)  # also remembers a phone seen for the first time
@@ -2588,23 +2399,9 @@ class LocalBackend(Backend):
         self._preview.push_external_frame(DEVICE_PREFIX + device_id, jpeg)
 
     def _on_full_preview_wanted(self, cameras: set[str]) -> None:
-        """Decode the live feed of each phone someone wants at full
-        resolution, and stop decoding the rest. A local camera's capture
-        loop makes its own full frames (see _CameraPreviewManager._run)."""
-        if self._phone_hub is None or hasattr(self._phone_hub, "recorder"):
-            return  # no hub, or the vault's: no live video comes here
-        from .phone_camera.full_preview import PhoneFullPreview
-        with self._phone_full_previews_lock:
-            for device in [d for d in self._phone_full_previews if d not in cameras]:
-                self._phone_full_previews.pop(device).stop()
-            for device in cameras:
-                if is_phone_device(device) and device not in self._phone_full_previews:
-                    decoder = PhoneFullPreview(
-                        self._phone_hub, phone_device_id(device),
-                        lambda jpeg, d=device: self._preview.push_full_frame(d, jpeg),
-                    )
-                    if decoder.start():
-                        self._phone_full_previews[device] = decoder
+        """A local camera's capture loop makes its own full frames (see
+        _CameraPreviewManager._run); no phone's live video comes to this
+        machine (it goes to the vault), so there's none to decode here."""
 
     def _on_preview_error(self, device: str, message: str) -> None:
         self._emit("preview_error", {"camera": device, "message": message})
@@ -5380,17 +5177,11 @@ class LocalBackend(Backend):
         session.engine.stop()
         if session.midi_input is not None:
             session.midi_input.close()
-        if session.stream_feeder:
-            # Before the switcher — see the matching comment in _end_session.
-            session.stream_feeder.stop()
         if session.stream_switcher:
             session.stream_switcher.stop()
         if session.video_recorder:
             session.video_recorder.stop()
         self._stop_extra_cameras(session)
-        if self._phone_hub is not None:
-            for device_id in self._session_phone_ids(session):
-                self._phone_hub.forget_upload(session.session_dir.name, device_id)
         if session.preview_paused:
             self._preview.resume()
             self._emit("preview_resumed", {})
@@ -6600,13 +6391,9 @@ class LocalBackend(Backend):
         ))
         if session.stream_switcher is not None:
             # The live stream's footer follows the song (live_footer.py).
-            if hasattr(session.stream_switcher, "set_footer_parts"):
-                from .video.live_footer import footer_parts
-                session.stream_switcher.set_footer_parts(*footer_parts(
-                    session.musician, session.inst.full_name, session.events))
-            else:
-                session.stream_switcher.set_footer(live_footer_text(
-                    session.musician, session.inst.full_name, session.events))
+            from .video.live_footer import footer_parts
+            session.stream_switcher.set_footer_parts(*footer_parts(
+                session.musician, session.inst.full_name, session.events))
         # Written to disk on every event, not just once at clean session
         # end — session_log.json used to only exist at all once
         # _end_session ran, so a crash (power loss, the process being
@@ -6790,7 +6577,6 @@ class LocalBackend(Backend):
         video_start_wall_time = None
         mix_start_frame = 0
         mix_start_ns = None
-        stream_feeder = None
         stream_switcher = None
         youtube_broadcast_id = None
         phone_mix_start_ns = None
@@ -6811,13 +6597,10 @@ class LocalBackend(Backend):
                 self._preview.pause()
                 self._emit("preview_paused", {})
 
-        # The live stream: one StreamSwitcher (video/stream_switcher.py) fed
-        # stream-quality frames by every camera below, streaming whichever
-        # is the program camera (set_program_camera, from the video-ui).
-        vault_streams = hasattr(self._phone_hub, "recorder")  # the phones, and so the stream, are the vault's
-        if config.streaming_enabled and config.youtube_stream_key and cameras and vault_streams:
-            # phone_camera/vault_stream.py: the vault makes the stream; this
-            # machine sends its mix and what to show.
+        # The live stream is made on the vault (its live_stream.py), from the
+        # phones' live feeds that already go there: this machine sends its
+        # mix and what to show (phone_camera/vault_stream.py).
+        if config.streaming_enabled and config.youtube_stream_key and cameras and self._phone_hub is not None:
             from .phone_camera.vault_stream import VaultStream
             from .streaming import youtube_rtmp_url
             from .video.live_footer import footer_parts
@@ -6831,6 +6614,9 @@ class LocalBackend(Backend):
                 footer=footer_parts(inst.musician or config.studio_musician, inst.full_name, [], wall_timestamp()),
                 on_status=lambda status, active: self._emit("streaming_status", {"status": status, "active": active}),
             )
+            # Bind a freshly titled broadcast before the stream starts, so
+            # it's in place once data flows (see _create_youtube_broadcast).
+            # Best-effort: titling failing never blocks the stream itself.
             if (
                 config.youtube_oauth_client_id
                 and config.youtube_oauth_client_secret
@@ -6839,53 +6625,13 @@ class LocalBackend(Backend):
                 youtube_broadcast_id = self._create_youtube_broadcast(config, project, inst)
             if not stream_switcher.start():
                 stream_switcher = None
-        elif config.streaming_enabled and config.youtube_stream_key and cameras:
-            from .streaming import LiveAudioFeeder, StreamTarget, fifo_supported, youtube_rtmp_url
-            if fifo_supported():
-                from .video.stream_switcher import StreamSwitcher
-                stream_feeder = LiveAudioFeeder(
-                    session_dir / "stream_audio.fifo",
-                    sample_rate=config.sample_rate, channels=engine.mix_channels,
-                )
-                stream_feeder.start()
-                stream_switcher = StreamSwitcher(StreamTarget(
-                    rtmp_url=youtube_rtmp_url(config.youtube_stream_key),
-                    audio_fifo=stream_feeder.fifo_path,
-                    sample_rate=config.sample_rate, channels=engine.mix_channels,
-                    width=config.streaming_video_width, bitrate_kbps=config.streaming_bitrate_kbps,
-                ), program=self._resolve_program_camera(cameras), log_path=session_dir / "stream.log",
-                    labels=dict(cameras),
-                    footer=live_footer_text(inst.musician or config.studio_musician, inst.full_name, [],
-                                            wall_timestamp()))
-                # Bind a freshly titled broadcast before ffmpeg starts
-                # pushing RTMP, so it's already in place once data starts
-                # flowing (see _create_youtube_broadcast). Best-effort:
-                # title automation failing never blocks the stream itself.
-                if (
-                    config.youtube_oauth_client_id
-                    and config.youtube_oauth_client_secret
-                    and config.youtube_oauth_refresh_token
-                ):
-                    youtube_broadcast_id = self._create_youtube_broadcast(config, project, inst)
-                if not stream_switcher.start():
-                    stream_switcher = None
-            else:
-                self._emit("streaming_status", {
-                    "status": "Live streaming isn't supported on this platform.", "active": False,
-                })
         elif config.streaming_enabled and config.youtube_stream_key:
             self._emit("streaming_status", {
-                "status": "Streaming needs a camera — connect one (video-ui's Settings › Cameras lists them).", "active": False,
+                "status": "Streaming needs the vault's Takeloom Camera phones: pair this machine with the vault "
+                          "(Studio Setup) and connect a phone." if self._phone_hub is None else
+                          "Streaming needs a camera: connect a Takeloom Camera phone to the vault.",
+                "active": False,
             })
-
-        def stream_tee(device: str) -> dict:
-            """A camera recorder's keyword arguments for feeding the stream."""
-            if stream_switcher is None:
-                return {}
-            return {
-                "on_stream_frame": lambda jpeg, d=device: stream_switcher.push_frame(d, jpeg),
-                "stream_width": stream_switcher.stream_width,
-            }
 
         # Every camera, each into its own raw file (a phone's own
         # full-quality recording is uploaded afterwards), then the mix: the
@@ -6903,30 +6649,20 @@ class LocalBackend(Backend):
                         "status": f"{label or 'Takeloom Camera'} isn't connected — recording this session without it.",
                     })
                     continue
+                # The vault records its live feed and takes its upload
+                # (phone_camera/vault_hub.py's VaultPhoneRecorder).
                 upload_file = f"{stem}_phone.mp4"
-                if hasattr(self._phone_hub, "recorder"):
-                    # The phones are the vault's (phone_camera/vault_hub.py):
-                    # it records the live feed and takes the upload.
-                    recorder = self._phone_hub.recorder(device_id, session_dir.name, raw_file, upload_file)
-                else:
-                    from .phone_camera.recorder import PhoneVideoRecorder
-                    self._phone_hub.expect_upload(session_dir.name, session_dir, device_id, upload_file)
-                    recorder = PhoneVideoRecorder(
-                        self._phone_hub, device_id, session_dir.name, session_dir / raw_file, **stream_tee(device),
-                    )
+                recorder = self._phone_hub.recorder(device_id, session_dir.name, raw_file, upload_file)
                 if recorder.start():
                     extra_cameras.append(_ExtraCameraRecording(
                         device, label, recorder, raw_file, final_file, upload_file,
                     ))
-                else:
-                    self._phone_hub.forget_upload(session_dir.name, device_id)
             elif ffmpeg_available():
                 pause_preview()
                 recorder = VideoRecorder(
                     device, session_dir / raw_file,
                     on_preview_frame=lambda jpeg, d=device: self._preview.push_external_frame(d, jpeg),
                     on_full_frame=lambda jpeg, d=device: self._preview.push_full_frame(d, jpeg),
-                    **stream_tee(device),
                 )
                 if recorder.start():
                     extra_cameras.append(_ExtraCameraRecording(device, label, recorder, raw_file, final_file))
@@ -6947,24 +6683,20 @@ class LocalBackend(Backend):
             self._preview.resume()
             self._emit("preview_resumed", {})
 
-        if stream_switcher is not None and (video_recorder is not None or extra_cameras):
-            engine.set_stream_sink(stream_switcher.push_audio if stream_feeder is None else stream_feeder.push)
-            self._emit("streaming_status", {"status": "Streaming live to YouTube"
-                                            + (" from the vault." if stream_feeder is None else "."), "active": True})
-        elif stream_switcher is not None or stream_feeder is not None:
-            # No camera actually started: nothing to stream.
-            if stream_feeder is not None:
-                stream_feeder.stop()
-            if stream_switcher is not None:
-                stream_switcher.stop()
-            stream_feeder = stream_switcher = None
+        if stream_switcher is not None and any(is_phone_device(c.device) for c in extra_cameras):
+            engine.set_stream_sink(stream_switcher.push_audio)
+            self._emit("streaming_status", {"status": "Streaming live to YouTube from the vault.", "active": True})
+        elif stream_switcher is not None:
+            # No phone actually started: nothing the vault can stream.
+            stream_switcher.stop()
+            stream_switcher = None
             if youtube_broadcast_id is not None:
                 # RTMP data never flows, so enableAutoStart never fires —
                 # without this the broadcast would sit orphaned in YouTube
                 # Studio forever instead of ending itself.
                 self._complete_youtube_broadcast(config, youtube_broadcast_id)
                 youtube_broadcast_id = None
-            self._emit("streaming_status", {"status": "No camera started, so nothing is streaming.",
+            self._emit("streaming_status", {"status": "No phone started recording, so nothing is streaming.",
                                             "active": False})
 
         engine.set_on_song_end(self._on_song_naturally_ended)
@@ -6976,7 +6708,7 @@ class LocalBackend(Backend):
             session_flac=session_flac, session_video=session_dir / "session_video.mp4",
             video_recorder=video_recorder, session_video_raw=session_video_raw,
             session_mix_flac=session_mix_flac, video_start_wall_time=video_start_wall_time,
-            mix_start_frame=mix_start_frame, stream_feeder=stream_feeder, stream_switcher=stream_switcher,
+            mix_start_frame=mix_start_frame, stream_switcher=stream_switcher,
             youtube_broadcast_id=youtube_broadcast_id,
             phone_mix_start_ns=phone_mix_start_ns,
             extra_cameras=extra_cameras, mix_start_ns=mix_start_ns, preview_paused=preview_paused,
@@ -7026,16 +6758,8 @@ class LocalBackend(Backend):
                 session.midi_input.close()
             self._start_monitoring_locked()
 
-            if session.stream_feeder:
-                # Closes the FIFO before the stream switcher's ffmpeg is told
-                # to finish — its demuxer can be sitting in a blocking read()
-                # on the audio FIFO waiting for more data (there won't be
-                # any, now that set_stream_sink(None) above stopped feeding
-                # it); closing this first delivers EOF on that read(), so
-                # ffmpeg sees both inputs end and finishes instead of hanging.
-                session.stream_feeder.stop()
             if session.stream_switcher:
-                # Ends the RTMP connection.
+                # The vault ends the stream.
                 session.stream_switcher.stop()
                 self._emit("streaming_status", {"status": "Stream ended.", "active": False})
             if session.video_recorder:
@@ -7110,16 +6834,6 @@ class LocalBackend(Backend):
             t.join()
         return unclean
 
-    @staticmethod
-    def _session_phone_ids(session: "_ActiveSession") -> list[str]:
-        """Device ids of every phone recording `session`, i.e. every upload
-        it's expecting."""
-        ids = []
-        if session.phone_mix_start_ns is not None:
-            ids.append(session.video_recorder.device_id)
-        ids += [phone_device_id(c.device) for c in session.extra_cameras if c.upload_file]
-        return ids
-
     def _process_session(self, session: "_ActiveSession") -> None:
         """Replay the just-ended session's log and clip every completed take
         (and, with a camera, its video) out of the continuous recording,
@@ -7132,69 +6846,24 @@ class LocalBackend(Backend):
         session may well be open, and a stale "idle" here used to snap every
         client (and the Stream Deck) back to the idle layout mid-session.
         One last `processing: False` marks it finished."""
-        labels = {phone_device_id(c.device): c.label for c in session.extra_cameras}
-        phones = [(d, labels.get(d, "Takeloom Camera")) for d in self._session_phone_ids(session)]
         try:
-            self._process_session_steps(session.session_dir, phones)
+            self._process_session_steps(session.session_dir)
         finally:
             self._emit("recording_status", {"processing": False})
 
-    @classmethod
-    def _phone_upload_file(cls, session_dir: Path, device_id: str) -> str:
-        """The file name `device_id`'s recording of this session uploads as."""
-        try:
-            data = json.loads((session_dir / "session_log.json").read_text())
-        except (OSError, ValueError):
-            return ""
-        for cam in data.get("extra_cameras") or []:
-            if (cam.get("phone_camera") or {}).get("device_id") == device_id:
-                return str(cam.get("upload_file") or "")
-        return ""
-
-    @staticmethod
-    def _logged_phone_uploads(session_dir: Path) -> list[tuple[str, str, str]]:
-        """(device id, label, upload file name) for every phone recording
-        `session_dir`'s session log says is coming whose video hasn't been
-        made yet — what a session left behind by a crash still waits for."""
-        from .phone_camera.hub import UPLOAD_FILE_NAME
-        try:
-            data = json.loads((session_dir / "session_log.json").read_text())
-        except (OSError, ValueError):
-            return []
-        found = []
-        phone = data.get("phone_camera") or {}
-        if phone.get("device_id") and not (session_dir / "session_video.mp4").exists():
-            found.append((phone["device_id"], "Takeloom Camera", UPLOAD_FILE_NAME))
-        for cam in data.get("extra_cameras") or []:
-            device_id = (cam.get("phone_camera") or {}).get("device_id")
-            if device_id and cam.get("upload_file") and not (session_dir / cam.get("final_file", "")).exists():
-                found.append((device_id, cam.get("label") or "Takeloom Camera", cam["upload_file"]))
-        return found
-
     def start_leftover_session_processing(self, session_dir: str) -> None:
         """Process a session a previous run left unprocessed (it crashed, or
-        lost power) exactly as if it had just ended here: on the background
-        processing thread, waiting first for every phone recording it was
-        expecting — the phones still have them, and upload once they
-        reconnect. Processing it at once without them (as startup used to)
-        filed the live feeds' video, deleted the session, and then refused
-        the phones' uploads."""
+        lost power) exactly as if it had just ended here, on the background
+        processing thread. Its phones' recordings go to the vault whenever
+        they upload, which lines them up there."""
         path = self._local_session_dir_path(session_dir)
         if path is None:
             raise BackendError(f"Session '{session_dir}' isn't available locally to process.")
-        phones = []
-        if self._phone_hub is not None:
-            from .phone_camera.hub import upload_paths
-            for device_id, label, file_name in self._logged_phone_uploads(path):
-                if upload_paths(path, file_name)[0].exists():
-                    continue  # arrived in full before the crash
-                self._phone_hub.expect_upload(path.name, path, device_id, file_name)
-                phones.append((device_id, label))
 
         def run() -> None:
             self._processing_status(f"Processing the last session, which didn't get to finish ({path.name})...")
             try:
-                self._process_session_steps(path, phones)
+                self._process_session_steps(path)
             finally:
                 self._emit("recording_status", {"processing": False})
 
@@ -7204,57 +6873,18 @@ class LocalBackend(Backend):
     def _processing_status(self, msg: str) -> None:
         self._emit("recording_status", {"status": msg, "processing": True})
 
-    def _process_session_steps(self, session_dir: Path, phones: list[tuple[str, str]]) -> None:
-        """`phones`: (device id, label) of every phone upload to wait for."""
+    def _process_session_steps(self, session_dir: Path) -> None:
+        """Process the session (processing/splicer.py), then send it and the
+        takes it filed to the vault. Nothing waits for the phones'
+        recordings: they upload to the vault, which lines each one up
+        whenever it's there (cameras as sources: phone_camera/sources.py)."""
         from .processing.splicer import process_session
-        config = self.get_config()
-        vault_files: list[str] = []  # phone recordings that went straight to the vault
-        if self._phone_hub is not None and config.camera_sources:
-            # Cameras as sources (phone_camera/sources.py): nothing waits
-            # for a phone's recording; each is lined up whenever it's here.
-            for device_id, _label in phones:
-                self._phone_hub.forget_upload(session_dir.name, device_id)
-        elif self._phone_hub is not None:
-            # Each phone's full-quality recording, uploading now that the
-            # session's over. Waited for here, on this background thread —
-            # the app is already idle and a new session can start meanwhile.
-            # All of them before processing: in "remote" vault mode the
-            # session dir is gone afterwards.
-            session_id = session_dir.name
-            for device_id, label in phones:
-                arrived = self._phone_hub.wait_for_upload(
-                    session_id, device_id,
-                    self._processing_status,
-                    label=label,
-                )
-                file_name = self._phone_upload_file(session_dir, device_id)
-                if self._phone_hub.upload_went_to_vault(session_id, device_id) and file_name:
-                    if arrived is not None:
-                        vault_files.append(file_name)
-                    else:
-                        # Its partial upload is no use now (and if the phone
-                        # carries on later, it's a late upload: through here).
-                        client = self._camera_upload_route(session_id)
-                        if client is not None:
-                            client.delete_paths([f"camera_uploads/{session_id}/{file_name}"])
-                self._phone_hub.forget_upload(session_id, device_id)
-                if arrived is None:
-                    self._processing_status(f"{label}'s recording didn't arrive — using the live feed's video instead.")
         from .vault import vault_encodes_videos
+        config = self.get_config()
         status = self._processing_status
         defer_video = vault_encodes_videos(config, log=status)
-        vault_uploads = None
-        if vault_files:
-            # Those recordings are only in the vault, so only it can make
-            # their videos: left to it even if it can't be reached right now
-            # (the session waits here for the upload retries).
-            from .phone_camera.sync import VaultCameraUploads
-            vault_uploads = VaultCameraUploads(self._camera_upload_route(session_dir.name), session_dir.name,
-                                               vault_files)
-            defer_video = True
         try:
-            summary = process_session(session_dir=session_dir, config=config, defer_video=defer_video,
-                                      vault_uploads=vault_uploads)
+            summary = process_session(session_dir=session_dir, config=config, defer_video=defer_video)
         except Exception as e:
             status(f"Session take processing failed: {e} — raw files kept in {session_dir}")
             return
@@ -7273,10 +6903,7 @@ class LocalBackend(Backend):
         with _vault_sync_lock:
             self._sync_vault(config, log=status, prune=not self.is_session_active())
         from .video import render_jobs
-        if not uploaded and render_jobs.needs_vault(session_dir):
-            status("The vault didn't get this session yet; it's kept here until it does (the vault has its "
-                   "phones' recordings, so only it can make the videos). The upload is retried every few minutes.")
-        elif not uploaded and render_jobs.pending(session_dir):
+        if not uploaded and render_jobs.pending(session_dir):
             # Left for the vault, but it never got the session: this
             # machine has the only copy, so its videos get made here after all.
             status("The vault didn't get this session, so its videos are being encoded here instead...")
@@ -7330,159 +6957,6 @@ class LocalBackend(Backend):
                 self._sync_vault(config, log=log, prune=not self._busy_with_a_session())
         return done
 
-    # --- phone recordings that arrive after their session was processed ---
-
-    def _late_uploads_root(self, config: "StudioConfig") -> Path:
-        from .vault import vault_root
-        return vault_root(config) / "late_camera_uploads"
-
-    @staticmethod
-    def _late_camera_entry(data: dict, device_id: str) -> dict | None:
-        """The session log's camera entry for this phone, if its video was
-        made from the live feed (so the phone's own recording is still
-        worth having)."""
-        for cam in data.get("extra_cameras") or []:
-            if (cam.get("phone_camera") or {}).get("device_id") != device_id or not cam.get("upload_file"):
-                continue
-            if (cam.get("video_sync") or {}).get("source") == "phone upload":
-                return None  # already has it
-            return cam
-        return None
-
-    def _late_upload_target(self, session_id: str, device_id: str) -> tuple[Path, str] | None:
-        """Where a phone's recording goes for a session that's only in the
-        vault now, or None to refuse it (see PhoneCameraHub.set_callbacks).
-        Called on the phone's upload connection."""
-        config = self.get_config()
-        local = self._local_session_dir_path(session_id)
-        if local is not None:
-            # Processed, but still here: not uploaded to the vault yet.
-            try:
-                data = json.loads((local / "session_log.json").read_text())
-            except (OSError, ValueError):
-                return None
-        else:
-            from .vault import remote_vault
-            client = remote_vault(config)
-            if client is None:
-                return None
-            data = client.fetch_session_log(session_id)
-        if not data or self._late_camera_entry(data, device_id) is None:
-            return None
-        entry = self._late_camera_entry(data, device_id)
-        directory = self._late_uploads_root(config) / session_id
-        directory.mkdir(parents=True, exist_ok=True)
-        self._emit("vault_status", {"status": f"{entry.get('label') or 'A phone'} is uploading its recording of "
-                                              f"{session_id}, which was processed without it; it'll replace "
-                                              "the live feed's video in the vault."})
-        return directory, entry["upload_file"]
-
-    def _on_late_upload(self, session_id: str, device_id: str) -> None:
-        self.recover_late_camera_uploads()
-
-    def recover_late_camera_uploads(self) -> int:
-        """Swap every late phone recording that's fully arrived into its
-        session in the vault, in place of the live feed's video (phone_
-        camera/sync.py's realign_late_upload). Only while no session is
-        open or processing — it's gigabytes of network and disk — so it's
-        also retried by the upload-retry loop. Returns how many it did."""
-        if self._busy_with_a_session():
-            return 0
-        config = self.get_config()
-        root = self._late_uploads_root(config)
-        if not root.is_dir():
-            return 0
-        from .vault import remote_vault
-        client = remote_vault(config)
-        if client is None:
-            return 0
-        log = lambda msg: self._emit("vault_status", {"status": msg})  # noqa: E731
-        done = 0
-        with _late_upload_lock:
-            for directory in sorted(d for d in root.iterdir() if d.is_dir()):
-                if self._busy_with_a_session():
-                    break
-                try:
-                    done += self._recover_late_session(client, directory, log)
-                except Exception as e:  # noqa: BLE001 — keep the files; try again next time
-                    log(f"Replacing {directory.name}'s live-feed video failed: {type(e).__name__}: {e} "
-                        f"(the phone's recording is kept in {directory}; it'll be retried)")
-                if not any(directory.iterdir()):
-                    directory.rmdir()
-        return done
-
-    def _recover_late_session(self, client, directory: Path, log) -> int:
-        from .phone_camera.hub import upload_paths
-        from .phone_camera.sync import realign_late_upload
-        session_id = directory.name
-        data = client.fetch_session_log(session_id)
-        if not data:
-            log(f"Late phone recordings for {session_id}: the vault doesn't have that session; kept in {directory}")
-            return 0
-        done = 0
-        for cam in list(data.get("extra_cameras") or []):
-            if not cam.get("upload_file"):
-                continue
-            uploaded, part, meta_path = upload_paths(directory, cam["upload_file"])
-            if not uploaded.exists():
-                continue  # not here, or still arriving
-            label = cam.get("label") or cam["final_file"]
-            if (cam.get("video_sync") or {}).get("source") == "phone upload":
-                uploaded.unlink()
-                meta_path.unlink(missing_ok=True)
-                continue
-            try:
-                meta = json.loads(meta_path.read_text())
-            except (OSError, ValueError):
-                meta = {}
-            old_video = directory / cam["final_file"]
-            if not old_video.exists():
-                log(f"Downloading {session_id}/{cam['final_file']} from the vault to line {label}'s recording up...")
-                if not client.download_file(f"sessions/{session_id}/{cam['final_file']}", old_video):
-                    raise RuntimeError(f"couldn't download {cam['final_file']}")
-            new_video = directory / (Path(cam["final_file"]).stem + ".late.mp4")
-            mic_name = Path(cam["final_file"]).stem + "_mic.flac"
-            log(f"Lining up {label}'s full-quality recording of {session_id}...")
-            audio_delay_s = max(0.0, -float(cam.get("video_offset_ms") or 0.0) / 1000.0)
-            sync = realign_late_upload(
-                uploaded, meta, cam.get("phone_camera") or {}, old_video, new_video, directory / mic_name,
-                audio_delay_s, int(data.get("sample_rate") or 48000),
-            )
-            if sync is None:
-                raise RuntimeError(f"couldn't line {label}'s recording up (no audio match, no clock sync)")
-            log(f"Uploading {label}'s full-quality video of {session_id} to the vault "
-                f"({new_video.stat().st_size / 1e9:.2f} GB, lined up by {sync['method']})...")
-            client.upload_file(new_video, f"sessions/{session_id}/{cam['final_file']}")
-            if sync.get("mic_file"):
-                client.upload_file(directory / mic_name, f"sessions/{session_id}/{mic_name}")
-            # The phone's own recording, untouched, as the archive master
-            # (as every on-time one is: phone_camera/sync.py's _align_camera)
-            # — before the session log says it's been swapped in, which is
-            # what a retry goes by.
-            client.delete_paths([f"sessions/{session_id}/{cam['upload_file']}.part"])
-            log(f"Archiving {label}'s original recording of {session_id} in the vault...")
-            client.upload_file(uploaded, f"sessions/{session_id}/{cam['upload_file']}")
-            if meta_path.exists():
-                client.upload_file(meta_path, f"sessions/{session_id}/{meta_path.name}")
-            # Re-read right before writing: only this one entry changes.
-            # video_offset_ms stays: the audio (what it describes, for the
-            # take refs and the editor) is exactly where it was.
-            fresh = client.fetch_session_log(session_id) or data
-            for entry in fresh.get("extra_cameras") or []:
-                if entry.get("final_file") == cam["final_file"]:
-                    entry["replaced_video_sync"] = entry.get("video_sync")
-                    entry["video_sync"] = {**{k: v for k, v in sync.items() if k != "mic_file"},
-                                           "original_file": cam["upload_file"]}
-                    if sync.get("mic_file"):
-                        entry["mic_file"] = sync["mic_file"]
-            if not client.write_session_log(session_id, fresh):
-                raise RuntimeError("the vault didn't take the updated session log")
-            for f in (uploaded, meta_path, old_video, new_video, directory / mic_name):
-                f.unlink(missing_ok=True)
-            log(f"{label}'s full-quality video of {session_id} is in the vault now.")
-            done += 1
-        return done
-
     def start_session_upload_retries(self, interval_seconds: float = 600.0) -> None:
         """Run retry_session_uploads now and then every `interval_seconds`
         on a background thread, for as long as this process runs (takeloom
@@ -7493,17 +6967,6 @@ class LocalBackend(Backend):
                     self.retry_session_uploads()
                 except Exception as e:  # noqa: BLE001 — the loop must never die
                     self._emit("vault_status", {"status": f"Session upload retry failed: {type(e).__name__}: {e}"})
-                try:
-                    self.recover_late_camera_uploads()
-                except Exception as e:  # noqa: BLE001
-                    self._emit("vault_status", {"status": f"Late phone recording check failed: {type(e).__name__}: {e}"})
-                if not self._busy_with_a_session():
-                    try:
-                        from .vault import prune_vault_delegates
-                        prune_vault_delegates(self.get_config(),
-                                              log=lambda msg: self._emit("vault_status", {"status": msg}))
-                    except Exception as e:  # noqa: BLE001
-                        self._emit("vault_status", {"status": f"Vault token check failed: {type(e).__name__}: {e}"})
                 time.sleep(interval_seconds)
 
         threading.Thread(target=loop, daemon=True, name="session-upload-retry").start()

@@ -1,33 +1,26 @@
 """VaultCameraHub: the Takeloom Camera phones, by way of the vault.
 
-The phones connect to the vault now (vault_server/takeloom_vault/
-camera_hub.py: it's wired to the router, this recording node usually
-isn't), not to this machine. This is what the backend sees in place of
-PhoneCameraHub (hub.py): the same queries and controls, over one
-connection to the vault's camera hub (its docstring has the messages) —
-the phones' statuses and previews come down it, and what the backend tells
-a phone goes up it to be passed on.
+The phones connect to the vault (vault_server/takeloom_vault/camera_hub.py:
+it's wired to the router, a recording node usually isn't), never to a
+node. This is how a node's backend sees and controls them: one connection
+to the vault's camera hub (its docstring has the messages) — the phones'
+statuses and previews come down it, and what the backend tells a phone
+goes up it to be passed on.
 
-What's different from a phone connected here:
-
-- a session's live feed is recorded on the vault, straight into the
-  session's folder there, not here (VaultPhoneRecorder); the vault lines
-  it up by clock, and the phone's own recording uploads there too;
-- every phone time converts to the vault's clock, not this machine's
-  (the phones sync with the vault): this connection pings the vault the
-  same NTP way the phones do, and a session's mix start is logged on the
-  vault's clock (session_log_info), so everything that lines a recording
-  up works unchanged;
-- no live video reaches this machine, so no full-resolution preview of a
-  phone, and no streaming from here (the vault streams).
+- A session's live feed is recorded on the vault, straight into the
+  session's folder there (VaultPhoneRecorder); the vault lines it up by
+  clock, and the phone's own recording uploads there too.
+- Every phone time is on the vault's clock (the phones sync with the
+  vault): this connection pings the vault the same NTP way the phones do,
+  and a session's mix start is logged on the vault's clock
+  (session_log_info), so everything that lines a recording up works.
+- No live video reaches the node: the vault streams (vault_stream.py).
 
 The same connection carries the vault's web UI's operations on this node
-(cameras, projects and setlists: node_rpc.py), which is how this node is
-controlled from anywhere else now that remote mode is gone.
+(cameras, projects and setlists: node_rpc.py), which is how a node is
+controlled from anywhere else.
 
-`takeloom server` uses this instead of listening for phones itself
-whenever its remote vault says it has a camera hub (`camera_hub` in its
-ping).
+Every node with a remote vault uses it (LocalBackend.connect_vault_cameras).
 """
 
 from __future__ import annotations
@@ -40,7 +33,7 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 from .app_version import version_status
-from .hub import PhoneCameraInfo
+from .info import PhoneCameraInfo
 from .models import display_name, model_name
 from .protocol import (
     DEVICE_PREFIX, FRAME_JSON, FRAME_PREVIEW, ProtocolError, decode_json, encode_json, read_frame,
@@ -105,10 +98,8 @@ class VaultCameraHub:
             except OSError:
                 pass
 
-    def set_callbacks(self, on_preview, on_change, session_dir_resolver=None, on_live_change=lambda: None,
-                      on_framing=lambda _d, _m: None, on_status=lambda _d, _s: None, **_uploads) -> None:
-        """PhoneCameraHub's; the upload hooks don't apply (uploads go to the
-        vault, which lines them up)."""
+    def set_callbacks(self, on_preview, on_change, on_live_change=lambda: None,
+                      on_framing=lambda _d, _m: None, on_status=lambda _d, _s: None) -> None:
         self._on_preview = on_preview
         self._on_change = on_change
         self._on_live_change = on_live_change
@@ -282,7 +273,7 @@ class VaultCameraHub:
             offset = self._offset_ns
         return None if node_ns is None or offset is None else node_ns + offset
 
-    # --- PhoneCameraHub's queries ---
+    # --- the phones ---
 
     def cameras(self) -> list[PhoneCameraInfo]:
         with self._lock:
@@ -328,35 +319,10 @@ class VaultCameraHub:
     def recorder(self, device_id: str, session_id: str, live_file: str, upload_file: str) -> "VaultPhoneRecorder":
         return VaultPhoneRecorder(self, device_id, session_id, live_file, upload_file)
 
-    # No live video here (see the module docstring).
-    def set_video_sink(self, device_id: str, sink) -> None:
-        pass
-
-    def add_video_tap(self, device_id: str, tap) -> None:
-        pass
-
-    def remove_video_tap(self, device_id: str, tap) -> None:
-        pass
-
-    # Uploads are the vault's: nothing here waits for one.
-    def expect_upload(self, *args, **kwargs) -> None:
-        pass
-
-    def wait_for_upload(self, *args, **kwargs):
-        return None
-
-    def upload_went_to_vault(self, session_id: str, device_id: str) -> bool:
-        return True
-
-    def forget_upload(self, session_id: str, device_id: str) -> None:
-        with self._lock:
-            self._recording_starts.pop((session_id, device_id), None)
-            self._live_starts.pop((session_id, device_id), None)
-
 
 class VaultPhoneRecorder:
-    """PhoneVideoRecorder's stand-in (recorder.py) for a phone on the vault:
-    the live feed is recorded there, into the session's folder as
+    """A phone's recording of a session, on the vault (the backend holds it
+    like a local camera's VideoRecorder): the live feed is recorded there, into the session's folder as
     `live_file`, and the phone's own recording uploads there as
     `upload_file`. Nothing is written here."""
 
@@ -388,8 +354,9 @@ class VaultPhoneRecorder:
         return self.hub.live_start(self.session_id, self.device_id)[0]
 
     def session_log_info(self, mix_start_ns: int | None) -> dict:
-        """recorder.py's, with the mix start on the vault's clock — the one
-        the phones' clock offsets are to."""
+        """What lining its recordings up needs (the session log's camera
+        entry's "phone_camera"), with the mix start on the vault's clock —
+        the one the phones' clock offsets are to."""
         info = self.hub.camera(self.device_id)
         first_live, first_offset = self.hub.live_start(self.session_id, self.device_id)
         return {

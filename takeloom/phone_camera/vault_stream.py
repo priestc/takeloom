@@ -2,9 +2,9 @@
 
 When the phones are the vault's (vault_hub.py), so is the stream: the
 phones' live feeds are already there, and the vault is wired to the
-router, where this recording node is usually on Wi-Fi. This stands in for
-video/stream_switcher.py's StreamSwitcher in the backend — the same
-set_program / footer / stop — but all this machine sends is its live mix
+router, where this recording node is usually on Wi-Fi. The backend holds it
+as the session's stream_switcher (set_program / footer / stop), but all
+this machine sends is its live mix
 (int16 PCM, about 1.5 Mbps for 48 kHz stereo) and what to show, over a
 connection of its own to the vault's camera hub (role "stream"; the
 vault's live_stream.py has the messages and does the rest: switching,
@@ -156,9 +156,6 @@ class VaultStream:
     def set_program(self, device: str) -> None:
         self._program = device
         self._send(encode_json({"kind": "program", "camera": device}))
-
-    def set_footer(self, text: str) -> None:
-        pass  # the vault needs the parts (set_footer_parts), to put in the song's working title
 
     def set_footer_parts(self, parts: list[str], song: str | None) -> None:
         self._send(encode_json({"kind": "footer", "parts": parts, "song": song}))

@@ -38,18 +38,11 @@ Alignment of the uploaded file, coarse to fine:
 If too few windows agree (a silent session, headphones-only with nothing
 acoustic in the room), the clock-sync estimate is used as-is.
 
-A phone recording that went straight to the remote vault (hub.py's
-upload_redirect; VaultCameraUploads) is lined up the same way without ever
-coming here: the vault sends just its sound, decoded exactly as
-_decode_mono would here, and its first frame's time, and the file work
-this would do (_normalize_video, extract_mic) is left to the vault as
-render jobs (vault_server/takeloom_vault/render.py's "normalize" and
-"mic"), ahead of the encodes.
-
-The same fit also places the phone's mic track: extract_mic writes it out
-as <camera file>_mic.flac on the mix's own timeline (sample 0 = the mix's
-first sample, drift corrected, as long as the mix), the room's "atmospheric"
-version of the session, archived with it in the vault.
+Today's sessions don't come through here: their cameras are sources
+(sources.py), and the phones upload to the vault, which lines them up
+(vault_server/takeloom_vault/align.py, a copy of this module's math:
+measure_recording and what it uses — keep in step). align_phone_video is
+only for a session from before cameras were a set, processed late.
 """
 
 from __future__ import annotations
@@ -62,7 +55,7 @@ import numpy as np
 
 from ..ffmpeg_bin import FFMPEG, FFPROBE
 from ..utils import atomic_write_text
-from .hub import UPLOAD_FILE_NAME, upload_paths
+from .info import UPLOAD_FILE_NAME, upload_paths
 
 RATE = 8000  # Hz; plenty for timing to a fraction of a ms after interpolation
 WINDOW_S = 8.0
@@ -241,68 +234,6 @@ def _normalize_video(src: Path, dest: Path, scale: float) -> bool:
     return True
 
 
-def extract_mic(uploaded: Path, out: Path, file_zero_s: float, scale: float, mix_flac: Path | None,
-                sample_rate: int, duration: float | None = None) -> bool:
-    """The phone recording's mic track as FLAC, on the mix's timeline:
-    sample n is the same moment as the mix's sample n, over exactly the
-    mix's length (silence where the phone wasn't recording).
-
-    The phone file's time t is mix time file_zero_s + t * scale (_align_
-    uploaded's fit). -itsscale applies the scale to the timestamps, and
-    aresample's async mode resamples the audio to fit them (soft
-    compensation: the drift is tens of ppm, far too small to hear) with
-    silence before the first sample (first_pts=0, as in _decode_mono);
-    then it's shifted by file_zero_s and cut to the mix's length."""
-    if duration is None:
-        import soundfile as sf
-        duration = sf.info(str(mix_flac)).duration
-    shift = (f"adelay=delays={file_zero_s * 1000:.3f}:all=1" if file_zero_s >= 0
-             else f"atrim=start={-file_zero_s:.6f},asetpts=PTS-STARTPTS")
-    chain = f"aresample={sample_rate}:async=1000:first_pts=0,{shift},apad,atrim=end={duration:.6f}"
-    tmp = out.with_name(out.stem + ".partial.flac")
-    cmd = [FFMPEG, "-v", "error", "-y", "-itsscale", f"{scale:.9f}", "-copyts", "-i", str(uploaded),
-           "-map", "0:a:0", "-af", chain, "-c:a", "flac", str(tmp)]
-    result = subprocess.run(cmd, capture_output=True)
-    if result.returncode != 0 or not tmp.exists():
-        tmp.unlink(missing_ok=True)
-        raise RuntimeError(f"couldn't extract the mic from {uploaded.name}: "
-                           f"{result.stderr.decode(errors='replace')[-300:]}")
-    tmp.replace(out)
-    return True
-
-
-class VaultCameraUploads:
-    """The phone recordings of one session that are in the remote vault's
-    camera_uploads/ rather than here (`files`, by upload file name), and
-    the render jobs lining them up leaves for the vault (see the module
-    docstring): `jobs` run first, `staged` are the recordings those jobs
-    move into the session (render_jobs.json's "staged_inputs")."""
-
-    def __init__(self, client, session_id: str, files: list[str]) -> None:
-        self.client = client
-        self.session_id = session_id
-        self.files = set(files)
-        self.jobs: list[dict] = []
-        self.staged: list[str] = []
-
-    def has(self, upload_file: str | None) -> bool:
-        return bool(upload_file) and upload_file in self.files and self.client is not None
-
-    def makes(self, file_name: str) -> bool:
-        """Whether a job here writes `file_name` (a camera's raw video)."""
-        return any(job["output"] == file_name for job in self.jobs)
-
-    def first_video_pts(self, upload_file: str) -> float:
-        return self.client.camera_upload_first_video_pts(self.session_id, upload_file)
-
-    def audio(self, upload_file: str) -> np.ndarray:
-        return np.frombuffer(self.client.camera_upload_audio(self.session_id, upload_file), dtype="<f4")
-
-    def stage(self, upload_file: str) -> None:
-        if upload_file not in self.staged:
-            self.staged.append(upload_file)
-
-
 def align_phone_video(session_dir: Path, data: dict, log_path: Path) -> float | None:
     """Make session_video_raw.mp4 the best available phone video and return
     its offset in ms (positive = video starts that long after the mix), also
@@ -314,45 +245,17 @@ def align_phone_video(session_dir: Path, data: dict, log_path: Path) -> float | 
     return offset_ms
 
 
-def align_extra_cameras(session_dir: Path, data: dict, log_path: Path, local_offset_ms: float,
-                        vault_uploads: VaultCameraUploads | None = None) -> None:
-    """Fill in "video_offset_ms" on each of the session log's
-    "extra_cameras" entries (see backend.py's session_cameras): measured,
-    for a phone, exactly as align_phone_video does an older session's lone camera (its
-    raw file replaced by its uploaded recording, when that arrived);
-    `local_offset_ms` (the hand-tuned camera offset) for a local camera.
-    A phone whose recording is in the vault (`vault_uploads`) gets its
-    jobs added there instead of its files made here."""
-    for entry in data.get("extra_cameras", []):
-        if entry.get("video_offset_ms") is not None:
-            continue  # already aligned by an earlier, interrupted run
-        phone = entry.get("phone_camera")
-        if phone and entry.get("upload_file"):
-            stem = Path(entry.get("final_file") or entry["file"]).stem
-            entry["video_offset_ms"] = _align_camera(
-                session_dir, entry, phone, entry["upload_file"], session_dir / entry["file"], data,
-                mic_file=f"{stem}_mic.flac", vault_uploads=vault_uploads,
-            )
-        else:
-            entry["video_offset_ms"] = local_offset_ms
-    atomic_write_text(log_path, json.dumps(data, indent=2))
-
-
 def _align_camera(
     session_dir: Path, record: dict, phone: dict, upload_file: str, raw: Path, data: dict,
-    mic_file: str | None = None, vault_uploads: VaultCameraUploads | None = None,
 ) -> float | None:
     """Make `raw` the best available video from one phone and return its
     offset in ms, recording how it was measured into `record`
-    ("video_offset_ms"/"video_sync"). With `mic_file`, the phone's mic
-    track is saved under that name too, lined up with the mix (extract_mic;
-    record["mic_file"]). None if nothing usable.
+    ("video_offset_ms"/"video_sync"). None if nothing usable.
 
     The phone's recording itself (`upload_file`, and its .upload.json) is
     never deleted: it's the archive master, exactly as the phone made it.
-    `raw` (its video, timestamps rescaled for drift), the camera video made
-    from that, and the mic FLAC are working copies, all re-derivable from
-    it and the "video_sync" record (file_zero_s, drift, offset_ms)."""
+    `raw` (its video, timestamps rescaled for drift) is a working copy,
+    re-derivable from it and the "video_sync" record."""
     uploaded, _part, meta_path = upload_paths(session_dir, upload_file)
     mix_flac = session_dir / "session_mix.flac"
     session_flac = session_dir / "session.flac"
@@ -360,36 +263,7 @@ def _align_camera(
     mix_start_frame = data.get("mix_start_frame", 0)
 
     sync: dict | None = None
-    remote = vault_uploads if vault_uploads is not None and vault_uploads.has(upload_file) else None
-    if remote is not None and mix_flac.exists():
-        try:
-            meta = json.loads(meta_path.read_text())
-        except (OSError, ValueError):
-            meta = {}
-        try:
-            sync = _align_uploaded(uploaded, meta, phone, mix_flac, session_flac, sample_rate, mix_start_frame, raw,
-                                   remote=remote, clicks=_click_times(data))
-        except Exception as e:  # never lose the session over this: fall back to the live feed
-            sync = None
-            record["video_sync_error"] = str(e)
-        if sync is not None:
-            sync["uploaded_to"] = "vault"
-            remote.stage(upload_file)
-            if mic_file:
-                import soundfile as sf
-                remote.jobs.append({"kind": "mic", "output": mic_file, "spec": {
-                    "input": upload_file, "file_zero_s": sync["file_zero_s"],
-                    "scale": 1.0 + sync.get("drift", 0.0), "sample_rate": int(sample_rate),
-                    "duration": sf.info(str(mix_flac)).duration,
-                }})
-                record["mic_file"] = mic_file
-            sync["original_file"] = upload_file
-            # The vault makes `raw` from the recording (its normalize job):
-            # the live feed's version would only be uploaded to be replaced.
-            # The recording itself and its metadata are kept (see
-            # _align_camera's docstring).
-            raw.unlink(missing_ok=True)
-    elif uploaded.exists() and mix_flac.exists():
+    if uploaded.exists() and mix_flac.exists():
         try:
             meta = json.loads(meta_path.read_text())
         except (OSError, ValueError):
@@ -401,13 +275,6 @@ def _align_camera(
             sync = None
             record["video_sync_error"] = str(e)
         if sync is not None:
-            if mic_file:
-                try:
-                    if extract_mic(uploaded, session_dir / mic_file, sync["file_zero_s"], 1.0 + sync.get("drift", 0.0),
-                                   mix_flac, sample_rate):
-                        record["mic_file"] = mic_file
-                except Exception as e:  # the video matters more: never lose it over the mic
-                    record["mic_error"] = str(e)
             sync["original_file"] = upload_file
 
     if sync is None and "video_sync" in record and record["video_sync"].get("source") == "phone upload":
@@ -440,8 +307,7 @@ def _click_times(data: dict) -> list[float]:
 
 def measure_recording(
     uploaded: Path, meta: dict, phone: dict, mix_audio: Path, session_flac: Path,
-    sample_rate: int, mix_start_frame: int, remote: VaultCameraUploads | None = None,
-    clicks: list[float] | None = None,
+    sample_rate: int, mix_start_frame: int, clicks: list[float] | None = None,
 ) -> dict | None:
     """Where a phone's own recording sits on the session's timeline, without
     touching it: {"source": "phone upload", "method": "audio"|"clock",
@@ -457,13 +323,8 @@ def measure_recording(
         clock_offset = phone.get("clock_offset_ns")
     clock_v = _clock_video_start(phone, video_start_pts, clock_offset)
 
-    if remote is not None:
-        # In the vault: its sound and first frame's time come from there.
-        first_video_pts = remote.first_video_pts(uploaded.name)
-        phone_audio = remote.audio(uploaded.name)
-    else:
-        first_video_pts = _probe_first_video_pts(uploaded)
-        phone_audio = _decode_mono(uploaded, ["-copyts"], "0:a:0", pad_from_zero=True)
+    first_video_pts = _probe_first_video_pts(uploaded)
+    phone_audio = _decode_mono(uploaded, ["-copyts"], "0:a:0", pad_from_zero=True)
     references = [("mix", _decode_mono(mix_audio), 0.0)]
     if session_flac.exists():
         # session.flac runs on its own timeline; the mix started
@@ -485,7 +346,7 @@ def measure_recording(
             "source": "phone upload", "method": "audio",
             "offset_ms": round(video_start * 1000, 3),
             # Where the file's own time zero falls on the mix's timeline,
-            # and its clock's rate against the mix's: what extract_mic needs.
+            # and its clock's rate against the mix's.
             "file_zero_s": fit["a0_s"], "drift": fit["drift"],
             "drift_ppm": round(fit["drift"] * 1e6, 2),
             "windows_matched": fit["inliers"], "windows_tried": fit["windows"],
@@ -502,134 +363,14 @@ def measure_recording(
 
 def _align_uploaded(
     uploaded: Path, meta: dict, phone: dict, mix_flac: Path, session_flac: Path,
-    sample_rate: int, mix_start_frame: int, raw: Path, remote: VaultCameraUploads | None = None,
-    clicks: list[float] | None = None,
+    sample_rate: int, mix_start_frame: int, raw: Path, clicks: list[float] | None = None,
 ) -> dict | None:
     """measure_recording, then `raw` made from it: its video, timestamps
-    rescaled for the drift (here, or by the vault's normalize job)."""
+    rescaled for the drift."""
     result = measure_recording(uploaded, meta, phone, mix_flac, session_flac, sample_rate, mix_start_frame,
-                               remote=remote, clicks=clicks)
+                               clicks=clicks)
     if result is None:
         return None
-    scale = 1.0 + result["drift"]
-    if remote is not None:
-        remote.jobs.append({"kind": "normalize", "output": raw.name,
-                            "spec": {"input": uploaded.name, "scale": scale}})
-    elif not _normalize_video(uploaded, raw, scale):
+    if not _normalize_video(uploaded, raw, 1.0 + result["drift"]):
         return None
-    return result
-
-
-def _probe_streams(path: Path) -> list[dict]:
-    result = subprocess.run(
-        [FFPROBE, "-v", "error", "-show_entries", "stream=index,codec_type,start_pts,time_base,duration",
-         "-of", "json", str(path)], capture_output=True, text=True,
-    )
-    return json.loads(result.stdout or "{}").get("streams") or []
-
-
-def realign_late_upload(
-    uploaded: Path, meta: dict, phone: dict, camera_video: Path, out: Path, mic_out: Path,
-    audio_delay_s: float, sample_rate: int,
-) -> dict | None:
-    """A phone recording that arrived after its session was processed (and
-    the session's video made from the phone's live feed instead): swap its
-    video into `camera_video`, writing `out`.
-
-    The finished camera video's two audio tracks (Mix, Instrument Only)
-    are copied over untouched — every take's video ref and the editor's
-    offsets point at their timing — so only the video track moves. It's
-    lined up exactly as a normal upload is (_align_uploaded), but against
-    those audio tracks, on the camera video's own timeline: the vault
-    doesn't keep session.flac/session_mix.flac once the videos are made.
-    `audio_delay_s` is where the mix starts in `camera_video` (the
-    negative-offset delay it was muxed with), only needed for the clock
-    estimate and the mic track. Also writes the phone's mic track to
-    `mic_out` on the mix's timeline. Returns the sync record (as
-    _align_uploaded's, plus "video_start_in_file_s"), or None if neither
-    the audio nor the clock could place it."""
-    video_start_pts = meta.get("video_start_pts_ns") or phone.get("phone_video_start_pts_ns")
-    clock_offset = meta.get("clock_offset_ns")
-    if clock_offset is None:
-        clock_offset = phone.get("clock_offset_ns")
-    clock_v = _clock_video_start(phone, video_start_pts, clock_offset)
-    clock_file = clock_v + audio_delay_s if clock_v is not None else None
-
-    first_video_pts = _probe_first_video_pts(uploaded)
-    phone_audio = _decode_mono(uploaded, ["-copyts"], "0:a:0", pad_from_zero=True)
-    references = [
-        ("mix", _decode_mono(camera_video, ["-copyts"], "0:a:0", pad_from_zero=True), 0.0),
-        ("instrument", _decode_mono(camera_video, ["-copyts"], "0:a:1", pad_from_zero=True), 0.0),
-    ]
-    if clock_file is not None:
-        fit = measure_alignment(phone_audio, references, clock_file - first_video_pts, SEARCH_S)
-    else:
-        fit = measure_alignment(phone_audio, references, -first_video_pts, NO_CLOCK_SEARCH_S)
-    if fit is not None:
-        scale = 1.0 + fit["drift"]
-        file_zero = fit["a0_s"]  # the upload's time 0, on camera_video's timeline
-        result = {
-            "source": "phone upload", "method": "audio", "late": True,
-            "drift": fit["drift"], "drift_ppm": round(fit["drift"] * 1e6, 2),
-            "windows_matched": fit["inliers"], "windows_tried": fit["windows"],
-            "residual_ms": fit["residual_ms"],
-        }
-        if clock_file is not None:
-            result["clock_offset_ms"] = round(clock_v * 1000, 3)
-    elif clock_file is not None:
-        scale = 1.0
-        file_zero = clock_file - first_video_pts
-        result = {"source": "phone upload", "method": "clock", "late": True, "drift": 0.0}
-    else:
-        return None
-    video_start = file_zero + first_video_pts * scale
-    result["video_start_in_file_s"] = round(video_start, 6)
-    result["offset_ms"] = round((video_start - audio_delay_s) * 1000, 3)
-    result["file_zero_s"] = file_zero - audio_delay_s  # on the mix's timeline, as extract_mic wants
-
-    normalized = out.with_name(out.stem + ".video-only.mp4")
-    if not _normalize_video(uploaded, normalized, scale):
-        raise RuntimeError(f"couldn't rescale {uploaded.name}'s video timestamps")
-    try:
-        # Low priority: this is background repair work, and a full-core
-        # re-encode starves everything else on the studio machine (the
-        # phones' live links kept dropping while one ran).
-        import shutil
-        cmd = (["nice", "-n", "15"] if shutil.which("nice") else []) + [FFMPEG, "-y", "-v", "error"]
-        if video_start >= 0:
-            # A stream copy: the video just starts a little into the file.
-            cmd += ["-itsoffset", f"{video_start:.6f}", "-i", str(normalized), "-i", str(camera_video),
-                    "-map", "0:v:0", "-map", "1:a:0", "-map", "1:a:1", "-c", "copy"]
-        else:
-            # It starts before the file's zero, and a stream copy can't
-            # start mid-GOP (ffmpeg quietly snaps it to 0 instead): cut it
-            # exactly, which means re-encoding.
-            cmd += ["-ss", f"{-video_start:.6f}", "-i", str(normalized), "-i", str(camera_video),
-                    "-map", "0:v:0", "-map", "1:a:0", "-map", "1:a:1",
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "copy"]
-        cmd += ["-disposition:a:0", "0", "-disposition:a:1", "default", "-movflags", "+faststart", str(out)]
-        done = subprocess.run(cmd, capture_output=True)
-        if done.returncode != 0 or not out.exists():
-            raise RuntimeError(f"couldn't mux {out.name}: {done.stderr.decode(errors='replace')[-300:]}")
-    finally:
-        normalized.unlink(missing_ok=True)
-
-    # The audio must have come through bit-for-bit where it was.
-    before = [(st.get("codec_type"), st.get("start_pts")) for st in _probe_streams(camera_video)
-              if st.get("codec_type") == "audio"]
-    after_streams = _probe_streams(out)
-    after = [(st.get("codec_type"), st.get("start_pts")) for st in after_streams if st.get("codec_type") == "audio"]
-    if before != after or not any(st.get("codec_type") == "video" for st in after_streams):
-        out.unlink(missing_ok=True)
-        raise RuntimeError(f"{out.name}'s audio tracks didn't come through unchanged ({before} -> {after})")
-
-    mix_duration = next((float(st["duration"]) for st in _probe_streams(camera_video)
-                         if st.get("codec_type") == "audio" and st.get("duration")), None)
-    if mix_duration:
-        try:
-            extract_mic(uploaded, mic_out, result["file_zero_s"], scale, None, sample_rate,
-                        duration=mix_duration - audio_delay_s)
-            result["mic_file"] = mic_out.name
-        except Exception as e:  # the video matters more: never lose it over the mic
-            result["mic_error"] = str(e)
     return result

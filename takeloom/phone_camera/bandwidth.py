@@ -24,8 +24,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 DEFAULT_BUDGET_MBPS = 20.0
-# Past this, more bits don't show: the stream is 1280 wide (StreamSwitcher),
-# and the video-ui's full-resolution view (full_preview.py) is 1080p.
+# Past this, more bits don't show at the stream's sizes (the vault's
+# live_stream.py).
 MAX_BPS = 8_000_000
 # Below this the picture falls apart, budget or not.
 MIN_BPS = 400_000

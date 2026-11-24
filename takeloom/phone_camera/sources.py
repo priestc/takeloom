@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .hub import upload_paths
+from .info import upload_paths
 from .sync import _click_times, _clock_video_start, _probe_first_video_pts, measure_recording
 
 VERSION = 1  # the session log's "camera_sources"

@@ -521,54 +521,20 @@ def server_command(disable_color: bool) -> None:
 
     backend.on_event(on_streaming_event)
 
-    def request_authorization(ip: str, client_name: str) -> bool:
-        log(f"\nPairing request from '{client_name}' ({ip})")
-        if not sys.stdin.isatty():
-            # Running headless — e.g. as the launchd service (see
-            # service.py): ask on the Mac's own screen instead.
-            approved = _approve_via_dialog(client_name, ip)
-            if approved is not None:
-                log(f"Pairing {'approved' if approved else 'denied'} via on-screen dialog.")
-                return approved
-        try:
-            return click.confirm("Approve this connection?", default=False)
-        except click.exceptions.Abort:
-            # No TTY attached to stdin (e.g. this process was started
-            # detached/backgrounded) — click.confirm can't prompt at all in
-            # that case and raises instead of returning. Deny rather than
-            # let this crash the connection-handler thread with no response
-            # ever sent back to the waiting client.
-            log("Cannot prompt for approval (no interactive terminal attached) — denying.", err=True)
-            return False
-
     log(f"takeloom server running (host: {backend.hostname()}, ip: {backend.ip_address()})")
 
-    # Takeloom Camera phones (camera_app/): they connect to the remote
-    # vault, which has a camera hub (vault_server's camera_hub.py) — this
-    # recording node controls them through it (phone_camera/vault_hub.py).
-    # Without a remote vault, or with one too old for that, they connect
-    # here instead — same pairing approval and token list as Remote
-    # clients, on their own port.
+    # Takeloom Camera phones (camera_app/) connect to the vault (its
+    # camera_hub.py); this recording node controls them through it
+    # (phone_camera/vault_hub.py). No remote vault, no phones.
     if not backend.connect_vault_cameras(log=log):
-        from .phone_camera.hub import PhoneCameraHub
-        phone_hub = PhoneCameraHub(
-            backend.get_config, backend.save_config, backend.hostname, request_authorization, log=log,
-        )
-        try:
-            phone_hub.start()
-        except OSError as e:
-            log(f"Error: could not start the Takeloom Camera listener on port {phone_hub.port}: {e}", err=True)
-        else:
-            backend.attach_phone_camera_hub(phone_hub)
-            log(f"Takeloom Camera listening on port {phone_hub.port}")
+        log("No Takeloom Camera phones: they connect to the remote vault, and there isn't one set up "
+            "(or it's older than takeloom-vault 0.18). Pair with it in Studio Setup.")
 
     # Same startup check as ui/app.py's _process_latest_session_if_pending:
     # if the most recent session hasn't been through process_session yet
     # (the previous run crashed or lost power before it could finish),
-    # process it now — after the phone listener is up, and in the
-    # background like any session that just ended, so it waits for the
-    # phones' full-quality recordings instead of filing the live feeds and
-    # then refusing the phones' uploads. A failure is logged, never fatal.
+    # process it now, in the background like any session that just ended.
+    # A failure is logged, never fatal.
     try:
         sessions = backend.list_sessions()
     except BackendError as e:
@@ -766,31 +732,6 @@ def service_logs(lines: int) -> None:
         click.echo(f"No log yet at {service.LOG_PATH}.", err=True)
         raise SystemExit(1)
     os.execvp("tail", ["tail", "-n", str(lines), "-F", str(service.LOG_PATH)])
-
-
-def _approve_via_dialog(client_name: str, ip: str) -> bool | None:
-    """A macOS Approve/Deny dialog for a server pairing request when there's
-    no terminal to prompt in. None if it couldn't be shown at all (not macOS,
-    no GUI session) — the caller falls back to the terminal path. Gives up
-    (denies) after 2 minutes so an unattended request can't hang a client."""
-    if sys.platform != "darwin":
-        return None
-    import subprocess
-
-    def quote(text: str) -> str:
-        return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
-    script = (
-        f"display dialog {quote(f'{client_name} ({ip}) wants to connect to this takeloom server.')} "
-        f'with title "takeloom pairing request" buttons {{"Deny", "Approve"}} '
-        f'default button "Deny" giving up after 120'
-    )
-    try:
-        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=130)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode != 0 and "-128" not in result.stderr:  # -128: dialog cancelled
-        return None
-    return "button returned:Approve" in result.stdout
 
 
 def _prompt_instrument_label() -> str:

@@ -1,12 +1,15 @@
 # Takeloom Camera
 
 An iOS / Android app that turns a phone into the session camera. The phone
-records the session at full quality, streams a live feed to the server (for
-YouTube streaming and the Record tab's preview), and uploads its own
-recording once the session ends. The server then lines that video up with
-the session's audio automatically, with no manual latency test.
+records the session at full quality, streams a live feed to the vault (for
+YouTube streaming and the previews), and uploads its own recording once
+the session ends. The vault then lines that video up with the session's
+audio automatically, with no manual latency test.
 
-- Server side: `takeloom/phone_camera/` (hub, live recorder, sync)
+- Vault side: `vault_server/takeloom_vault/` (`camera_hub.py`, `align.py`,
+  `live_stream.py`)
+- Recording node side: `takeloom/phone_camera/` (`vault_hub.py`,
+  `vault_stream.py`, `bandwidth.py`, `sources.py`)
 - iOS app: `camera_app/ios/` (Swift, AVFoundation + VideoToolbox)
 - Android app: `camera_app/android/` (Kotlin, Camera2 + MediaCodec)
 - Wire protocol: `takeloom/phone_camera/protocol.py`
@@ -23,10 +26,10 @@ phones through it (`takeloom/phone_camera/vault_hub.py`): it starts and
 stops their recordings with each session, sets their live quality and
 framing, and shows their previews. The vault records each phone's live
 feed into the session's folder and takes its upload there. A node with no
-remote vault (or one older than 0.18) still listens for phones itself, as
-below.
+remote vault has no phones.
 
-1. Run `takeloom server` on the recording node as usual.
+1. Run takeloom on the recording node as usual (`takeloom server` on the
+   Mac Mini, `takeloom ui` on the laptop).
 2. Open Takeloom Camera. The first time, it scans the phone's Wi-Fi network
    for the server: every address on port 51824, keeping those that answer
    the protocol's `discover` as takeloom. Then it asks "Connect to tank2
@@ -40,9 +43,10 @@ below.
 3. The phone shows up on the Record tab by itself, as one of the camera
    previews. There's nothing to add: every connected phone is recorded.
 4. Record as normal. Starting a session tells every connected phone to
-   record, and ending it tells them to stop and upload. Processing waits
-   for the uploads, showing progress in the status line, then builds the
-   session's videos from the phones' files.
+   record, and ending it tells them to stop and upload, straight into the
+   session's folder on the vault. Nothing waits for them: the vault lines
+   each recording up the moment it's in (its `align.py`), and until then
+   the session shows the live feed the vault recorded.
 
 ### More than one camera
 
@@ -58,20 +62,22 @@ Camera lists every camera ever seen. There you can:
   when first seen, and macOS's Continuity Camera from a nearby iPhone is a
   likely candidate too.
 
-What's streamed live is the program camera, picked in `takeloom video-ui`.
+What's streamed live is the program camera, picked in `takeloom video-ui`,
+on the Stream Deck, or on the vault's Cameras page. The vault makes the
+stream from the phones' live feeds, so only a phone can be on it.
 
 ### Sharing the Wi-Fi
 
 Each phone encodes twice: its recording at the quality picked in ⚙ (kept on
 the phone, uploaded after the session) and a lighter **live feed** for the
-stream, the previews and the fallback video. The server splits a Wi-Fi
+stream, the previews and the fallback video. The recording node splits a Wi-Fi
 budget between the phones' live feeds: `camera_wifi_budget_mbps` in the
 config, 20 Mbps by default. The program camera gets three shares to every
 other phone's one, so adding phones lowers the others' quality instead of
 flooding the network. With three phones that's 8 Mbps at 1080p for the
 program camera and 3 Mbps at 720p for each of the others. The split is
 re-done when a phone connects or leaves and when the program camera
-changes, and the server log shows it ("Live camera feeds: …").
+changes, and the node's log shows it ("Live camera feeds: …").
 
 - iOS changes size and bitrate as told, but holds its size while recording
   (the fallback video can't change size partway) and switches when it ends.
@@ -82,12 +88,11 @@ changes, and the server log shows it ("Live camera feeds: …").
   (12 Mbps at 1080p, 35 at 4K) comes off the budget first, and the log
   says to update it.
 
-Each camera besides the main one is saved whole as its own
-`cameraN_<name>.mp4` in the session, with the same audio tracks and
-watermark as `session_video.mp4`. A phone's copy gets its own measured
-sync offset (below); a local camera's uses the hand-tuned camera offset.
-These are whole-session videos only: per-take videos still come from the
-main camera.
+A session's cameras are **sources**: no camera video is made. Each
+camera's best recording (the phone's own, else its live feed; a local
+camera's file) is placed on the session's timeline by its alignment, and
+everything that shows or cuts a session works from that (see
+`docs/camera-alignment-design.md`).
 
 Hold the phone in the official [Takeloom phone mount](../phone_mount/), a
 3D-printable wall mount that keeps it in landscape. The software assumes
@@ -97,12 +102,14 @@ change mid-session.
 
 ## How the sync works
 
-See `takeloom/phone_camera/sync.py` for the details. In short:
+The vault does it (`vault_server/takeloom_vault/align.py`, a copy of
+`takeloom/phone_camera/sync.py`'s math). In short:
 
-1. **Clock sync.** The phone pings the server NTP-style (lowest-RTT sample
-   wins), so every frame's capture timestamp converts to the server's
-   clock. The server stamps the moment mix recording starts on that same
-   clock. This gives an estimate within a few tens of ms.
+1. **Clock sync.** The phone pings the vault NTP-style (lowest-RTT sample
+   wins), so every frame's capture timestamp converts to the vault's
+   clock. The recording node pings the vault the same way, and stamps the
+   moment mix recording starts on the vault's clock. This gives an
+   estimate within a few tens of ms.
 2. **Audio cross-correlation.** The phone records its mic into the same
    file, on the same clock as its video. GCC-PHAT between that mic track
    and the session's mix and dry instrument, searched ±1 s around the
@@ -112,33 +119,17 @@ See `takeloom/phone_camera/sync.py` for the details. In short:
    so tens of ms per hour) by rescaling the video timestamps (stream copy,
    no re-encode).
 
-The measured offset goes into `session_log.json` as `video_offset_ms`. The
-`video_sync` record there shows how it was measured: `method: audio` or
-`clock`, matched windows, residual, drift. That value replaces the global
-`video_latency_compensation_ms` for this session. If the mic heard nothing
-usable, the clock estimate is used instead.
+The result goes into the camera's phone source in `session_log.json`: its
+`align` record (`file_zero_s`, `drift`, and how it was measured:
+`method: audio` or `clock`, matched windows, residual). If the mic heard
+nothing usable, the clock estimate is used instead.
 
-### Uploading straight to the vault
+### Uploads
 
-When the remote vault makes the session videos (Studio Setup: "Remote
-only" storage, "Encode session videos on: Vault server", takeloom-vault
-0.11+), the phones' recordings never pass through the Mac Mini. A phone
-asks the server where to upload, as always, and is pointed at the vault
-(`upload_redirect` in protocol.py), with a vault token the server got for
-it. The upload goes there over HTTP in resumable 8 MB chunks. The server
-follows its progress on the vault, then lines it up from a small extract
-of its sound the vault sends (mono 8 kHz, about 115 MB an hour), just as it
-would a local file. It leaves the file work to the vault as render jobs
-that run before the encodes: rescaling the video for drift, and cutting
-the mic track. Older apps (before 1.6) still upload to the server.
-
-The phone pairs only with the server. Everything paired with the server,
-phones and remote-control laptops alike, gets its own vault token through
-the server's own pairing with the vault, shown under it on the vault's
-Paired devices page. Revoking the server there revokes them all, and a
-client no longer authorized on the server loses its token within minutes.
-A remote laptop uses its token to fetch take audio and videos straight
-from the vault, when it can reach it.
+A phone's recording uploads to the vault over HTTP in resumable 8 MB
+chunks, straight into the session's folder (an app older than 1.6 sends it
+over its connection instead, into the same place). The phone pairs only
+with the vault.
 
 ### Speakers, headphones, and sync clicks
 
@@ -167,7 +158,7 @@ Recording Devices fix that:
   the instrument.
 
 If the upload never arrives (phone died, app killed), the session uses the
-live feed the server recorded, aligned by clock sync alone. That video may
+live feed the vault recorded, aligned by clock sync alone. That video may
 have gaps wherever Wi-Fi dropped frames. Recordings that haven't uploaded
 stay on the phone and resume uploading on the next connection, including
 after a relaunch.
@@ -195,13 +186,13 @@ By hand, that's:
 
 ## Limitations
 
-- Only `takeloom server` hosts phones. A local (non-server) takeloom UI
-  doesn't list them.
+- The phones are the vault's: a node without a remote vault (takeloom-vault
+  0.18+) doesn't list them.
 - The Latency tab doesn't apply (it refuses a phone camera), and Video
   Check runs audio-only with a phone selected.
 - The live feed's timestamps are taken on arrival, so its lip-sync on a
-  YouTube stream is approximate. The server delays the stream's audio by
-  the measured live latency at start.
+  YouTube stream is approximate. The vault delays the stream's audio by
+  how much later the program camera's frames arrive, measured at start.
 - On Android, a recording killed mid-session isn't playable (MediaMuxer
   only finalizes on stop). The live-feed fallback covers that case. iOS
   writes fragmented MP4 and stays playable.

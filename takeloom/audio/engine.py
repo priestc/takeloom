@@ -158,8 +158,8 @@ class AudioEngine:
     def set_stream_sink(self, sink: Callable[[np.ndarray], None] | None) -> None:
         """Live-safe set/clear of an extra consumer of the full production
         mix (see _callback's full_mix) — used by live streaming
-        (takeloom/streaming.py's LiveAudioFeeder) to get the same audio
-        mix_recorder writes to disk, just piped live too. sink is called
+        (phone_camera/vault_stream.py's VaultStream) to get the same audio
+        mix_recorder writes to disk, sent live too. sink is called
         from this callback's own realtime thread, so it must not block."""
         self._stream_sink = sink
 

@@ -176,21 +176,6 @@ def _migrate_cameras(data: dict, known_cameras: list[KnownCamera]) -> None:
         data.pop(legacy, None)
 
 
-@dataclass
-class AuthorizedClient:
-    """A remote takeloom instance authorized to connect to this machine's server."""
-    token: str
-    label: str  # client-reported machine name at authorization time
-    last_ip: str = ""
-    authorized_at: str = ""  # ISO timestamp
-    last_seen_at: str = ""
-    # Its own token for the remote vault, which this machine vouched for
-    # (vault.py's vault_access_for): pairing with this server is enough to
-    # reach the vault too. For the vault at vault_url; "" until first needed.
-    vault_url: str = ""
-    vault_token: str = ""
-
-
 LOCAL_CAMERA_PREFIX = "local:"
 
 
@@ -286,11 +271,6 @@ class StudioConfig:
     # (the "atmospheric" sound) only ever hear the instrument, which is
     # also what lines their video up (phone_camera/sync.py).
     speaker_split: bool = False
-    # docs/camera-alignment-design.md: a session's cameras as sources lined
-    # up independently (phone_camera/sources.py) instead of camera videos
-    # made at processing time. Off until the vault reads sessions made
-    # this way (the design's stage 3).
-    camera_sources: bool = False
     # With speaker_split: a short chirp through the speakers whenever
     # they've been quiet for a while (audio/sync_click.py), so the phones
     # always hear something to line their video up with.
@@ -364,10 +344,6 @@ class StudioConfig:
     development_mode: bool | None = None
     window_width: int = 1100  # remembered main window size, so it reopens as it was left
     window_height: int = 650
-    # Takeloom Camera phones paired with this machine (phone_camera/hub.py),
-    # for a node with no remote vault: the phones connect to the vault
-    # otherwise. (Named from remote mode, which also paired laptops here.)
-    remote_authorized_clients: list[AuthorizedClient] = field(default_factory=list)
     input_labels: list[InputLabel] = field(default_factory=list)
     instruments: list[Instrument] = field(default_factory=list)
 
@@ -462,9 +438,8 @@ class StudioConfig:
         input_labels = [InputLabel(**_filtered(il, InputLabel)) for il in data.pop("input_labels", [])]
         instruments = [Instrument(**_filtered(i, Instrument)) for i in data.pop("instruments", [])]
         data.pop("known_remotes", None)  # remote mode's, gone
-        remote_authorized_clients = [
-            AuthorizedClient(**_filtered(c, AuthorizedClient)) for c in data.pop("remote_authorized_clients", [])
-        ]
+        data.pop("camera_sources", None)  # always on now: a session's cameras are sources (phone_camera/sources.py)
+        data.pop("remote_authorized_clients", None)  # paired with this machine's own phone server, gone
         known_cameras = [KnownCamera(**_filtered(c, KnownCamera)) for c in data.pop("known_cameras", [])]
         _migrate_cameras(data, known_cameras)
         compressor_settings = {
@@ -476,7 +451,6 @@ class StudioConfig:
             **filtered,
             input_labels=input_labels,
             instruments=instruments,
-            remote_authorized_clients=remote_authorized_clients,
             known_cameras=known_cameras,
             compressor_settings=compressor_settings,
         )

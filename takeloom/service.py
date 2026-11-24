@@ -5,8 +5,7 @@ Terminal window.
 
 A LaunchAgent rather than a LaunchDaemon on purpose: it runs inside the
 logged-in user's GUI session, which is what the audio interface, the
-Stream Deck (HID), macOS's per-binary camera/microphone permissions and
-the pairing-approval dialog (server_command's request_authorization) all
+Stream Deck (HID) and macOS's per-binary camera/microphone permissions
 need. A boot-time daemon has none of those.
 
 launchd doesn't read the shell profile, so the PATH of whoever ran
@@ -15,7 +14,7 @@ ffmpeg, rsync/ssh etc. stay findable (re-run install if that ever needs
 changing). Output goes to LOG_PATH; server log lines carry their own
 timestamps.
 
-macOS only — the laptop never hosts a server (see CLAUDE.md)."""
+macOS only: the laptop records through its own UI (see CLAUDE.md)."""
 
 from __future__ import annotations
 
