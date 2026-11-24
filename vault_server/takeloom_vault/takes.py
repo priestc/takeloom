@@ -226,6 +226,10 @@ class TakeVideoCache:
             return legacy
 
         info = find_take_ref(self.vault, take_filename)
+        if info is not None and "cameras" not in info and "start_s" not in info:
+            # A session whose cameras are sources (cameras.py): just which
+            # session, and the camera on the program feed as it started.
+            return self._sources_clip(take_filename, info, camera)
         ref = choose_camera(info, camera) if info is not None else None
         if ref is None:
             raise TakeVideoError(f"No video is recorded for take {take_filename!r}.")
@@ -264,6 +268,67 @@ class TakeVideoCache:
             tmp.replace(out)
             self._log(f"Cut take video {take_filename!r} from {ref['session']} "
                       f"({ref['duration_s']:.0f}s of video in {time.monotonic() - started:.0f}s)")
+            return out
+
+    def _sources_clip(self, take_filename: str, info: dict, camera: str) -> Path:
+        """A take's clip from a sources session: picture from the camera's
+        own file, placed by its alignment; sound from the session itself,
+        cut by sample (the take's "source" frames)."""
+        from .cameras import session_audio, session_cameras
+        session = str(info.get("session") or "")
+        data = self.vault.read_session_log(session) if session else None
+        entry = find_take_entry(self.vault, take_filename) or {}
+        src = entry.get("source") or {}
+        if not data or "start_frame" not in src or "end_frame" not in src:
+            raise TakeVideoError(f"Take {take_filename!r} has no session position to cut its video at.")
+        directory = self.vault.session_dir(session)
+        cameras = session_cameras(directory, data)
+        if not cameras:
+            raise TakeVideoError(f"No camera of {session} has video yet (its phones' recordings may still be on "
+                                 "their way).")
+        cam = next((c for wanted in (camera, info.get("default")) if wanted
+                    for c in cameras if c.label == wanted), cameras[0])
+        sample_rate = int(src.get("sample_rate") or data.get("sample_rate") or 48000)
+        mix_start = int(data.get("mix_start_frame") or 0)
+        start_t = (int(src["start_frame"]) - mix_start) / sample_rate
+        length = (int(src["end_frame"]) - int(src["start_frame"])) / sample_rate
+        audio = session_audio(directory, data)
+        seek = cam.file_time(start_t)
+        st = cam.path.stat()
+        key = hashlib.sha256(json.dumps(
+            [take_filename, cam.label, str(cam.path), st.st_size, st.st_mtime_ns, cam.file_zero_s, cam.drift, src],
+            sort_keys=True).encode()).hexdigest()[:24]
+        out = self.dir / f"{key}.mp4"
+        with self._lock_for(key):
+            if out.exists():
+                out.touch()
+                return out
+            tmp = self.dir / f"{PARTIAL_PREFIX}{key}.mp4"
+            cmd = ["ffmpeg", "-y", "-v", "error", "-ss", f"{max(0.0, seek):.6f}", "-i", str(cam.path)]
+            maps = ["-map", "0:v:0"]
+            if audio["mix"] is not None:
+                cmd += ["-ss", f"{max(0.0, start_t):.6f}", "-i", str(audio["mix"])]
+                maps += ["-map", "1:a:0"]
+            if audio["instrument"] is not None:
+                cmd += ["-ss", f"{int(src['start_frame']) / sample_rate:.6f}", "-i", str(audio["instrument"])]
+                maps += ["-map", f"{1 + (audio['mix'] is not None)}:a:0"]
+            if seek < 0:
+                # The camera started after the take did: black until it's there.
+                cmd += ["-vf", f"tpad=start_duration={-seek:.6f}:start_mode=add:color=black"]
+            cmd += maps + ["-t", f"{length:.6f}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                           "-c:a:0", "aac", "-c:a:1", "libmp3lame", "-q:a:1", "2",
+                           "-metadata:s:a:0", "title=Mix", "-metadata:s:a:1", "title=Instrument Only",
+                           "-disposition:a:0", "0", "-disposition:a:1", "default",
+                           "-movflags", "+faststart", str(tmp)]
+            started = time.monotonic()
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0 or not tmp.exists():
+                tmp.unlink(missing_ok=True)
+                raise TakeVideoError(f"ffmpeg couldn't cut {take_filename!r} from {session}'s {cam.title}: "
+                                     f"{(result.stderr or '').strip()[-300:] or 'exit code ' + str(result.returncode)}")
+            tmp.replace(out)
+            self._log(f"Cut take video {take_filename!r} from {session}'s {cam.title} "
+                      f"({length:.0f}s in {time.monotonic() - started:.0f}s)")
             return out
 
     def original_for(self, take_filename: str, use_legacy: bool = True) -> Path:

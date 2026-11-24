@@ -21,6 +21,7 @@ import json
 import random
 import shutil
 import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -3519,6 +3520,8 @@ class LocalBackend(Backend):
         if legacy.exists():
             return str(legacy)
         info = read_take_video_ref(audio)
+        if info is not None and "cameras" not in info and "start_s" not in info:
+            return self._sources_take_video(filename, info, camera, root)
         ref = choose_camera(info, camera) if info is not None else None
         if ref is None:
             raise BackendError(f"'{filename}' has no video.")
@@ -3542,6 +3545,37 @@ class LocalBackend(Backend):
                 "and no paired remote vault is configured."
             )
         if not client.download_take_video(filename, out, camera=ref.get("camera", "")):
+            raise BackendError(f"Could not get the video for '{filename}' from the vault at {client.url}.")
+        return str(out)
+
+    def _sources_take_video(self, filename: str, info: dict, camera: str, root: Path) -> str:
+        """get_take_video_path for a take of a session whose cameras are
+        sources: cut here if the session's still here, else by the vault."""
+        import hashlib
+        from .ffmpeg_bin import FFMPEG
+        from .take_video import sources_clip_cmd
+        from .vault import remote_vault
+        session = str(info.get("session") or "")
+        cache_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_take_videos")
+        out = cache_dir / f"{Path(filename).stem}.{hashlib.sha1(camera.encode()).hexdigest()[:8]}.mp4"
+        local = self._local_session_dir_path(session) if session else None
+        if local is not None:
+            try:
+                data = json.loads((local / "session_log.json").read_text())
+            except (OSError, ValueError) as e:
+                raise BackendError(f"Can't read {session}'s session log: {e}") from e
+            source = next((e.get("source") for entries in (data.get("takes") or {}).values() for e in entries
+                           if e.get("filename") == filename and e.get("source")), None)
+            cmd = sources_clip_cmd(FFMPEG, local, data, info, source, camera, out) if source else None
+            if cmd is None:
+                raise BackendError(f"No camera of {session} has video for '{filename}' yet.")
+            if subprocess.run(cmd, capture_output=True).returncode != 0 or not out.exists():
+                raise BackendError(f"Could not cut '{filename}' from {session}'s cameras.")
+            return str(out)
+        client = remote_vault(self.get_config())
+        if client is None:
+            raise BackendError(f"{session} isn't on this machine, and no paired remote vault is configured.")
+        if not client.download_take_video(filename, out, camera=camera):
             raise BackendError(f"Could not get the video for '{filename}' from the vault at {client.url}.")
         return str(out)
 

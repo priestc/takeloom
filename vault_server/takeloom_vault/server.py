@@ -311,9 +311,9 @@ class _Handler(BaseHTTPRequestHandler):
         if m := re.fullmatch(r"/sessions/([^/]+)/publish-status", path):
             return self._json(self.server.publisher.status(m.group(1)))
         if m := re.fullmatch(r"/sessions/([^/]+)/edit-fill", path):
-            # The timeline editor's automatic cuts (edit.auto_cuts), from a
-            # camera priority: decided here, where a check that the
-            # performer's in shot can run (edit.usable).
+            # The timeline editor's automatic cuts (edit.auto_cuts), from each
+            # camera's share of the time: decided here, where a check that
+            # the performer's in shot can run (edit.usable).
             return self._json(self._edit_fill(m.group(1)))
         if m := re.fullmatch(r"/sessions/([^/]+)", path):
             data = vault.read_session_log(m.group(1))
@@ -504,22 +504,23 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(result)
 
     def _edit_fill(self, name: str) -> dict:
+        """?shares=1,1,2&every=30: the editor's automatic cuts (edit.auto_cuts)."""
         from . import edit
+        from .cameras import session_cameras, session_length
         data = self.server.vault.read_session_log(name)
         if data is None:
             raise _HTTPError(HTTPStatus.NOT_FOUND, f"No session named {name!r}")
         directory = self.server.vault.session_dir(name)
         query = parse_qs(urlsplit(self.path).query)
+        cameras = session_cameras(directory, data)
         try:
-            cameras = len(edit.camera_files(directory, data))
-            priority = edit.checked_priority([int(x) for x in (query.get("priority") or [""])[0].split(",") if x],
-                                             cameras)
-            every = min(max(float((query.get("every") or ["30"])[0]), 5.0), 3600.0)
-            length = min(max(float((query.get("len") or ["5"])[0]), 1.0), every)
+            shares = edit.checked_shares([float(x) for x in (query.get("shares") or [""])[0].split(",") if x],
+                                         len(cameras))
+            every = min(max(float((query.get("every") or ["30"])[0]), 2.0), 3600.0)
         except ValueError as e:
             raise _HTTPError(HTTPStatus.BAD_REQUEST, str(e)) from e
-        total = edit.session_length(directory, data, priority[0])
-        return {"duration": total, "cuts": edit.auto_cuts(total, priority, every, length)}
+        total = session_length(directory, data, cameras)
+        return {"duration": total, "cuts": edit.auto_cuts(total, shares, every)}
 
     def _send_take_video(self, take_filename: str) -> None:
         # ?camera=<label>: that camera's view of the take; none: its default.

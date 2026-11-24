@@ -134,6 +134,48 @@ def clip_cmd(ffmpeg: str, session_video: Path, ref: dict, out_path: Path) -> lis
     ]
 
 
+def sources_clip_cmd(ffmpeg: str, session_dir: Path, data: dict, info: dict, source: dict, camera: str,
+                     out_path: Path) -> list[str] | None:
+    """A take's clip from a session whose cameras are sources (phone_camera/
+    sources.py), still on this machine: the camera's own file placed by its
+    alignment, the session's own sound cut by sample. `info`: the take's
+    {"session", "default"}; `source`: its TakeInfo.source frames. None if no
+    camera has anything lined up. Same as vault_server/takeloom_vault/
+    takes.py's _sources_clip — keep in step."""
+    cams = []
+    for entry in data.get("extra_cameras") or []:
+        best = next((s for s in entry.get("sources") or []
+                     if s.get("state") == "aligned" and (session_dir / str(s.get("file"))).is_file()), None)
+        if best is not None:
+            cams.append((entry.get("label") or best["file"], session_dir / best["file"], best.get("align") or {}))
+    if not cams:
+        return None
+    label, video, align = next((c for wanted in (camera, info.get("default")) if wanted for c in cams
+                                if c[0] == wanted), cams[0])
+    sample_rate = int(source.get("sample_rate") or data.get("sample_rate") or 48000)
+    start_t = (int(source["start_frame"]) - int(data.get("mix_start_frame") or 0)) / sample_rate
+    length = (int(source["end_frame"]) - int(source["start_frame"])) / sample_rate
+    seek = (start_t - float(align.get("file_zero_s") or 0.0)) / (1.0 + float(align.get("drift") or 0.0))
+    mix = next((session_dir / n for n in ("session_mix.m4a", "session_mix.flac") if (session_dir / n).is_file()), None)
+    instrument = session_dir / "session.flac"
+    cmd = [ffmpeg, "-y", "-v", "error", "-ss", f"{max(0.0, seek):.6f}", "-i", str(video)]
+    maps = ["-map", "0:v:0"]
+    if mix is not None:
+        cmd += ["-ss", f"{max(0.0, start_t):.6f}", "-i", str(mix)]
+        maps += ["-map", "1:a:0"]
+    if instrument.is_file():
+        cmd += ["-ss", f"{int(source['start_frame']) / sample_rate:.6f}", "-i", str(instrument)]
+        maps += ["-map", f"{1 + (mix is not None)}:a:0"]
+    if seek < 0:
+        cmd += ["-vf", f"tpad=start_duration={-seek:.6f}:start_mode=add:color=black"]
+    return cmd + maps + [
+        "-t", f"{length:.6f}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-c:a:0", "aac", "-c:a:1", "libmp3lame", "-q:a:1", "2",
+        "-metadata:s:a:0", "title=Mix", "-metadata:s:a:1", "title=Instrument Only",
+        "-disposition:a:0", "0", "-disposition:a:1", "default", "-movflags", "+faststart", str(out_path),
+    ]
+
+
 def clip_take_video(session_video: Path, ref: dict, out_path: Path) -> bool:
     from .ffmpeg_bin import FFMPEG
     tmp = out_path.with_name(out_path.name + ".partial.mp4")

@@ -171,6 +171,7 @@ def session_videos(directory: Path, data: dict) -> list[tuple[str, str, str]]:
 
 _CAMERA_STATE_STYLE = {
     "full": ("#2e9d4f", "Full quality"),
+    "lining": ("#2a6db0", "Lining up"),
     "stream": ("#e0a800", "Stream quality only"),
     "encoding": ("#2a6db0", "Encoding"),
     "missing": ("#c44f6d", "No video"),
@@ -323,18 +324,21 @@ _EDIT_COLORS = ["#2a6db0", "#d0702a", "#2e9d4f", "#9b4fc4", "#c4a72a", "#c44f6d"
 
 def _stage_player(rel: str, videos: list[tuple[str, str, str]], shifts: list[float],
                   footer_entries: list[list] | None = None, mics: list[str] | None = None) -> str:
-    """Every camera's video stacked and played together, in step, showing
-    one at a time: the one the editor's timeline says (Preview edit: the
-    final video as it'll render, cutting as it plays), or the one picked
-    with its button. Only the priority-1 camera's sound plays, as in the
-    render. Its own controls, since a video's built-in ones can't sit over
-    the others. Others drifting more than 0.2 s are pulled back into step.
+    """For an older session (muxed camera videos; a sources session has
+    _sources_player): every camera's video stacked and played together, in
+    step, showing one at a time: the one the editor's timeline says
+    (Preview edit: the final video as it'll render, cutting as it plays), or
+    the one picked with its button. The sound plays from the first camera's
+    video (they all carry the session's same two tracks), which the others
+    follow, as the render does. Its own controls, since a video's built-in
+    ones can't sit over the others. Others drifting more than 0.2 s are
+    pulled back into step.
     `shifts`: each video's sync shift (edit.time_shift), so session time T
     is T + shift in that file. `footer_entries` (footer.schedule; None:
     the videos carry their own): the footer, drawn over the picture with
     the camera showing, as the render will draw it. `mics` (URLs of the
     phones' mic tracks, on the session timeline): an Audio switch between
-    Processed (the main camera's, from the audio interface) and Atmospheric
+    Processed (the session's, from the audio interface) and Atmospheric
     (those played together, the videos muted). Exposes STAGE for the
     editor."""
     import json as _json
@@ -414,12 +418,126 @@ def _stage_player(rel: str, videos: list[tuple[str, str, str]], shifts: list[flo
     )
 
 
+def _sources_player(rel: str, cameras, mix_url: str) -> str:
+    """The player for a session whose cameras are sources (cameras.py): the
+    session's own sound (its mix reference) is the clock, and every
+    camera's own file follows it, placed by its alignment — file time
+    (T - zero) / (1 + drift) for session time T — played at 1 / (1 + drift),
+    nudged up to 2% faster or slower toward where it should be (a muted
+    video: no one hears it), and re-seeked if it's ever 0.15 s off (a stall).
+    Checked in headless Chrome with a camera at 40 times real drift: held
+    within about a frame. Shows one camera at a time: the one the
+    editor's timeline says (Preview edit), or the one picked with its
+    button. Atmospheric plays the phones' own recordings (their own mics)
+    instead of the mix. Same STAGE interface as _stage_player, for the editor."""
+    import json as _json
+    buttons = "".join(
+        f"<button class='cam{' on' if i == 0 else ''}' onclick='STAGE.manual({i})'>{escape(cam.title)}</button>"
+        for i, cam in enumerate(cameras)
+    )
+    angles = "".join(
+        f"<video src='{_media_url(rel + '/' + cam.path.name)}' preload='auto' playsinline muted "
+        f"style='position:absolute;inset:0;width:100%;height:100%;object-fit:contain;opacity:{1 if i == 0 else 0}'></video>"
+        for i, cam in enumerate(cameras)
+    )
+    place = [[cam.file_zero_s, cam.drift, cam.has_mic] for cam in cameras]
+    mics = sum(1 for cam in cameras if cam.has_mic)
+    return (
+        f"<p>{buttons if len(cameras) > 1 else ''}</p>"
+        f"<div id='stage' style='position:relative;width:100%;aspect-ratio:16/9;background:#000;border-radius:6px;overflow:hidden'>{angles}</div>"
+        f"<audio id='st-clock' src='{mix_url}' preload='auto'></audio>"
+        "<div style='display:flex;gap:.6em;align-items:center;margin:.4em 0'>"
+        "<button id='st-play' onclick='STAGE.toggle()' style='min-width:3em'>▶</button>"
+        "<input id='st-seek' type='range' min='0' max='1000' value='0' style='flex:1'>"
+        "<span id='st-time' class='small muted'>0:00</span>"
+        + ("<label class='small'><input id='st-follow' type='checkbox' checked> Preview edit</label>" if len(cameras) > 1 else
+           "<input id='st-follow' type='checkbox' checked hidden>")
+        + "</div>"
+        + (("<p class='small'>Audio: <label><input type='radio' name='st-audio' value='processed' checked "
+            "onchange='STAGE.setAudio(this.value)'> Processed (audio interface)</label> "
+            "<label><input type='radio' name='st-audio' value='atmospheric' onchange='STAGE.setAudio(this.value)'> "
+            f"Atmospheric ({mics} phone mic{'s' if mics != 1 else ''})</label></p>") if mics else "")
+        + f"<script>var STAGE=(function(P){{"
+        "var V=[].slice.call(document.querySelectorAll('#stage video')),C=document.getElementById('st-clock');"
+        "var shown=0,manual=0,camAt=null,playing=false,drag=false,mode='processed';"
+        "var seekEl=document.getElementById('st-seek'),follow=document.getElementById('st-follow');"
+        "function fmt(t){t=Math.max(0,Math.round(t));return Math.floor(t/60)+':'+String(t%60).padStart(2,'0');}"
+        "function want(i,T){return (T-P[i][0])/(1+P[i][1]);}"
+        "function now(){return C.currentTime;}function dur(){return C.duration||0;}"
+        "function show(i){if(i===shown)return;V[shown].style.opacity=0;V[i].style.opacity=1;shown=i;"
+        "document.querySelectorAll('button.cam').forEach(function(b,j){b.classList.toggle('on',j===i);});}"
+        "function setAudio(m){mode=m;C.muted=m==='atmospheric';V.forEach(function(v,i){v.muted=!(m==='atmospheric'&&P[i][2]);});"
+        "document.querySelectorAll('input[name=st-audio]').forEach(function(r){r.checked=r.value===m;});}"
+        "function align(){var T=now();V.forEach(function(v,i){var w=want(i,T);"
+        "if(w<0||(v.duration&&w>v.duration)){if(!v.paused)v.pause();return;}"
+        "var err=w-v.currentTime;if(Math.abs(err)>0.15){v.currentTime=w;err=0;}"
+        "v.playbackRate=(1/(1+P[i][1]))*(1+Math.max(-0.02,Math.min(0.02,err*0.5)));"
+        "if(playing&&v.paused)v.play().catch(function(){});});}"
+        "function seek(T){C.currentTime=Math.max(0,T);V.forEach(function(v,i){v.currentTime=Math.max(0,want(i,T));});}"
+        "function play(){playing=true;document.getElementById('st-play').textContent='❚❚';C.play().catch(function(){});align();}"
+        "function pause(){playing=false;document.getElementById('st-play').textContent='▶';C.pause();V.forEach(function(v){v.pause();});}"
+        "function frame(){var T=now();show(follow.checked&&camAt?camAt(T):manual);"
+        "if(!drag&&dur())seekEl.value=Math.round(1000*T/dur());"
+        "document.getElementById('st-time').textContent=fmt(T)+' / '+fmt(dur());if(playing)align();requestAnimationFrame(frame);}"
+        "seekEl.addEventListener('input',function(){drag=true;seek(seekEl.value/1000*dur());});"
+        "seekEl.addEventListener('change',function(){drag=false;});"
+        "C.addEventListener('ended',pause);setAudio('processed');requestAnimationFrame(frame);"
+        "return{duration:dur,seek:seek,play:play,pause:pause,toggle:function(){playing?pause():play();},"
+        "setCamAt:function(f){camAt=f;},setAudio:setAudio,audio:function(){return mode;},"
+        "manual:function(i){follow.checked=false;manual=i;show(i);},following:function(){return follow.checked;},"
+        "ready:function(cb){if(C.readyState>=1)cb();else C.addEventListener('loadedmetadata',function f(){C.removeEventListener('loadedmetadata',f);cb();});},"
+        "element:function(){return document.getElementById('stage');}};"
+        f"}})({_json.dumps(place)});</script>"
+    )
+
+
+def _sources_statuses(directory: Path, data: dict) -> list[dict]:
+    """Each camera's current state, for a sources session: straight from its
+    sources and the files here, nothing to act on."""
+    out = []
+    for entry in data.get("extra_cameras") or []:
+        title = camera_title(entry.get("label") or "", entry.get("phone_camera") or {}, data)
+        sources = entry.get("sources") or []
+        phone = next((s for s in sources if s.get("kind") == "phone"), None)
+        best = next((s for s in sources if s.get("state") == "aligned" and (directory / str(s.get("file"))).is_file()),
+                    None)
+        resolution = _video_resolution(directory / best["file"]) if best else ""
+        if best is not None and best.get("kind") == "phone":
+            a = best.get("align") or {}
+            if a.get("method") == "audio":
+                detail = (f"The phone's own recording, lined up by its sound ({a.get('windows_matched')} matches, "
+                          f"{a.get('residual_ms')} ms apart; clock drift {a.get('drift_ppm')} ppm).")
+            else:
+                detail = "The phone's own recording, lined up by clock sync only (no audio match): may be a frame or two off."
+            state = "full"
+        elif phone is not None and phone.get("state") == "arrived":
+            state, detail = "lining", "The phone's recording is here; lining it up."
+        elif best is not None and best.get("kind") == "local":
+            state, detail = "full", "Recorded by a camera attached to the studio machine."
+        else:
+            part = directory / (str((phone or {}).get("file") or "") + ".part")
+            uploading = ""
+            if phone is not None and part.is_file():
+                try:
+                    size = int((directory / (phone["file"] + ".size")).read_text())
+                    uploading = f" Its recording is uploading: {100 * part.stat().st_size / size:.0f}% here."
+                except (OSError, ValueError, ZeroDivisionError):
+                    uploading = " Its recording is uploading."
+            failed = f" Lining its recording up failed: {phone.get('error')}." if phone and phone.get("state") == "failed" else ""
+            if best is not None:
+                state, detail = "stream", "The live feed (stream quality): the phone's own recording isn't here." + uploading + failed
+            else:
+                state, detail = "missing", "No video." + uploading + failed
+        out.append({"title": title, "state": state, "detail": detail, "resolution": resolution})
+    return out
+
+
 def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor, publisher=None,
                  data: dict | None = None) -> str:
-    """The timeline editor (edit.py renders its plan): a camera priority
-    (the first is the main camera and the sound; the lower, the less it's
-    cut to), automatic cuts from it (edit.auto_cuts, on the server), a
-    clickable strip to change any stretch, and Render."""
+    """The timeline editor (edit.py renders its plan): each camera's share
+    of the time on screen (none is special), automatic cuts from those
+    (edit.auto_cuts, on the server), a clickable strip to change any
+    stretch, and Render."""
     import json as _json
     plan = None
     try:
@@ -450,13 +568,12 @@ def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor
     }).replace("</", "<\\/")
     return (
         "<h2>Edit</h2>"
-        "<p class='muted small'>One final video from all the cameras, cut automatically. Camera priority: "
-        "the first is the main camera, on screen most of the time and the source of the sound (unbroken); "
-        "the others are cut in now and then, the lower the priority the less often. Click a stretch of the "
-        "timeline to switch it to the next camera (the player shows it), then Render.</p>"
-        "<table id='ed-priority' class='songs'></table>"
-        "<p>Cut to the others every <input id='ed-every' type='number' min='5' value='30' style='width:4em'> s "
-        "for <input id='ed-len' type='number' min='1' value='5' style='width:3em'> s "
+        "<p class='muted small'>One final video from all the cameras, cut automatically, with the session's "
+        "own sound unbroken underneath. Give each camera a share of the time on screen (equal to start with; "
+        "0 leaves it out). Click a stretch of the timeline to switch it to the next camera (the player shows "
+        "it), then Render.</p>"
+        "<table id='ed-shares' class='songs'></table>"
+        "<p>Change camera every <input id='ed-every' type='number' min='2' value='20' style='width:4em'> s "
         "<button onclick='edFill()'>Fill timeline</button> <span id='ed-fill' class='muted small'></span></p>"
         "<div id='ed-bar' style='display:flex;height:34px;border-radius:6px;overflow:hidden;"
         "border:1px solid var(--line);cursor:pointer'></div>"
@@ -470,21 +587,19 @@ def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor
         "<span id='yt-status' class='muted'></span></p>"
         f"<script>var ED={config};</script>"
         "<script>"
-        "var edCuts=[],edPri=[];"
+        "var edCuts=[],edShares=[];"
         "function edDur(){return STAGE.duration();}"
-        "function edCamAt(T){var c=edCuts,lo=0,hi=c.length-1;if(!c.length)return edPri[0]||0;"
+        "function edCamAt(T){var c=edCuts,lo=0,hi=c.length-1;if(!c.length)return 0;"
         "while(lo<hi){var m=(lo+hi+1)>>1;if(c[m][0]<=T)lo=m;else hi=m-1;}return c[lo][1];}"
         "function edFmt(t){t=Math.round(t);return Math.floor(t/60)+':'+String(t%60).padStart(2,'0');}"
         "function edSwatch(c){return \"<span class='pill' style='background:\"+ED.colors[c%ED.colors.length]+\";color:#fff'>\"+"
         "ED.titles[c].replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</span>';}"
-        "function edList(){var t=document.getElementById('ed-priority');t.innerHTML='<tr><th>Priority</th><th>Camera</th><th></th></tr>';"
-        "edPri.forEach(function(c,i){var r=t.insertRow();r.insertCell().textContent=(i+1)+(i==0?' (main, sound)':'');"
-        "r.insertCell().innerHTML=edSwatch(c);var m=r.insertCell();"
-        "[['▲',-1],['▼',1]].forEach(function(b){var j=i+b[1];if(j<0||j>=edPri.length)return;var x=document.createElement('button');"
-        "x.textContent=b[0];x.onclick=function(){var s=edPri[i];edPri[i]=edPri[j];edPri[j]=s;edList();edFill();};m.appendChild(x);});});"
-        "STAGE.setMaster(edPri[0]);}"
-        "function edFill(){var q='priority='+edPri.join(',')+'&every='+document.getElementById('ed-every').value+"
-        "'&len='+document.getElementById('ed-len').value;document.getElementById('ed-fill').textContent='…';"
+        "function edList(){var t=document.getElementById('ed-shares');t.innerHTML='<tr><th>Camera</th><th>Share of the time</th></tr>';"
+        "edShares.forEach(function(w,c){var r=t.insertRow();r.insertCell().innerHTML=edSwatch(c);"
+        "var x=document.createElement('input');x.type='number';x.min='0';x.max='10';x.step='1';x.value=w;x.style.width='4em';"
+        "x.onchange=function(){edShares[c]=Math.max(0,+x.value||0);edFill();};r.insertCell().appendChild(x);});}"
+        "function edFill(){var q='shares='+edShares.join(',')+'&every='+document.getElementById('ed-every').value;"
+        "document.getElementById('ed-fill').textContent='…';"
         "fetch('/sessions/'+encodeURIComponent(ED.session)+'/edit-fill?'+q).then(function(r){return r.json();})"
         ".then(function(j){document.getElementById('ed-fill').textContent=j.error||'';if(j.cuts){edCuts=j.cuts;edDraw();}});}"
         "function edDraw(){var b=document.getElementById('ed-bar'),d=edDur();b.innerHTML='';if(!d)return;"
@@ -503,7 +618,7 @@ def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor
         "if(s.state=='queued'||s.state=='rendering')setTimeout(edPoll,2000);}"
         "function edPoll(){fetch('/sessions/'+encodeURIComponent(ED.session)+'/edit-status').then(function(r){return r.json();}).then(edState);}"
         "function edRender(){fetch('/sessions/'+encodeURIComponent(ED.session)+'/edit',{method:'POST',"
-        "headers:{'Content-Type':'application/json'},body:JSON.stringify({priority:edPri,cuts:edCuts,audio:STAGE.audio()})})"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({shares:edShares,cuts:edCuts,audio:STAGE.audio()})})"
         ".then(function(r){return r.json();}).then(edState);}"
         "function ytState(s){var el=document.getElementById('yt-status'),b=document.getElementById('yt-publish'),P=ED.pub;"
         "var rendered=document.getElementById('ed-final').textContent.length>0;"
@@ -525,9 +640,8 @@ def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor
         "(function(){STAGE.setCamAt(edCamAt);if(ED.plan&&ED.plan.audio)STAGE.setAudio(ED.plan.audio);"
         "document.getElementById('yt-title').value=ED.pub.title;document.getElementById('yt-privacy').value=ED.pub.privacy;"
         "ytState(ED.pub.status);"
-        "var p=ED.plan&&(ED.plan.priority||(ED.plan.primary!=null?[ED.plan.primary]:null));"
-        "edPri=ED.titles.map(function(_,i){return i;});"
-        "if(p){edPri=p.concat(edPri.filter(function(i){return p.indexOf(i)<0;}));}"
+        "edShares=(ED.plan&&ED.plan.shares&&ED.plan.shares.length==ED.titles.length)?ED.plan.shares.slice():"
+        "ED.titles.map(function(){return 1;});"
         "edList();function init(){if(ED.plan&&ED.plan.cuts){edCuts=ED.plan.cuts;edDraw();}else edFill();}"
         "STAGE.ready(init);"
         "edState(ED.status);})();"
@@ -551,10 +665,15 @@ def session_page(vault: Vault, name: str, data: dict, editor=None, publisher=Non
         f"<p class='muted'>{meta}<br><span class='small'>{escape(name)}</span></p>",
     ]
 
-    videos = session_videos(directory, data)
+    from .cameras import is_sources, session_audio, session_cameras
+    sources = is_sources(data)
+    cameras = session_cameras(directory, data) if sources else []
+    videos = ([(c.title, c.path.name, c.label) for c in cameras] if sources else session_videos(directory, data))
     has_video = bool(videos)
-    statuses = camera_statuses(directory, data)
-    stream_only = [st["title"] for st in statuses if st["state"] == "stream"]
+    statuses = _sources_statuses(directory, data) if sources else camera_statuses(directory, data)
+    # An older session's advice; a sources session's table just says how
+    # each camera stands.
+    stream_only = [] if sources else [st["title"] for st in statuses if st["state"] == "stream"]
     if stream_only:
         parts.append(
             "<p class='banner'><b>Not full quality yet:</b> " + escape(", ".join(stream_only)) +
@@ -562,7 +681,15 @@ def session_page(vault: Vault, name: str, data: dict, editor=None, publisher=Non
             " the phone's live preview stream — its full-quality recording never reached takeloom. "
             "Open Takeloom Camera on that phone; if the recording's still there it'll upload and replace this.</p>"
         )
-    if has_video:
+    if has_video and sources:
+        audio = session_audio(directory, data)
+        if audio["mix"] is not None:
+            parts.append(_sources_player(rel, cameras, _media_url(f"{rel}/{audio['mix'].name}")))
+            if editor is not None and len(cameras) > 1:
+                parts.append(_edit_editor(name, rel, videos, editor, publisher, data))
+        else:
+            parts.append(f"<video id='v' controls preload='metadata' src='{_media_url(rel + '/' + videos[0][1])}'></video>")
+    elif has_video:
         if editor is not None and len(videos) > 1:
             # Every camera playing together, cutting between them as the
             # editor's timeline says: a preview of the final video. No

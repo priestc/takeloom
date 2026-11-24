@@ -94,16 +94,23 @@ duplicates.
 
 ## Editing a session into one video
 
-A session page with more than one camera has an **Edit** section. Set the **camera priority**
-(▲/▼): the first camera is the main one, on screen most of the time and the source of the sound;
-the others are cut in every N seconds for M seconds, shared by priority (with three others,
-3 : 2 : 1, interleaved evenly), so the lowest is cut to least. The cuts are worked out here on
-the vault (`edit.auto_cuts`), which asks `edit.usable` whether a camera is worth cutting to for
-each stretch: always, for now, and the place to plug in a check that the performer is in
-frame. The page shows them as a timeline strip, one colour per camera. The player above previews the
-result: every camera's video plays together, in step, and with **Preview edit** on it cuts
-between them as the timeline says, with the priority-1 camera's sound, just as the render will
-(a camera's button turns preview off and holds that camera).
+A session page with more than one camera has an **Edit** section. No camera is special: give each
+one a **share of the time** on screen (equal to start with; 0 leaves it out), and how often to
+change camera. The cuts are worked out here on the vault (`edit.auto_cuts`): each stretch goes to
+a camera by its share, interleaved evenly, asking `edit.usable` whether a camera is worth cutting
+to for each stretch (always, for now; the place to plug in a check that the performer is in
+frame). The page shows them as a timeline strip, one colour per camera. The player above previews
+the result: every camera plays together, in step, and with **Preview edit** on it cuts between
+them as the timeline says, with the session's own sound, just as the render will (a camera's
+button turns preview off and holds that camera).
+
+For a session whose cameras are sources (takeloom's `camera_sources`;
+`docs/camera-alignment-design.md`), the player plays each camera's own file (a phone's original
+recording, untouched) placed by its alignment, following the session's own sound (its mix
+reference): each video is nudged up to 2% faster or slower to stay in step, and re-synced if it's
+ever 0.15 s off. Take clips and the edit are cut from the same files, the sound from
+`session.flac` and `session_mix.m4a`. Each camera's row in the table above says where it stands:
+its phone's recording lined up (and how), being lined up, uploading, or the live feed only.
 
 The footer (musician, instrument, the song, when it was played, and the camera on screen) only
 ever goes on YouTube (`takeloom_vault/footer.py`). `edit.mp4` and the player are clean.
@@ -114,13 +121,14 @@ Sessions recorded before November 2026 already have it in their videos, so it is
 again. Click any stretch to switch it to the next camera; the player above jumps
 there showing that camera. **Render final video** saves the plan (`edit.json` in the session's
 folder) and makes `edit.mp4` in the background: each stretch of picture from its camera, cut
-frame-accurately, and the sound unbroken from the main camera from start to finish, so a cut
+frame-accurately (a stretch whose camera has no picture there shows whichever camera does), at
+the largest camera's frame size, and the session's sound unbroken from start to finish, so a cut
 never breaks the audio. Rendering needs the same ffmpeg (with `libx264`) as encoding below; it
 takes about as long as encoding one camera's session video. See `takeloom_vault/edit.py`.
 
-A session whose phones' mics were archived (takeloom saves each as `<camera>_mic.flac`, on the
-session's timeline) also gets an **Audio** switch: **Processed** is the audio interface's sound
-(the main camera's tracks), **Atmospheric** is the phones' mics played together, the room as the
+A session whose phones' mics are there (an older session's `<camera>_mic.flac` files, or a
+sources session's phone recordings themselves) also gets an **Audio** switch: **Processed** is the audio interface's sound
+(the session's mix), **Atmospheric** is the phones' mics played together, the room as the
 phones heard it. The player previews either, and the render uses the one chosen: for Atmospheric,
 the mics summed and limited as the soundtrack, with the processed mix kept as a second track.
 

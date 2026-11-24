@@ -3,35 +3,35 @@
 The session page's timeline editor (web.py) saves a plan, edit.json in the
 session's folder:
 
-    {"priority": [0, 2, 1], "audio": "processed", "cuts": [[0.0, 0], [42.5, 2], [47.5, 0], ...]}
+    {"shares": [1, 1, 2], "audio": "processed", "cuts": [[0.0, 0], [30.0, 2], [60.0, 1], ...]}
 
-"priority" ranks the cameras: the first is the main camera, on screen
-most of the time and the source of the sound; the others are cut to now
-and then, the lower the priority the less often (auto_cuts). "cuts" is a
-list of (time on the session's timeline in seconds, camera), each camera
-shown from its cut to the next. Cameras are indexes into
-web.session_videos' list, resolved here (a plan never names a file).
+"shares" is how much of the time each camera is on screen, relative to the
+others (equal by default); no camera is special. "cuts" is a list of (time
+on the session's timeline in seconds, camera), each camera shown from its
+cut to the next. Cameras are indexes into cameras.session_cameras' list,
+resolved here (a plan never names a file). A plan from before shares (a
+"priority" list, or a "primary") is read as equal shares.
+
 Rendering makes edit.mp4: each stretch of picture from its camera's own
-session video, and the audio unbroken start to finish, so a cut never
-breaks the sound. "audio" picks it: "processed" is the main camera's
-(the audio interface's mix, plus its Instrument Only track); "atmospheric" is
-the phones' own mics (takeloom archives each as <camera>_mic.flac, already
-on the session's timeline), summed and limited, with the processed mix
-kept as a second track.
+file (cameras.py places session time in it: a phone's original by its
+alignment, or an older session's muxed video by its sync shift), and the
+sound unbroken from start to finish, so a cut never breaks it. "audio"
+picks the sound: "processed" is the session's own (the mix, plus the
+instrument alone as a second track); "atmospheric" is the phones' own mics
+together, summed and limited, with the mix kept second. A stretch whose
+camera has no picture there (it started late or stopped early) shows
+whichever camera does instead. The frame is the largest camera's size.
 
-All of a session's camera videos are on the same timeline, apart from a few
-tens of ms: a camera with a negative sync offset had its audio delayed by
-that much when it was muxed (takeloom's mux_spec), so session time T sits at
-T + max(0, -offset) in that file (time_shift). Stretches are snapped to
-whole frames (FPS) and each is encoded to exactly its frame count, so the
-picture never drifts from the sound however many cuts there are.
+Stretches are snapped to whole frames (FPS) and each is encoded to exactly
+its frame count, so the picture never drifts from the sound however many
+cuts there are. edit.mp4 is clean: the footer (footer.py) is only for
+YouTube, so publishing renders the same plan again, from the same sources
+(one encode, never an encode of edit.mp4), with it drawn in, naming each
+stretch's camera, as edit_youtube.mp4 (render_for_youtube).
 
 Each stretch is its own short ffmpeg encode (frame-accurate seek, scaled to
-the main camera's size), then they're joined without re-encoding and the
-audio added. edit.mp4 is clean: the footer (footer.py) is only for YouTube,
-so publishing renders the same plan again, from the same sources (one
-encode, never an encode of edit.mp4), with it drawn in, naming each
-stretch's camera, as edit_youtube.mp4 (render_for_youtube). One render at a time, on a background thread, at low priority,
+the frame size), then they're joined without re-encoding and the sound
+added. One render at a time, on a background thread, at low priority,
 like render.py's session encodes.
 """
 
@@ -134,14 +134,6 @@ def mic_files(directory: Path, data: dict) -> list[tuple[str, Path]]:
     return found
 
 
-def checked_priority(priority, cameras: int) -> list[int]:
-    """Every camera exactly once, highest priority first. Raises ValueError."""
-    if (not isinstance(priority, list) or any(isinstance(c, bool) or not isinstance(c, int) for c in priority)
-            or sorted(priority) != list(range(cameras))):
-        raise ValueError("the camera priority must list every camera once")
-    return list(priority)
-
-
 def usable(camera: int, start: float, end: float) -> bool:
     """Whether a camera's shot is worth cutting to from start to end on the
     session's timeline. Always, for now: the place for a check that the
@@ -150,56 +142,50 @@ def usable(camera: int, start: float, end: float) -> bool:
     return True
 
 
-def auto_cuts(total: float, priority: list[int], every: float, length: float,
+def auto_cuts(total: float, shares: list[float], every: float,
               usable: Callable[[int, float, float], bool] = usable) -> list[list]:
-    """The main camera (priority[0]) throughout, cutting to another camera
-    for `length` s every `every` s. Which one: the others share the
-    cut-ins by priority, the lowest getting the fewest: weights n, n-1, ...,
-    1 for n others, interleaved evenly (smooth weighted round-robin) rather
-    than bunched, skipping any camera not `usable` for that stretch (none
-    usable: that cut-in is skipped). Nothing in the last few seconds."""
-    main, others = priority[0], priority[1:]
-    cuts: list[list] = [[0.0, main]]
-    if not others or every <= 0 or length <= 0:
-        return cuts
-    weights = {cam: len(others) - rank for rank, cam in enumerate(others)}
-    credit = {cam: 0 for cam in others}
+    """A cut every `every` s, each stretch going to a camera by its share
+    of the time (smooth weighted round-robin: interleaved evenly, never
+    bunched), skipping any camera not `usable` for that stretch; runs of one
+    camera are merged. No camera is a base the others cut away from."""
+    cameras = [cam for cam, share in enumerate(shares) if share > 0] or list(range(len(shares)))
+    if not cameras:
+        return [[0.0, 0]]
+    weights = {cam: max(shares[cam], 0.0) or 1.0 for cam in cameras}
     total_weight = sum(weights.values())
-    t = float(every)
-    while t + length < total - 5:
-        for cam in others:
+    credit = {cam: 0.0 for cam in cameras}
+    step = every if every > 0 else max(total, 1.0)
+    cuts: list[list] = []
+    t = 0.0
+    while t < total or not cuts:
+        for cam in cameras:
             credit[cam] += weights[cam]
-        candidates = [cam for cam in others if usable(cam, t, t + length)]
-        if candidates:
-            pick = max(candidates, key=lambda cam: credit[cam])
-            credit[pick] -= total_weight
-            cuts += [[round(t, 3), pick], [round(t + length, 3), main]]
-        t += every
+        candidates = [cam for cam in cameras if usable(cam, t, min(t + step, total))] or cameras
+        pick = max(candidates, key=lambda cam: credit[cam])
+        credit[pick] -= total_weight
+        if not cuts or cuts[-1][1] != pick:
+            cuts.append([round(t, 3), pick])
+        t += step
     return cuts
 
 
-def session_length(directory: Path, data: dict, main: int) -> float:
-    """The session's length on its timeline: the main camera's video, less
-    its sync shift, in whole frames."""
-    cameras = camera_files(directory, data)
-    _title, path, shift = cameras[main]
-    duration, _w, _h = probe(path)
-    return math.floor((duration - shift) * FPS) / FPS
+def checked_shares(shares, cameras: int) -> list[float]:
+    """A non-negative share per camera. Raises ValueError."""
+    if (not isinstance(shares, list) or len(shares) != cameras
+            or any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or x < 0
+                   for x in shares)):
+        raise ValueError("give every camera a share of the time (0 or more)")
+    return [float(x) for x in shares]
 
 
 def checked_plan(plan: dict, cameras: int) -> dict:
-    """The plan, validated: {"priority": [...], "primary": priority[0],
-    "cuts": [[t, camera], ...]} sorted, starting at 0, cameras in range.
-    A plan from before priorities ({"primary"}) gets one: the main camera,
-    then the rest in order. Raises ValueError."""
-    if "priority" in plan:
-        priority = checked_priority(plan.get("priority"), cameras)
+    """The plan, validated: {"shares": [...], "audio", "cuts": [[t, camera],
+    ...]} sorted, starting at 0, cameras in range. A plan from before shares
+    gets equal ones. Raises ValueError."""
+    if "shares" in plan:
+        shares = checked_shares(plan.get("shares"), cameras)
     else:
-        primary = plan.get("primary")
-        if not isinstance(primary, int) or isinstance(primary, bool) or not 0 <= primary < cameras:
-            raise ValueError("pick the main camera")
-        priority = [primary] + [c for c in range(cameras) if c != primary]
-    primary = priority[0]
+        shares = [1.0] * cameras
     audio = plan.get("audio") or "processed"
     if audio == "acoustic":
         audio = "atmospheric"  # its first name
@@ -220,7 +206,7 @@ def checked_plan(plan: dict, cameras: int) -> dict:
         cuts.append([round(float(t), 3), cam])
     cuts.sort(key=lambda c: c[0])
     cuts[0][0] = 0.0
-    return {"priority": priority, "primary": primary, "audio": audio, "cuts": cuts}
+    return {"shares": shares, "audio": audio, "cuts": cuts}
 
 
 class EditRenderer:
@@ -247,7 +233,8 @@ class EditRenderer:
     def save_and_render(self, name: str, plan: dict) -> dict:
         directory = self.vault.session_dir(name)
         data = self.vault.read_session_log(name) or {}
-        plan = checked_plan(plan, len(camera_files(directory, data)))
+        from .cameras import session_cameras
+        plan = checked_plan(plan, len(session_cameras(directory, data)))
         tmp = directory / (PLAN_FILE + ".tmp")
         tmp.write_text(json.dumps(plan, indent=2))
         os.replace(tmp, directory / PLAN_FILE)
@@ -302,11 +289,16 @@ class EditRenderer:
         progress = on_progress or (lambda fraction: self._set(name, state="rendering", progress=fraction))
         directory = self.vault.session_dir(name)
         data = self.vault.read_session_log(name) or {}
-        cameras = camera_files(directory, data)
+        from .cameras import is_sources, mic_input_args, session_audio, session_cameras, session_length
+        cameras = session_cameras(directory, data)
         plan = checked_plan(json.loads((directory / PLAN_FILE).read_text()), len(cameras))
-        _title, main_file, main_shift = cameras[plan["primary"]]
-        main_duration, width, height = probe(main_file)
-        total = math.floor((main_duration - main_shift) * FPS) / FPS
+        # The frame: the largest camera's.
+        sizes = [probe(cam.path) for cam in cameras]
+        width, height = max(((w, h) for _d, w, h in sizes), key=lambda wh: wh[0] * wh[1])
+        total = math.floor(session_length(directory, data, cameras) * FPS) / FPS
+        # A stretch whose camera has no picture there: the others, most
+        # screen time first.
+        fallback = sorted(range(len(cameras)), key=lambda c: -plan["shares"][c])
 
         # Stretches snapped to whole frames; zero-length ones dropped and
         # runs of one camera merged.
@@ -338,39 +330,71 @@ class EditRenderer:
                 def overlay(camera: int) -> str:
                     if entries is None:
                         return ""
-                    return footer_filters(entries, start, end, cameras[camera][0], height, work, f"t{i:05d}")
+                    return footer_filters(entries, start, end, cameras[camera].title, height, work, f"t{i:05d}")
 
-                if not self._encode_stretch(nice, cameras[cam][1], start + cameras[cam][2], frames, width, height,
-                                            part, overlay(cam), work):
-                    # That camera has nothing there (it started late or ended
-                    # early): the main camera instead, so the timing holds.
-                    if not self._encode_stretch(nice, main_file, start + main_shift, frames, width, height, part,
-                                                overlay(plan["primary"]), work):
-                        raise RuntimeError(f"couldn't render {start:.1f}-{end:.1f}s")
+                for candidate in [cam] + [c for c in fallback if c != cam]:
+                    seek = cameras[candidate].file_time(start)
+                    if seek >= 0 and self._encode_stretch(nice, cameras[candidate].path, seek, frames, width, height,
+                                                          part, overlay(candidate), work):
+                        break
+                else:
+                    # No camera has started yet (the very start of a session):
+                    # this one, black until it does.
+                    seek = cameras[cam].file_time(start)
+                    if not self._encode_stretch(nice, cameras[cam].path, seek, frames, width, height, part,
+                                                overlay(cam), work):
+                        raise RuntimeError(f"no camera has picture at {start:.1f}-{end:.1f}s")
                 names.append(part.name)
             (work / "parts.txt").write_text("".join(f"file '{n}'\n" for n in names))
             progress(1.0)
             out = directory / (output + ".partial.mp4")
-            mics = mic_files(directory, data) if plan["audio"] == "atmospheric" else []
-            if plan["audio"] == "atmospheric" and not mics:
-                raise RuntimeError("this session has no phone mic tracks for atmospheric audio")
-            cmd = [*nice, "ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", "parts.txt",
-                   "-ss", f"{main_shift:.6f}", "-i", str(main_file)]
-            if mics:
-                # The phones' mics, summed (not averaged: room mics are quiet)
-                # and limited, as the soundtrack; the processed mix second.
-                for _title, path in mics:
-                    cmd += ["-i", str(path)]
-                inputs = "".join(f"[{2 + i}:a]" for i in range(len(mics)))
-                cmd += ["-filter_complex", f"{inputs}amix=inputs={len(mics)}:normalize=0,alimiter=limit=0.95[ac]",
-                        "-map", "0:v:0", "-map", "[ac]", "-map", "1:a:0",
-                        "-c:v", "copy", "-c:a:0", "aac", "-b:a:0", "192k", "-c:a:1", "aac", "-b:a:1", "192k",
-                        "-metadata:s:a:0", "title=Atmospheric", "-metadata:s:a:1", "title=Mix"]
+            cmd = [*nice, "ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", "parts.txt"]
+            if is_sources(data):
+                audio = session_audio(directory, data)
+                if audio["mix"] is None:
+                    raise RuntimeError("this session has no mix reference (session_mix.m4a)")
+                cmd += ["-i", str(audio["mix"])]
+                mics = [c for c in cameras if c.has_mic] if plan["audio"] == "atmospheric" else []
+                if plan["audio"] == "atmospheric" and not mics:
+                    raise RuntimeError("this session has no phone recordings for atmospheric audio")
+                if mics:
+                    chains = []
+                    for k, mic in enumerate(mics):
+                        args, chain = mic_input_args(mic, total)
+                        cmd += args
+                        chains.append(f"[{2 + k}:a]{chain}[m{k}]")
+                    mixed = "".join(f"[m{k}]" for k in range(len(mics)))
+                    cmd += ["-filter_complex",
+                            ";".join(chains) + f";{mixed}amix=inputs={len(mics)}:normalize=0,alimiter=limit=0.95[ac]",
+                            "-map", "0:v:0", "-map", "[ac]", "-map", "1:a:0",
+                            "-c:v", "copy", "-c:a:0", "aac", "-b:a:0", "192k", "-c:a:1", "aac", "-b:a:1", "192k",
+                            "-metadata:s:a:0", "title=Atmospheric", "-metadata:s:a:1", "title=Mix"]
+                else:
+                    if audio["instrument"] is not None:
+                        cmd += ["-ss", f"{audio['instrument_offset_s']:.6f}", "-i", str(audio["instrument"])]
+                    cmd += ["-map", "0:v:0", "-map", "1:a:0"] + (["-map", "2:a:0"] if audio["instrument"] else [])
+                    cmd += ["-c:v", "copy", "-c:a:0", "aac", "-b:a:0", "192k", "-c:a:1", "libmp3lame", "-q:a:1", "2",
+                            "-metadata:s:a:0", "title=Mix", "-metadata:s:a:1", "title=Instrument Only"]
             else:
-                # The main camera's two audio tracks (Mix, Instrument Only).
-                cmd += ["-map", "0:v:0", "-map", "1:a:0", "-map", "1:a:1?",
-                        "-c:v", "copy", "-c:a:0", "aac", "-b:a:0", "192k", "-c:a:1", "libmp3lame", "-q:a:1", "2",
-                        "-metadata:s:a:0", "title=Mix", "-metadata:s:a:1", "title=Instrument Only"]
+                # An older session: every camera video carries the same two
+                # tracks (Mix, Instrument Only); the first camera's will do.
+                sound = cameras[0]
+                cmd += ["-ss", f"{sound.shift_s:.6f}", "-i", str(sound.path)]
+                mics = mic_files(directory, data) if plan["audio"] == "atmospheric" else []
+                if plan["audio"] == "atmospheric" and not mics:
+                    raise RuntimeError("this session has no phone mic tracks for atmospheric audio")
+                if mics:
+                    for _title, path in mics:
+                        cmd += ["-i", str(path)]
+                    inputs = "".join(f"[{2 + i}:a]" for i in range(len(mics)))
+                    cmd += ["-filter_complex", f"{inputs}amix=inputs={len(mics)}:normalize=0,alimiter=limit=0.95[ac]",
+                            "-map", "0:v:0", "-map", "[ac]", "-map", "1:a:0",
+                            "-c:v", "copy", "-c:a:0", "aac", "-b:a:0", "192k", "-c:a:1", "aac", "-b:a:1", "192k",
+                            "-metadata:s:a:0", "title=Atmospheric", "-metadata:s:a:1", "title=Mix"]
+                else:
+                    cmd += ["-map", "0:v:0", "-map", "1:a:0", "-map", "1:a:1?",
+                            "-c:v", "copy", "-c:a:0", "aac", "-b:a:0", "192k", "-c:a:1", "libmp3lame", "-q:a:1", "2",
+                            "-metadata:s:a:0", "title=Mix", "-metadata:s:a:1", "title=Instrument Only"]
             cmd += ["-disposition:a:0", "default", "-disposition:a:1", "0",
                     "-t", f"{total:.6f}", "-movflags", "+faststart", str(out)]
             result = subprocess.run(cmd, cwd=work, capture_output=True, text=True)
@@ -385,11 +409,15 @@ class EditRenderer:
     @staticmethod
     def _encode_stretch(nice: list[str], src: Path, seek: float, frames: int, width: int, height: int,
                         out: Path, overlay: str = "", work: Path | None = None) -> bool:
-        """Exactly `frames` frames of `src` from `seek`, at FPS and the main
-        camera's size (the last frame held if the source runs out), with
+        """Exactly `frames` frames of `src` from `seek`, at FPS and the
+        edit's frame size (the last frame held if the source runs out), with
         `overlay`'s filters (the footer) on top; run in `work`."""
+        lead = max(0.0, -seek)  # starts before the camera did: black until it's there
         vf = (f"fps={FPS},scale={width}:{height}:force_original_aspect_ratio=decrease,"
-              f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,tpad=stop_mode=clone:stop_duration=3600")
+              f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+              + (f"tpad=start_duration={lead:.6f}:start_mode=add:color=black," if lead else "")
+              + "tpad=stop_mode=clone:stop_duration=3600")
+        seek = max(0.0, seek)
         if overlay:
             vf += "," + overlay
         cmd = [*nice, "ffmpeg", "-v", "error", "-y", "-ss", f"{seek:.6f}", "-i", str(src),
