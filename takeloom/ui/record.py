@@ -264,6 +264,10 @@ class RecordFrame(ttk.Frame):
             return  # app closed (or frame torn down) before this load finished
         for child in self.winfo_children():
             child.destroy()
+        # The setlist rows just went with their parent frame — drop the
+        # stale references, or _on_project_change's _clear_selection below
+        # (and any later reattach) would configure destroyed widgets.
+        self._setlist_rows = []
         if error or config is None:
             ttk.Label(self, text=error or "Could not load configuration.", foreground="#b00020").pack(anchor="w")
             return
