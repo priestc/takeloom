@@ -48,6 +48,10 @@ class AppState:
         explicit Disconnect back to local. Off the main thread so a slow/
         misbehaving audio device can't delay the window."""
         threading.Thread(target=self.local_backend.start_monitoring, daemon=True).start()
+        # This machine records, so it's a recording node: the Takeloom
+        # Camera phones on the vault are its cameras too (the laptop
+        # recording drums). Nothing if there's no remote vault with them.
+        threading.Thread(target=self.local_backend.connect_vault_cameras, daemon=True).start()
 
     @property
     def recording_active(self) -> bool:

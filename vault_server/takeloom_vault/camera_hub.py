@@ -41,9 +41,12 @@ Messages on a node's connection:
                    {"kind": "live_started", "device_id", "session_id",
                     "first_live_pts_ns", "first_live_clock_offset_ns"}
                    {"kind": "clock_pong", "id", "t0", "ts"}
+                   {"kind": "control", "active": bool, "by": label}  who's in charge of the phones
                    FRAME_PREVIEW: 1 byte n + n bytes device id + a JPEG
     node -> vault  {"kind": "clock_ping", "id", "t0"}               (the node's clock vs this one)
-                   {"kind": "send", "device_id", "msg"}              passed on to the phone
+                   {"kind": "claim"}                                  take charge of the phones
+                   {"kind": "send", "device_id", "msg"}              passed on to the phone (from
+                                                                      the node in charge, if any)
                    {"kind": "start_recording", "device_id", "session_id", "live_file", "upload_file"}
                    {"kind": "stop_recording", "device_id", "session_id"}
 
@@ -333,6 +336,11 @@ class CameraHub:
         # fn(device_id, pts_ns, keyframe, data).
         self._taps: list[Callable[[str, int, bool, bytes], None]] = []
         self._streams: list = []
+        # The node in charge of the phones: the last one to start a session
+        # (or claim them). Only its settings reach them, so an idle node
+        # (the Mac Mini while the laptop records drums) can't undo the
+        # recording node's framing or live quality. None: anyone's.
+        self._active: _Node | None = None
         self._registry_lock = threading.Lock()
 
     # --- queries (the web page) ---
@@ -348,7 +356,7 @@ class CameraHub:
 
     def nodes(self) -> list[dict]:
         with self._lock:
-            return [{"label": n.label, "ip": n.ip} for n in self._nodes]
+            return [{"label": n.label, "ip": n.ip, "active": n is self._active} for n in self._nodes]
 
     def recording(self) -> list[tuple[str, str]]:
         with self._lock:
@@ -509,6 +517,8 @@ class CameraHub:
             with self._lock:
                 if node in self._nodes:
                     self._nodes.remove(node)
+                if self._active is node:
+                    self._active = None
 
     # --- a node's live stream (live_stream.py) ---
 
@@ -558,13 +568,29 @@ class CameraHub:
         if kind == "clock_ping":
             node.send_json({"kind": "clock_pong", "id": msg.get("id"), "t0": msg.get("t0"),
                             "ts": time.monotonic_ns()})
+        elif kind == "claim":
+            self._claim(node)
         elif kind == "send":
-            self.send(str(msg.get("device_id") or ""), msg.get("msg") or {})
+            with self._lock:
+                allowed = self._active is None or self._active is node
+            if allowed:
+                self.send(str(msg.get("device_id") or ""), msg.get("msg") or {})
         elif kind == "start_recording":
+            self._claim(node)
             self.start_recording(str(msg.get("device_id") or ""), str(msg.get("session_id") or ""),
                                  str(msg.get("live_file") or ""), str(msg.get("upload_file") or ""))
         elif kind == "stop_recording":
             self.stop_recording(str(msg.get("device_id") or ""), str(msg.get("session_id") or ""))
+
+    def _claim(self, node: _Node) -> None:
+        with self._lock:
+            if self._active is node:
+                return
+            self._active = node
+            nodes = list(self._nodes)
+        self._log(f"Recording node {node.label} ({node.ip}) is in charge of the phones")
+        for other in nodes:
+            other.send_json({"kind": "control", "active": other is node, "by": node.label})
 
     def send(self, device_id: str, msg: dict) -> bool:
         with self._lock:

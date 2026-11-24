@@ -572,23 +572,7 @@ def server_command(disable_color: bool) -> None:
     # Without a remote vault, or with one too old for that, they connect
     # here instead — same pairing approval and token list as Remote
     # clients, on their own port.
-    from .vault import remote_vault
-    vault_client = remote_vault(backend.get_config())
-    vault_has_hub = vault_client is not None
-    if vault_client is not None:
-        try:
-            vault_has_hub = bool(vault_client.ping().get("camera_hub", False))
-        except Exception as e:  # noqa: BLE001 — unreachable for now: the hub keeps trying
-            log(f"Couldn't reach the vault at {vault_client.url} to check for its camera hub ({e}); "
-                "using it anyway — the phones connect there")
-    if vault_has_hub:
-        from .phone_camera.vault_hub import VaultCameraHub
-        config = backend.get_config()
-        phone_hub = VaultCameraHub(config.vault_server, config.vault_server_token, backend.hostname(), log=log)
-        phone_hub.start()
-        backend.attach_phone_camera_hub(phone_hub)
-        log(f"Takeloom Camera phones connect to the vault ({config.vault_server}); this machine controls them through it")
-    else:
+    if not backend.connect_vault_cameras(log=log):
         from .phone_camera.hub import PhoneCameraHub
         phone_hub = PhoneCameraHub(
             backend.get_config, backend.save_config, backend.hostname, request_authorization, log=log,

@@ -891,7 +891,7 @@ def cameras_page(pending: list[PairingRequest]) -> str:
         "Array.prototype.slice.call(el.children).forEach(function(b){if(b.id&&b.id.indexOf('cam-')==0&&"
         "!j.cameras.some(function(c){return 'cam-'+c.device_id.replace(/[^\\w-]/g,'_')==b.id;}))el.removeChild(b);});"
         "var empty=el.querySelector('p.muted:not(.small)');if(empty&&j.cameras.length)empty.remove();}"
-        "document.getElementById('nodes').textContent=(j.nodes.length?j.nodes.map(function(n){return n.label+' ('+n.ip+')';}).join(', '):'None connected.')+"
+        "document.getElementById('nodes').textContent=(j.nodes.length?j.nodes.map(function(n){return n.label+' ('+n.ip+')'+(n.active?' — in charge of the phones':'');}).join(', '):'None connected.')+"
         "(j.streams&&j.streams.length?'  ·  Streaming live: '+j.streams.map(function(s){return s.session+' (showing '+s.program+')';}).join(', '):'');"
         "}).catch(function(){}).then(function(){setTimeout(load,1500);});}"
         "load();})();</script>"

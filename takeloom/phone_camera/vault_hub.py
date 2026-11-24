@@ -204,6 +204,10 @@ class VaultCameraHub:
                     int(msg.get("first_live_pts_ns") or 0), msg.get("first_live_clock_offset_ns"))
         elif kind == "recording_failed":
             self._log(f"Takeloom Camera {msg.get('device_id')} recording failed: {msg.get('error')}")
+        elif kind == "control":
+            if not msg.get("active") and msg.get("by"):
+                self._log(f"Takeloom Camera: {msg['by']} has taken charge of the phones; "
+                          "they'll get this machine's settings again when it next records")
 
     def _ping_once(self) -> None:
         self._ping_id += 1
@@ -246,6 +250,12 @@ class VaultCameraHub:
     def start_recording(self, device_id: str, session_id: str, live_file: str = "", upload_file: str = "") -> bool:
         return self._send({"kind": "start_recording", "device_id": device_id, "session_id": session_id,
                            "live_file": live_file, "upload_file": upload_file})
+
+    def claim(self) -> bool:
+        """Take charge of the phones (the vault passes on only the node in
+        charge's settings: see its camera_hub.py). Ordered before anything
+        sent after it on the same connection."""
+        return self._send({"kind": "claim"})
 
     def stop_recording(self, device_id: str, session_id: str) -> None:
         self._send({"kind": "stop_recording", "device_id": device_id, "session_id": session_id})

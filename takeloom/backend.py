@@ -2145,6 +2145,7 @@ class LocalBackend(Backend):
         if caps is None:
             raise BackendError("Only a connected Takeloom Camera phone (app 1.2 or later) can be zoomed.")
         framing = Framing(zoom, x, y).clamped(caps)
+        self._claim_phones()  # framing them from here: this node's in charge of them now
         self._phone_hub.send(phone_device_id(camera_device), framing.message())
         with self._framing_lock:
             config = self.get_config()
@@ -2326,6 +2327,45 @@ class LocalBackend(Backend):
         poll, when the rig powers on)."""
         self._scan_cameras(force=True)
         return self.session_cameras()
+
+    def connect_vault_cameras(self, log: Callable[[str], None] | None = None) -> bool:
+        """Use the Takeloom Camera phones connected to the remote vault
+        (phone_camera/vault_hub.py), if there's a remote vault and it isn't
+        too old to have a camera hub — for any recording node: `takeloom
+        server` on the Mac Mini, or the laptop's own UI when it records.
+        True if they're attached (or already were)."""
+        if self._phone_hub is not None:
+            return hasattr(self._phone_hub, "recorder")
+        from .vault import remote_vault
+        log = log or (lambda msg: self._emit("vault_status", {"status": msg}))
+        config = self.get_config()
+        client = remote_vault(config)
+        if client is None:
+            return False
+        try:
+            if not client.ping().get("camera_hub", False):
+                return False
+        except Exception as e:  # noqa: BLE001 — unreachable for now: the hub keeps trying
+            log(f"Couldn't reach the vault at {client.url} to check for its camera hub ({e}); "
+                "using it anyway — the phones connect there")
+        from .phone_camera.vault_hub import VaultCameraHub
+        hub = VaultCameraHub(config.vault_server, config.vault_server_token, self.hostname(), log=log)
+        hub.start()
+        self.attach_phone_camera_hub(hub)
+        log(f"Takeloom Camera phones connect to the vault ({config.vault_server}); this machine controls them through it")
+        return True
+
+    def _claim_phones(self) -> None:
+        """Take over the vault's phones from any other recording node (the
+        Mac Mini idle while the laptop records drums, say): from now on the
+        vault passes on only this node's settings, so first give the phones
+        this node's own — its framing (each node keeps its own, e.g. drums
+        framed differently from piano) and live-quality plan."""
+        claim = getattr(self._phone_hub, "claim", None)
+        if claim is None or not claim():
+            return
+        self._plan_phone_bandwidth()
+        self._send_phone_framings()
 
     def attach_phone_camera_hub(self, hub) -> None:
         """Use Takeloom Camera phones connected to `hub` (phone_camera/
@@ -6761,6 +6801,7 @@ class LocalBackend(Backend):
         from .video.capture import VideoRecorder, ffmpeg_available
         # Cameras are a set: every connected, visible camera records its own
         # whole-session video the same way (below), and none is special.
+        self._claim_phones()
         cameras = self.session_cameras()
 
         def pause_preview() -> None:
