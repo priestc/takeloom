@@ -32,7 +32,7 @@ from .app_state import AppState
 
 def connect_async(
     widget, app_state: AppState, host: str, port: int, token: str,
-    on_done=None, on_error=None, on_pending=None,
+    on_done=None, on_error=None, on_pending=None, is_cancelled=None,
 ) -> None:
     """Connect to a remote takeloom instance and swap it into app_state.backend.
     Runs on a background thread; safe to call from the Tk main thread. Shared
@@ -43,7 +43,10 @@ def connect_async(
     minted a new token. `on_pending`, if given, is called (on the Tk thread)
     if the server reports it's waiting on a human to approve/deny this
     connection — e.g. to switch a "Connecting..." label to "Waiting to be
-    authorized...", since that step can take a while."""
+    authorized...", since that step can take a while. `is_cancelled`, if
+    given, is checked once the attempt finishes: if it returns True the
+    result is dropped (a successful connection closed, never swapped in)
+    — e.g. the connect screen's "Run Locally" was clicked meanwhile."""
 
     def on_disconnect(reason: str) -> None:
         widget.after(0, lambda: _handle_disconnect(widget, app_state, host, port, reason))
@@ -63,6 +66,10 @@ def connect_async(
             error = str(e)
 
         def finish() -> None:
+            if is_cancelled is not None and is_cancelled():
+                if remote_backend is not None:
+                    client.close()
+                return
             if error:
                 if on_error:
                     on_error(error)

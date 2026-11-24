@@ -96,6 +96,7 @@ def _build_tabs(root: tk.Misc, app_state: AppState, select_title: str) -> None:
 def _show_connect_screen(
     root: tk.Misc, app_state: AppState, host: str, port: int, token: str,
     on_connected: Callable[[], None], initial_status: str | None = None,
+    on_run_locally: Callable[[], None] | None = None,
 ) -> None:
     """Blocking "connecting" / "waiting for authorization" / "could not
     connect" screen shown in place of the normal tabbed UI until the
@@ -110,12 +111,17 @@ def _show_connect_screen(
     The "could not connect" screen also has the server's address, editable:
     a server that's been renamed (Mac.local -> macmini.lan) is fixed right
     there. Connecting to a new address moves the saved remote over to it
-    (_rename_known_remote), keeping its pairing and "always connect"."""
+    (_rename_known_remote), keeping its pairing and "always connect".
+
+    With `on_run_locally`, it also has a "Run Locally" button: give up on
+    the remote for this launch (an "always connect" setting is left as is)
+    and call `on_run_locally()` to bring up this machine's own UI instead."""
     from .remote import connect_async, remember_remote_token
 
     placeholder = ttk.Frame(root)
     placeholder.pack(fill="both", expand=True, padx=16, pady=16)
     retry_after_id: str | None = None
+    cancelled = False  # "Run Locally" clicked: ignore any attempt still in flight
 
     def clear() -> None:
         nonlocal retry_after_id
@@ -133,15 +139,21 @@ def _show_connect_screen(
         ttk.Label(placeholder, textvariable=status_var, font=("TkDefaultFont", 13)).pack(pady=(60, 0))
 
         def on_pending() -> None:
+            if cancelled:
+                return
             status_var.set(f"Waiting to be authorized by {host}...")
 
         def on_done(client) -> None:
+            if cancelled:
+                return
             remember_remote_token(app_state, host, client)
             placeholder.destroy()
             on_connected()
 
         def on_error(error: str) -> None:
             nonlocal retry_after_id
+            if cancelled:
+                return
             clear()
             ttk.Label(placeholder, text="Could not connect", font=("TkDefaultFont", 14, "bold")).pack(
                 pady=(60, 8)
@@ -149,7 +161,11 @@ def _show_connect_screen(
             ttk.Label(placeholder, text=f"{host}: {error}", foreground="#b00020", wraplength=500, justify="center").pack(
                 pady=(0, 16)
             )
-            ttk.Button(placeholder, text="Retry", command=attempt).pack()
+            buttons = ttk.Frame(placeholder)
+            buttons.pack()
+            ttk.Button(buttons, text="Retry", command=attempt).pack(side="left")
+            if on_run_locally is not None:
+                ttk.Button(buttons, text="Run Locally", command=run_locally).pack(side="left", padx=(8, 0))
 
             # The server's address, to fix it if it's changed.
             row = ttk.Frame(placeholder)
@@ -183,7 +199,16 @@ def _show_connect_screen(
             retry_after_id = placeholder.after(_RETRY_INTERVAL_MS, attempt)
 
         connect_async(root, app_state, host, port, _known_token(app_state, host) or token,
-                      on_done=on_done, on_error=on_error, on_pending=on_pending)
+                      on_done=on_done, on_error=on_error, on_pending=on_pending,
+                      is_cancelled=lambda: cancelled)
+
+    def run_locally() -> None:
+        nonlocal cancelled
+        cancelled = True
+        clear()
+        placeholder.destroy()
+        app_state.set_backend(app_state.local_backend)
+        on_run_locally()
 
     attempt()
 
@@ -245,7 +270,16 @@ def _run_always_remote(root: tk.Misc, app_state: AppState, host: str, port: int,
     _show_connect_screen(
         root, app_state, host, port, token,
         on_connected=lambda: _build_tabs(root, app_state, select_title="Record"),
+        on_run_locally=lambda: _run_local_ui(root, app_state),
     )
+
+
+def _run_local_ui(root: tk.Misc, app_state: AppState) -> None:
+    """The normal local-mode UI, as a plain `takeloom ui` launch brings it
+    up — for the connect screen's "Run Locally"."""
+    config = app_state.local_backend.get_config()
+    _build_tabs(root, app_state, select_title="Studio Setup" if not config.studio_name else "Record")
+    app_state.start_local_monitoring()
 
 
 def handle_remote_disconnect(root: tk.Misc, app_state: AppState, host: str, port: int, reason: str) -> None:
@@ -278,6 +312,7 @@ def handle_remote_disconnect(root: tk.Misc, app_state: AppState, host: str, port
         root, app_state, host, port, token,
         on_connected=app_state.build_ui or (lambda: _build_tabs(root, app_state, select_title="Record")),
         initial_status=f"Disconnected ({reason}) — reconnecting to {host}...",
+        on_run_locally=app_state.build_ui or (lambda: _run_local_ui(root, app_state)),
     )
 
 

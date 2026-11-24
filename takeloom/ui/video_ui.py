@@ -570,5 +570,5 @@ def run(remote_ip: str | None = None) -> None:
     else:
         known = next((r for r in config.known_remotes if r.host == host), None)
         _show_connect_screen(root, app_state, host, REMOTE_SERVER_PORT, known.token if known else "",
-                             on_connected=build)
+                             on_connected=build, on_run_locally=build)
     root.mainloop()
