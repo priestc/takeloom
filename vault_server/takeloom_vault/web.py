@@ -76,7 +76,7 @@ def page(title: str, body: str) -> str:
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         f"<title>{escape(title)} · Takeloom Vault</title><style>{_CSS}</style></head><body>"
         "<header><a class='brand' href='/'>Takeloom Vault</a><a href='/'>Sessions</a>"
-        "<a href='/completed'>Completed takes</a><a href='/clients'>Paired devices</a></header>"
+        "<a href='/completed'>Completed takes</a><a href='/cameras'>Cameras</a><a href='/clients'>Paired devices</a></header>"
         f"{body}</body></html>"
     )
 
@@ -858,6 +858,44 @@ def completed_page(pending: list[PairingRequest]) -> str:
         f"<script>{_COMPLETED_JS.read_text()}</script>"
     )
     return page("Completed takes", body)
+
+
+def cameras_page(pending: list[PairingRequest]) -> str:
+    """The Takeloom Camera phones connected here (camera_hub.py), with
+    their previews, and the recording nodes that control them."""
+    body = (
+        _pairing_banner(pending)
+        + "<h1>Cameras</h1>"
+        "<p class='muted small'>Takeloom Camera phones connect to this vault. A phone that hasn't paired with it "
+        "yet asks to above; in the app, ⚙ › Scan for server finds it. Recording nodes (takeloom on the studio "
+        "machines) start and stop the phones' recordings through here.</p>"
+        "<div id='cams' style='display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:1em'></div>"
+        "<h2>Recording nodes</h2><p id='nodes' class='muted'></p>"
+        "<script>(function(){"
+        "function esc(t){return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;');}"
+        "function load(){fetch('/cameras/data').then(function(r){return r.json();}).then(function(j){"
+        "var rec={};j.recording.forEach(function(r){rec[r.device_id]=r.session;});"
+        "var el=document.getElementById('cams');"
+        "if(!j.cameras.length){el.innerHTML=\"<p class='muted'>No phones connected.</p>\";}"
+        "else{var seen={};j.cameras.forEach(function(c){seen[c.device_id]=1;"
+        "var id='cam-'+c.device_id.replace(/[^\\w-]/g,'_'),box=document.getElementById(id);"
+        "if(!box){box=document.createElement('div');box.id=id;"
+        "box.innerHTML=\"<img style='width:100%;aspect-ratio:16/9;object-fit:contain;background:#000;border-radius:6px'><p class='small'></p>\";}"
+        "el.appendChild(box);var s=c.status||{};"
+        "box.querySelector('img').src='/cameras/'+encodeURIComponent(c.device_id)+'/preview.jpg?'+Date.now();"
+        "box.querySelector('p').innerHTML='<b>'+esc(c.client_name)+'</b> <span class=muted>'+esc(c.ip)+' · app '+esc(c.app_version)+'</span><br>'+"
+        "(s.width?esc(s.width+'×'+s.height+' '+(s.fps||'')+' fps'):'')+"
+        "(s.battery!=null?' · battery '+Math.round(100*s.battery)+'%'+(s.charging?' (charging)':''):'')+"
+        "(s.live_width?' · live '+esc(s.live_width+'×'+s.live_height)+' '+((s.live_bitrate||0)/1e6).toFixed(1)+' Mbps':'')+"
+        "(rec[c.device_id]?'<br><b>● recording</b> '+esc(rec[c.device_id]):'');});"
+        "Array.prototype.slice.call(el.children).forEach(function(b){if(b.id&&b.id.indexOf('cam-')==0&&"
+        "!j.cameras.some(function(c){return 'cam-'+c.device_id.replace(/[^\\w-]/g,'_')==b.id;}))el.removeChild(b);});"
+        "var empty=el.querySelector('p.muted:not(.small)');if(empty&&j.cameras.length)empty.remove();}"
+        "document.getElementById('nodes').textContent=j.nodes.length?j.nodes.map(function(n){return n.label+' ('+n.ip+')';}).join(', '):'None connected.';"
+        "}).catch(function(){}).then(function(){setTimeout(load,1500);});}"
+        "load();})();</script>"
+    )
+    return page("Cameras", body)
 
 
 def clients_page(clients: list[PairedClient], pending: list[PairingRequest]) -> str:

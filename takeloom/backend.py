@@ -2554,8 +2554,8 @@ class LocalBackend(Backend):
         """Decode the live feed of each phone someone wants at full
         resolution, and stop decoding the rest. A local camera's capture
         loop makes its own full frames (see _CameraPreviewManager._run)."""
-        if self._phone_hub is None:
-            return
+        if self._phone_hub is None or hasattr(self._phone_hub, "recorder"):
+            return  # no hub, or the vault's: no live video comes here
         from .phone_camera.full_preview import PhoneFullPreview
         with self._phone_full_previews_lock:
             for device in [d for d in self._phone_full_previews if d not in cameras]:
@@ -6835,12 +6835,17 @@ class LocalBackend(Backend):
                         "status": f"{label or 'Takeloom Camera'} isn't connected — recording this session without it.",
                     })
                     continue
-                from .phone_camera.recorder import PhoneVideoRecorder
                 upload_file = f"{stem}_phone.mp4"
-                self._phone_hub.expect_upload(session_dir.name, session_dir, device_id, upload_file)
-                recorder = PhoneVideoRecorder(
-                    self._phone_hub, device_id, session_dir.name, session_dir / raw_file, **stream_tee(device),
-                )
+                if hasattr(self._phone_hub, "recorder"):
+                    # The phones are the vault's (phone_camera/vault_hub.py):
+                    # it records the live feed and takes the upload.
+                    recorder = self._phone_hub.recorder(device_id, session_dir.name, raw_file, upload_file)
+                else:
+                    from .phone_camera.recorder import PhoneVideoRecorder
+                    self._phone_hub.expect_upload(session_dir.name, session_dir, device_id, upload_file)
+                    recorder = PhoneVideoRecorder(
+                        self._phone_hub, device_id, session_dir.name, session_dir / raw_file, **stream_tee(device),
+                    )
                 if recorder.start():
                     extra_cameras.append(_ExtraCameraRecording(
                         device, label, recorder, raw_file, final_file, upload_file,

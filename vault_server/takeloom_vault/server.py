@@ -57,6 +57,8 @@ Browser UI:
                                  data from GET /completed/data)
     POST /completed/mix|preferred-take|trim|export|working-title,  GET /completed/backing/<file>, /completed/export-status
     GET  /clients                paired devices
+    GET  /cameras                connected Takeloom Camera phones and recording nodes (camera_hub.py;
+                                 its data from GET /cameras/data, previews /cameras/<id>/preview.jpg)
     GET  /media/<vault path>     file download/stream, with Range support (for <video> seeking)
     GET  /takes/<filename>/video  a take's video (as the API route above)
     POST /pairing/<id>/approve|deny,  POST /clients/<id>/revoke
@@ -144,7 +146,25 @@ class VaultHTTPServer(ThreadingHTTPServer):
         self.session_cameras = CameraUploads(vault, in_session=True)
         self.aligner = Aligner(vault, log)
         self.library = Library(vault, take_videos.dir.parent / "backing-playback", take_videos, log)
+        from .camera_hub import CameraHub
+        self.camera_hub = CameraHub(vault, auth, self.session_cameras, self.aligner, socket.gethostname, log)
         super().__init__(address, _Handler)
+
+    def finish_request(self, request, client_address) -> None:
+        """Takeloom Camera phones and recording nodes (camera_hub.py) share
+        this port with the web pages and the API: their first byte starts a
+        binary frame, where HTTP's is a letter."""
+        from .camera_hub import frame_first_byte
+        try:
+            request.settimeout(_Handler.timeout)
+            first = request.recv(1, socket.MSG_PEEK)
+        except OSError:
+            return
+        if first and frame_first_byte(first[0]):
+            if is_local_network(client_address[0]):
+                self.camera_hub.handle(request, client_address[0])
+            return
+        super().finish_request(request, client_address)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -338,6 +358,17 @@ class _Handler(BaseHTTPRequestHandler):
             return self._html(web.sessions_page(vault, vault.all_session_logs(), auth.pending_requests()))
         if path == "/clients":
             return self._html(web.clients_page(list(auth.clients), auth.pending_requests()))
+        if path == "/cameras":
+            return self._html(web.cameras_page(auth.pending_requests()))
+        if path == "/cameras/data":
+            hub = self.server.camera_hub
+            return self._json({"cameras": hub.cameras(), "nodes": hub.nodes(),
+                               "recording": [{"session": s, "device_id": d} for s, d in hub.recording()]})
+        if m := re.fullmatch(r"/cameras/([^/]+)/preview\.jpg", path):
+            jpeg = self.server.camera_hub.preview(m.group(1))
+            if not jpeg:
+                raise _HTTPError(HTTPStatus.NOT_FOUND, "No preview from that camera")
+            return self._send(HTTPStatus.OK, jpeg, "image/jpeg", {"Cache-Control": "no-store"})
         if path == "/completed":
             return self._html(web.completed_page(auth.pending_requests()))
         if path == "/completed/data":
@@ -379,7 +410,7 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/ping" and method == "GET":
             return self._json({"ok": True, "hostname": socket.gethostname(), "client": label,
                                "encode": self.server.renderer.available, "version": _version(),
-                               "camera_uploads": True, "camera_sources": True})
+                               "camera_uploads": True, "camera_sources": True, "camera_hub": True})
         if path == "/clients" and method == "GET":
             return self._json({"clients": [
                 {"id": c.id, "label": c.label, "key": c.key, "last_seen_at": c.last_seen_at}

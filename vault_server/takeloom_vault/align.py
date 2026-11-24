@@ -351,7 +351,58 @@ class Aligner:
 
     def _pending(self, directory: Path, data: dict) -> bool:
         return any(s.get("state") in ("waiting", "arrived") and (directory / s["file"]).is_file()
-                   for _e, s in self._phone_sources(data))
+                   for _e, s in self._phone_sources(data)) or bool(self._live_wanted(directory, data))
+
+    @staticmethod
+    def _live_wanted(directory: Path, data: dict) -> list[dict]:
+        """Camera entries whose live feed this vault recorded (camera_hub.py:
+        the phones report here now, so the studio machine never has it) and
+        that should show it until the phone's own recording is lined up, but
+        don't list it yet. The studio machine's copy of the log never does,
+        so it's added back whenever that copy arrives."""
+        wanted = []
+        for entry in data.get("extra_cameras") or []:
+            live = str(entry.get("file") or "")
+            sources = entry.get("sources")
+            if not entry.get("phone_camera") or sources is None or not live or "/" in live or live.startswith("."):
+                continue
+            if any(s.get("file") == live for s in sources):
+                continue
+            phone = next((s for s in sources if s.get("kind") == "phone"), None)
+            if phone is not None and phone.get("state") != "waiting":
+                continue
+            if (directory / live).is_file() and not (directory / (live + ".part")).exists():
+                wanted.append(entry)
+        return wanted
+
+    def add_live_sources(self, name: str) -> None:
+        """List each live feed this vault recorded as its camera's "live"
+        source, placed by clock sync alone (takeloom's sources.live_source)."""
+        directory = self.vault.session_dir(name)
+        with self.lock:
+            data = self.vault.read_session_log(name)
+            if data is None:
+                return
+            wanted = self._live_wanted(directory, data)
+            for entry in wanted:
+                file = entry["file"]
+                phone = entry.get("phone_camera") or {}
+                start = _clock_video_start(phone, phone.get("first_live_pts_ns"),
+                                           phone.get("first_live_clock_offset_ns") or phone.get("clock_offset_ns"))
+                try:
+                    first = _probe_first_video_pts(directory / file) if start is not None else None
+                except RuntimeError:
+                    first = None
+                if start is not None and first is not None:
+                    source = {"file": file, "kind": "live", "state": "aligned",
+                              "align": {"file_zero_s": start - first, "drift": 0.0, "method": "clock"}}
+                else:
+                    source = {"file": file, "kind": "live", "state": "failed",
+                              "error": "no clock sync to place it by" if start is None else "no video frames"}
+                entry["sources"].append(source)
+                self.log(f"{name}: {entry.get('label') or file}'s live feed {source['state']}")
+            if wanted:
+                self.vault.write_session_log(name, data)
 
     def arrived(self, name: str, file: str) -> None:
         """A phone's recording of session `name` has just arrived in full:
@@ -407,6 +458,7 @@ class Aligner:
                 self.log(f"Lining up {name}'s cameras failed: {type(e).__name__}: {e}")
 
     def _align_session(self, name: str) -> None:
+        self.add_live_sources(name)
         directory = self.vault.session_dir(name)
         data = self.vault.read_session_log(name) or {}
         todo = [(e.get("label") or e.get("upload_file"), s["file"]) for e, s in self._phone_sources(data)

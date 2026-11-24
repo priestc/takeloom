@@ -13,15 +13,30 @@ the session's audio automatically, with no manual latency test.
 
 ## Using it
 
-1. Run `takeloom server` on the Mac Mini as usual. It also listens for
-   phones on port **51824**.
+The phones connect to the **vault** (`takeloom-vault` on tank2, 0.18+), not
+to a recording node: the vault is wired to the router, so the phones' live
+feeds and uploads never cross a node's Wi-Fi. The vault speaks the same
+protocol on its own port (51824, shared with its web pages and API) and
+has the phone hub (`vault_server/takeloom_vault/camera_hub.py`). A
+recording node's `takeloom server` (the Mac Mini, the laptop) controls the
+phones through it (`takeloom/phone_camera/vault_hub.py`): it starts and
+stops their recordings with each session, sets their live quality and
+framing, and shows their previews. The vault records each phone's live
+feed into the session's folder and takes its upload there. A node with no
+remote vault (or one older than 0.18) still listens for phones itself, as
+below.
+
+1. Run `takeloom server` on the recording node as usual.
 2. Open Takeloom Camera. The first time, it scans the phone's Wi-Fi network
    for the server: every address on port 51824, keeping those that answer
-   the protocol's `discover` as takeloom. Then it asks "Connect to Mac.local
-   at 192.168.1.200:51824?" (or lists them, if it finds several). Say yes and
+   the protocol's `discover` as takeloom. Then it asks "Connect to tank2
+   at 192.168.1.190:51824?" (or lists them, if it finds several). Say yes and
    it saves that address. To change it later, tap ⚙: type an address, or
-   use **Scan for server**. The first connection shows a pairing request on
-   the Mac (the same approval flow as a Remote client). Approve it.
+   use **Scan for server**. The first connection asks to pair: approve it
+   at the top of any page of the vault's web UI. The app keeps a token per
+   server, so a phone that was paired with the Mac Mini pairs once more
+   with the vault. The vault's **Cameras** page lists the connected phones
+   with their previews and the recording nodes.
 3. The phone shows up on the Record tab by itself, as one of the camera
    previews. There's nothing to add: every connected phone is recorded.
 4. Record as normal. Starting a session tells every connected phone to

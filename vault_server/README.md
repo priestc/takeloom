@@ -55,6 +55,9 @@ revokes one itself once its device is no longer authorized there.
   and its raw files (FLAC with an inline player, MIDI, the log).
   **Delete session…** removes it and the takes it filed (takeloom drops them from its setlists
   on its next sync).
+- `/cameras`: the Takeloom Camera phones connected to this vault (`camera_hub.py`; they connect
+  here, on this same port, not to a recording node), with their previews, and the recording
+  nodes that start and stop their recordings through it.
 - `/completed`: every completed take, grouped by song, with a mixer that plays a song's takes
   and backing track together in the browser: a fader, Mute and Solo per instrument, **Save
   mix** (`mixes/`), **Export mix…** (an MP3 in `final_mixes/`, from the takes' lossless
