@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import ttk
 from typing import Callable
 
 from tkinterdnd2 import TkinterDnD
@@ -16,34 +16,29 @@ from .app_state import AppState
 from .platform_style import normalize as normalize_platform_style
 from .record import RecordFrame
 from .recording_devices import RecordingDevicesFrame
-from .remote import RemoteFrame
 from .studio_setup import StudioSetupFrame
+from .this_computer import ThisComputerFrame
 
 # (title, frame class, persistent). Persistent tabs are built once and never
 # torn down on tab switches — needed for Record, which holds a live audio
-# stream / ffmpeg process / camera handle that a rebuild would kill outright;
-# and for Remote, which holds the connected RemoteClient. (Completed takes,
-# and their mixer, are on the vault's web UI now.)
+# stream / ffmpeg process / camera handle that a rebuild would kill outright.
+# (Completed takes, and their mixer, are on the vault's web UI now; so is
+# controlling another machine — there's no remote mode: every UI drives its
+# own machine's hardware, and the vault's web UI reaches the recording nodes.)
 TABS = [
     ("Record", RecordFrame, True),
     ("Studio Setup", StudioSetupFrame, False),
     ("Recording Devices", RecordingDevicesFrame, False),
-    ("Remote", RemoteFrame, True),
+    ("This Computer", ThisComputerFrame, False),
 ]
-
-_RETRY_INTERVAL_MS = 10_000  # auto-retry cadence on the "could not connect" screen
 
 
 def _build_tabs(root: tk.Misc, app_state: AppState, select_title: str) -> None:
-    """Build the normal tabbed interface (Record, Studio Setup, etc.) and
-    select the given tab. Used both for ordinary local-mode launches and,
-    once connected, for an "always connect" remote — the two cases differ
-    only in what's on screen before this point, never in the tabs themselves."""
+    """Build the tabbed interface (Record, Studio Setup, etc.) and select
+    the given tab."""
     # Configured-but-not-connected devices (mic, camera, Stream Deck) — shown
     # above the notebook so it stays visible no matter which tab is active,
-    # not buried in a single tab's own log. Checked once at startup against
-    # this machine's own config/hardware, even when this instance ends up
-    # remote-controlling another studio (see check_configured_devices).
+    # not buried in a single tab's own log.
     device_warnings = check_configured_devices(app_state.local_backend)
     if device_warnings:
         warning_label = ttk.Label(
@@ -51,16 +46,6 @@ def _build_tabs(root: tk.Misc, app_state: AppState, select_title: str) -> None:
             foreground="#b00020", justify="left", wraplength=1000,
         )
         warning_label.pack(fill="x", padx=16, pady=(12, 0))
-
-    status_var = tk.StringVar(value="")
-    status_label = ttk.Label(root, textvariable=status_var, foreground="#2a6db0")
-    status_label.pack(fill="x", padx=16, pady=(12, 0))
-
-    def on_state_change() -> None:
-        status_var.set(f"Remote: {app_state.remote_name}" if app_state.remote_name else "")
-
-    app_state.add_listener(on_state_change)
-    on_state_change()
 
     notebook = ttk.Notebook(root)
     notebook.pack(fill="both", expand=True, padx=16, pady=16)
@@ -93,229 +78,6 @@ def _build_tabs(root: tk.Misc, app_state: AppState, select_title: str) -> None:
     rebuild(containers[initial_index])
 
 
-def _show_connect_screen(
-    root: tk.Misc, app_state: AppState, host: str, port: int, token: str,
-    on_connected: Callable[[], None], initial_status: str | None = None,
-    on_run_locally: Callable[[], None] | None = None,
-) -> None:
-    """Blocking "connecting" / "waiting for authorization" / "could not
-    connect" screen shown in place of the normal tabbed UI until the
-    connection actually succeeds — only then does `on_connected()` run.
-    A "could not connect" result auto-retries every `_RETRY_INTERVAL_MS`
-    in the background as well as offering a manual Retry button, so a
-    remote instance recovers on its own once the server comes back.
-    Shared by an "always connect" remote at startup (`_run_always_remote`),
-    video-ui's startup, and recovery from a mid-session disconnect
-    (`handle_remote_disconnect`).
-
-    The "could not connect" screen also has the server's address, editable:
-    a server that's been renamed (Mac.local -> macmini.lan) is fixed right
-    there. Connecting to a new address moves the saved remote over to it
-    (_rename_known_remote), keeping its pairing and "always connect".
-
-    With `on_run_locally`, it also has a "Run Locally" button: give up on
-    the remote for this launch (an "always connect" setting is left as is)
-    and call `on_run_locally()` to bring up this machine's own UI instead."""
-    from .remote import connect_async, remember_remote_token
-
-    placeholder = ttk.Frame(root)
-    placeholder.pack(fill="both", expand=True, padx=16, pady=16)
-    retry_after_id: str | None = None
-    cancelled = False  # "Run Locally" clicked: ignore any attempt still in flight
-
-    def clear() -> None:
-        nonlocal retry_after_id
-        if retry_after_id is not None:
-            placeholder.after_cancel(retry_after_id)
-            retry_after_id = None
-        if not placeholder.winfo_exists():
-            return
-        for child in placeholder.winfo_children():
-            child.destroy()
-
-    def attempt() -> None:
-        clear()
-        status_var = tk.StringVar(value=initial_status or f"Connecting to {host}...")
-        ttk.Label(placeholder, textvariable=status_var, font=("TkDefaultFont", 13)).pack(pady=(60, 0))
-
-        def on_pending() -> None:
-            if cancelled:
-                return
-            status_var.set(f"Waiting to be authorized by {host}...")
-
-        def on_done(client) -> None:
-            if cancelled:
-                return
-            remember_remote_token(app_state, host, client)
-            placeholder.destroy()
-            on_connected()
-
-        def on_error(error: str) -> None:
-            nonlocal retry_after_id
-            if cancelled:
-                return
-            clear()
-            ttk.Label(placeholder, text="Could not connect", font=("TkDefaultFont", 14, "bold")).pack(
-                pady=(60, 8)
-            )
-            ttk.Label(placeholder, text=f"{host}: {error}", foreground="#b00020", wraplength=500, justify="center").pack(
-                pady=(0, 16)
-            )
-            buttons = ttk.Frame(placeholder)
-            buttons.pack()
-            ttk.Button(buttons, text="Retry", command=attempt).pack(side="left")
-            if on_run_locally is not None:
-                ttk.Button(buttons, text="Run Locally", command=run_locally).pack(side="left", padx=(8, 0))
-
-            # The server's address, to fix it if it's changed.
-            row = ttk.Frame(placeholder)
-            row.pack(pady=(24, 0))
-            ttk.Label(row, text="Server address:").pack(side="left", padx=(0, 6))
-            address_var = tk.StringVar(value=host)
-            entry = ttk.Entry(row, textvariable=address_var, width=28)
-            entry.pack(side="left")
-
-            def stop_auto_retry(_event=None) -> None:
-                # Editing the address: don't wipe it with a retry.
-                nonlocal retry_after_id
-                if retry_after_id is not None:
-                    placeholder.after_cancel(retry_after_id)
-                    retry_after_id = None
-
-            def connect_to_address(_event=None) -> None:
-                nonlocal host
-                new = _clean_host(address_var.get())
-                if not new:
-                    return
-                if new != host:
-                    _rename_known_remote(app_state, host, new)
-                    host = new
-                attempt()
-
-            entry.bind("<Key>", stop_auto_retry)
-            entry.bind("<Return>", connect_to_address)
-            ttk.Button(row, text="Connect", command=connect_to_address).pack(side="left", padx=(6, 0))
-            ttk.Label(placeholder, text="e.g. macmini.lan or 192.168.1.200", foreground="#666666").pack(pady=(4, 0))
-            retry_after_id = placeholder.after(_RETRY_INTERVAL_MS, attempt)
-
-        connect_async(root, app_state, host, port, _known_token(app_state, host) or token,
-                      on_done=on_done, on_error=on_error, on_pending=on_pending,
-                      is_cancelled=lambda: cancelled)
-
-    def run_locally() -> None:
-        nonlocal cancelled
-        cancelled = True
-        clear()
-        placeholder.destroy()
-        app_state.set_backend(app_state.local_backend)
-        on_run_locally()
-
-    attempt()
-
-
-def _clean_host(text: str) -> str:
-    """What's typed as a server address, as a bare host: no scheme, path
-    or port (every takeloom server is on the same port)."""
-    text = text.strip()
-    if "://" in text:
-        text = text.split("://", 1)[1]
-    text = text.split("/", 1)[0]
-    if text.count(":") == 1:  # host:port (not an IPv6 address)
-        text = text.split(":", 1)[0]
-    return text
-
-
-def _known_token(app_state: AppState, host: str) -> str:
-    try:
-        config = app_state.local_backend.get_config()
-    except BackendError:
-        return ""
-    remote = next((r for r in config.known_remotes if r.host == host), None)
-    return remote.token if remote else ""
-
-
-def _rename_known_remote(app_state: AppState, old: str, new: str) -> None:
-    """The saved remote at `old` is at `new` now: move it there, keeping its
-    token (it's the same server under a new name; if it isn't, the server
-    just asks to pair again), label, and "always connect". Merged into an
-    entry `new` already has, if there is one."""
-    backend = app_state.local_backend
-    try:
-        config = backend.get_config()
-    except BackendError:
-        return
-    entry = next((r for r in config.known_remotes if r.host == old), None)
-    if entry is None:
-        return
-    existing = next((r for r in config.known_remotes if r.host == new), None)
-    if existing is None:
-        entry.host = new
-    else:
-        existing.token = existing.token or entry.token
-        existing.label = existing.label or entry.label
-        existing.always_connect = existing.always_connect or entry.always_connect
-        config.known_remotes.remove(entry)
-    try:
-        backend.save_config(config)
-    except BackendError:
-        pass
-
-
-def _run_always_remote(root: tk.Misc, app_state: AppState, host: str, port: int, token: str) -> None:
-    """This instance is configured to always connect to a specific remote —
-    it must never fall back to showing this machine's own local hardware/
-    tabs. Shows the blocking connect/retry screen until the connection
-    actually succeeds; only then does the normal tabbed UI (bound to the
-    now-remote backend) get built at all."""
-    _show_connect_screen(
-        root, app_state, host, port, token,
-        on_connected=lambda: _build_tabs(root, app_state, select_title="Record"),
-        on_run_locally=lambda: _run_local_ui(root, app_state),
-    )
-
-
-def _run_local_ui(root: tk.Misc, app_state: AppState) -> None:
-    """The normal local-mode UI, as a plain `takeloom ui` launch brings it
-    up — for the connect screen's "Run Locally"."""
-    config = app_state.local_backend.get_config()
-    _build_tabs(root, app_state, select_title="Studio Setup" if not config.studio_name else "Record")
-    app_state.start_local_monitoring()
-
-
-def handle_remote_disconnect(root: tk.Misc, app_state: AppState, host: str, port: int, reason: str) -> None:
-    """Recover from an unexpected mid-session drop of a remote connection:
-    tear down whatever's currently on screen (the tabbed UI) and replace it
-    with the same connect/retry screen shown at startup, instead of a
-    dialog plus a silent fallback to this machine's own local hardware — a
-    remote instance has nothing useful of its own to show while
-    disconnected, so it should look and behave just like it does before its
-    first successful connect."""
-    if not app_state.backend.is_remote():
-        return  # already reset by an explicit Disconnect click
-    try:
-        config = app_state.local_backend.get_config()
-        remote = next((r for r in config.known_remotes if r.host == host), None)
-        token = remote.token if remote else ""
-    except BackendError:
-        token = ""
-
-    # Tear down the tabbed UI (and with it every persistent tab's app_state
-    # listener, unregistered synchronously by its own <Destroy> handler)
-    # before swapping the backend, so the dead RemoteBackend's notification
-    # doesn't trigger a doomed reload/rebind in frames about to be destroyed
-    # anyway.
-    for child in root.winfo_children():
-        child.destroy()
-    app_state.set_backend(app_state.local_backend)
-
-    _show_connect_screen(
-        root, app_state, host, port, token,
-        on_connected=app_state.build_ui or (lambda: _build_tabs(root, app_state, select_title="Record")),
-        initial_status=f"Disconnected ({reason}) — reconnecting to {host}...",
-        on_run_locally=app_state.build_ui or (lambda: _run_local_ui(root, app_state)),
-    )
-
-
 def _process_latest_session_if_pending(root: tk.Misc, app_state: AppState, on_done: Callable[[], None]) -> None:
     """Startup check, before the normal tabbed UI ever appears: if the
     vault's own most recent session hasn't been through process_session
@@ -325,11 +87,6 @@ def _process_latest_session_if_pending(root: tk.Misc, app_state: AppState, on_do
     nothing else ever retries a pending session on its own, so without
     this it would just sit there until someone happened to notice (see
     processing/splicer.py's total_frames for the recovery side of this).
-
-    Always local — `app_state.local_backend`, never a Remote connection:
-    "the vault" means this machine's own, and an "always connect" remote
-    terminal (see _run_always_remote) never reaches this function at all,
-    since it has no local recording of its own to have left pending.
 
     Calls `on_done()` exactly once, unconditionally, whether a session
     needed processing, processing succeeded, failed, or nothing was
@@ -376,7 +133,7 @@ def _process_latest_session_if_pending(root: tk.Misc, app_state: AppState, on_do
     threading.Thread(target=worker, daemon=True).start()
 
 
-def run(remote_ip: str | None = None) -> None:
+def run() -> None:
     from .desktop_entry import WM_CLASS_NAME, ensure_desktop_entry
     ensure_desktop_entry()
     # a plain tk.Tk() can't accept drag-and-drop (used by New Project);
@@ -402,50 +159,10 @@ def run(remote_ip: str | None = None) -> None:
 
     root.protocol("WM_DELETE_WINDOW", on_close)
 
-    # An explicit --remote=IP is a one-off, this launch only, and keeps the
-    # old best-effort behavior (local tabs come up immediately, connects in
-    # the background, a failure is just a dialog). A configured "always
-    # connect" remote is a standing instruction that this instance is a
-    # remote-control terminal, period — it never shows local mode at all,
-    # connected or not.
-    always = None if remote_ip else next((r for r in config.known_remotes if r.always_connect), None)
-
-    if always is not None:
-        from ..remote.protocol import REMOTE_SERVER_PORT
-        _run_always_remote(root, app_state, always.host, REMOTE_SERVER_PORT, always.token)
-        root.mainloop()
-        return
-
     # Land on Studio Setup until a studio has been configured (studio_name is
     # the identity field CLI setup treats as "configured"); once one exists,
     # open straight to Record, the tab actually used session to session.
     initial_title = "Studio Setup" if not config.studio_name else "Record"
     _build_tabs(root, app_state, select_title=initial_title)
-
-    # Local live monitoring only for a genuinely local launch — never one
-    # about to connect to a remote (see AppState.start_local_monitoring).
-    if not remote_ip:
-        app_state.start_local_monitoring()
-
-    if remote_ip:
-        from ..remote.protocol import REMOTE_SERVER_PORT
-        from .remote import connect_async, remember_remote_token
-
-        match = next((r for r in config.known_remotes if r.host == remote_ip), None)
-        host, port, token = (
-            (match.host, REMOTE_SERVER_PORT, match.token) if match else (remote_ip, REMOTE_SERVER_PORT, "")
-        )
-
-        def on_remote_error(error: str) -> None:
-            messagebox.showerror("Could not connect", f"{host}: {error}")
-
-        def on_remote_done(client) -> None:
-            remember_remote_token(app_state, host, client)
-
-        connect_async(
-            root, app_state, host, port, token,
-            on_done=on_remote_done,
-            on_error=on_remote_error,
-        )
-
+    app_state.start_local_monitoring()
     root.mainloop()

@@ -49,6 +49,13 @@ Messages on a node's connection:
                                                                       the node in charge, if any)
                    {"kind": "start_recording", "device_id", "session_id", "live_file", "upload_file"}
                    {"kind": "stop_recording", "device_id", "session_id"}
+                   {"kind": "rpc_result", "id", "ok", "result"|"error"}
+
+and the web UI's operations on the node (cameras, projects, setlists:
+takeloom's node_rpc.py has the table):
+
+    vault -> node  {"kind": "rpc", "id", "op", "args"}               ("upload" in args: a file_chunk id)
+                   {"kind": "file_chunk", "id", "name", "data": base64}
 
 A node streaming a session opens a second connection (role "stream";
 live_stream.py has its messages): the vault makes the stream.
@@ -92,6 +99,10 @@ def frame_first_byte(byte: int) -> bool:
 
 class ProtocolError(Exception):
     pass
+
+
+class RpcError(Exception):
+    """An operation on a recording node (CameraHub.node_rpc) failed."""
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:
@@ -300,10 +311,15 @@ class _Camera:
 
 class _Node:
     def __init__(self, sock: socket.socket, label: str, ip: str) -> None:
+        import secrets
         self.sock = sock
         self.label = label
         self.ip = ip
+        self.id = secrets.token_hex(4)
         self._write_lock = threading.Lock()
+        # Operations the web UI is waiting on (node_rpc): id -> [Event, reply]
+        self.pending: dict[int, list] = {}
+        self.next_id = 0
 
     def send_raw(self, data: bytes) -> bool:
         try:
@@ -356,7 +372,7 @@ class CameraHub:
 
     def nodes(self) -> list[dict]:
         with self._lock:
-            return [{"label": n.label, "ip": n.ip, "active": n is self._active} for n in self._nodes]
+            return [{"id": n.id, "label": n.label, "ip": n.ip, "active": n is self._active} for n in self._nodes]
 
     def recording(self) -> list[tuple[str, str]]:
         with self._lock:
@@ -563,8 +579,65 @@ class CameraHub:
             stream.stop()
             node.send_json({"kind": "stream_status", "status": "Stream ended.", "active": False})
 
+    # --- the web UI's operations on a node (takeloom's node_rpc.py) ---
+
+    def node(self, node_id: str) -> _Node | None:
+        with self._lock:
+            return next((n for n in self._nodes if n.id == node_id), None)
+
+    def node_rpc(self, node_id: str, op: str, args: dict, timeout: float = 30.0) -> dict:
+        """Run `op` on a recording node and return its result: RpcError
+        with the node's own message if it fails there."""
+        node = self.node(node_id)
+        if node is None:
+            raise RpcError("That recording node isn't connected to the vault any more.")
+        with self._lock:
+            node.next_id += 1
+            rpc_id = node.next_id
+            waiter = [threading.Event(), None]
+            node.pending[rpc_id] = waiter
+        try:
+            if not node.send_json({"kind": "rpc", "id": rpc_id, "op": op, "args": args}):
+                raise RpcError(f"Couldn't reach {node.label}.")
+            if not waiter[0].wait(timeout):
+                raise RpcError(f"{node.label} didn't answer {op} within {timeout:.0f} s.")
+        finally:
+            with self._lock:
+                node.pending.pop(rpc_id, None)
+        reply = waiter[1] or {}
+        if not reply.get("ok"):
+            raise RpcError(str(reply.get("error") or f"{op} failed on {node.label}"))
+        return reply.get("result") or {}
+
+    def send_file(self, node_id: str, name: str, body, length: int) -> str:
+        """Pass a file from the browser on to a node, ahead of the operation
+        that uses it (its args' "upload": the id returned)."""
+        import base64
+        import secrets
+        node = self.node(node_id)
+        if node is None:
+            raise RpcError("That recording node isn't connected to the vault any more.")
+        upload_id = secrets.token_hex(8)
+        remaining = length
+        while remaining > 0:
+            chunk = body.read(min(1024 * 1024, remaining))
+            if not chunk:
+                raise RpcError("The upload was cut short.")
+            remaining -= len(chunk)
+            if not node.send_json({"kind": "file_chunk", "id": upload_id, "name": name,
+                                   "data": base64.b64encode(chunk).decode("ascii")}):
+                raise RpcError(f"Couldn't send the file on to {node.label}.")
+        return upload_id
+
     def _on_node_message(self, node: _Node, msg: dict) -> None:
         kind = msg.get("kind")
+        if kind == "rpc_result":
+            with self._lock:
+                waiter = node.pending.get(msg.get("id"))
+            if waiter is not None:
+                waiter[1] = msg
+                waiter[0].set()
+            return
         if kind == "clock_ping":
             node.send_json({"kind": "clock_pong", "id": msg.get("id"), "t0": msg.get("t0"),
                             "ts": time.monotonic_ns()})

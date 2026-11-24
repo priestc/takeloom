@@ -67,6 +67,12 @@ h1 button { font-size: .55em; vertical-align: middle; }
 tr.song { cursor: pointer; } tr.song:hover { background: #8881; } tr.song.on b { color: var(--accent); }
 tr.take td { border-bottom: none; padding: .15em .6em .15em 2.2em; font-size: .85em; }
 .tri { display: inline-block; width: 1.3em; color: var(--muted); }
+.tabs { display: flex; gap: .3em; margin: .6em 0; flex-wrap: wrap; } .tabs button.on { border-color: var(--accent); color: var(--accent); }
+.tab { border: 1px solid var(--line); border-radius: 6px; padding: .6em .8em; }
+.ac { position: relative; display: inline-block; }
+.ac .list { position: absolute; left: 0; right: 0; top: 100%; z-index: 5; background: var(--bg, #fff); border: 1px solid var(--line); border-top: none; max-height: 18em; overflow: auto; }
+.sugg { padding: .25em .5em; cursor: pointer; font-size: .9em; } .sugg:hover { background: #8882; }
+.lens.on, .air.on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
 """
 
 
@@ -76,7 +82,7 @@ def page(title: str, body: str) -> str:
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         f"<title>{escape(title)} · Takeloom Vault</title><style>{_CSS}</style></head><body>"
         "<header><a class='brand' href='/'>Takeloom Vault</a><a href='/'>Sessions</a>"
-        "<a href='/completed'>Completed takes</a><a href='/cameras'>Cameras</a><a href='/clients'>Paired devices</a></header>"
+        "<a href='/completed'>Completed takes</a><a href='/projects'>Projects</a><a href='/cameras'>Cameras</a><a href='/clients'>Paired devices</a></header>"
         f"{body}</body></html>"
     )
 
@@ -860,41 +866,76 @@ def completed_page(pending: list[PairingRequest]) -> str:
     return page("Completed takes", body)
 
 
+_PROJECTS_JS = Path(__file__).with_name("projects_page.js")
+_CAMERAS_JS = Path(__file__).with_name("cameras_page.js")
+
+
+def _node_picker(prefix: str) -> str:
+    return (f"<p>Recording node <select id='{prefix}-node'></select> "
+            f"<span id='{prefix}-none' class='muted' style='display:none'>No recording node is connected to the vault "
+            "(takeloom running on the Mac Mini or the laptop connects by itself).</span></p>")
+
+
+def projects_page(pending: list[PairingRequest]) -> str:
+    """A recording node's projects and setlists, edited through the vault
+    (camera_hub.py's node_rpc; its workings are projects_page.js)."""
+    body = (
+        _pairing_banner(pending)
+        + "<h1>Projects <button id='pj-reload'>⟳ Reload</button></h1>"
+        "<p class='muted small'>Each recording node keeps its own projects and setlists; they're edited on it, through "
+        "the vault. <span id='pj-status'></span></p>"
+        + _node_picker("pj") +
+        "<div id='pj-main'>"
+        "<p>Project <select id='pj-project'></select> <button id='pj-new'>+ New project</button> "
+        "<span id='pj-count' class='muted small'></span></p>"
+        "<table><thead><tr><th>#</th><th>Song</th><th>Source</th><th>Length</th><th></th></tr></thead>"
+        "<tbody id='pj-tracks'></tbody></table>"
+        "<h2>Add to the setlist</h2>"
+        "<div class='tabs'><button class='on' data-tab='t-file'>File</button><button data-tab='t-yt'>YouTube</button>"
+        "<button data-tab='t-insp'>Inspiration</button><button data-tab='t-set'>Song set</button></div>"
+        "<div class='tab' id='t-file'><p>An audio or video file (a video's sound is used). "
+        "<input type='file' id='add-file' accept='audio/*,video/*'> "
+        "Name <input id='add-file-name' placeholder='(the file's name)'> <button class='ok' id='add-file-go'>Add</button></p></div>"
+        "<div class='tab' id='t-yt' style='display:none'><p>YouTube URL <input id='add-yt' style='width:28em'> "
+        "<button class='ok' id='add-yt-go'>Add</button></p><p class='muted small'>The node downloads the whole video.</p></div>"
+        "<div class='tab' id='t-insp' style='display:none'><p>"
+        "Artist <span class='ac'><input id='insp-artist' autocomplete='off'><div class='list' id='insp-artist-list'></div></span> "
+        "Title <span class='ac'><input id='insp-title' autocomplete='off' style='width:18em'><div class='list' id='insp-title-list'></div></span> "
+        "<button class='ok' id='insp-go'>Add</button></p></div>"
+        "<div class='tab' id='t-set' style='display:none'><p class='muted small'>A song set is a slot that draws a "
+        "different song from its list each session.</p><p>"
+        "Artist <input id='ss-artist' style='width:10em'> Genre <input id='ss-genre' style='width:8em'> "
+        "Years <input id='ss-year_min' type='number' style='width:5em'>–<input id='ss-year_max' type='number' style='width:5em'> "
+        "Length (s) <input id='ss-duration_min' type='number' style='width:5em'>–<input id='ss-duration_max' type='number' style='width:5em'> "
+        "<label class='small'><input type='checkbox' id='ss-all'> every match (not a sample of 100)</label> "
+        "<button id='ss-search'>Search</button></p>"
+        "<div id='ss-results' style='max-height:20em;overflow:auto'></div>"
+        "<p>Add the ticked songs to <select id='ss-target'></select> named <input id='ss-label'> "
+        "<button class='ok' id='ss-go'>Add</button></p></div>"
+        "</div>"
+        f"<script>{_PROJECTS_JS.read_text()}</script>"
+    )
+    return page("Projects", body)
+
+
 def cameras_page(pending: list[PairingRequest]) -> str:
     """The Takeloom Camera phones connected here (camera_hub.py), with
-    their previews, and the recording nodes that control them."""
+    their previews, and the controls the recording node keeps for them —
+    the program camera (what the stream shows), each phone's lens, its
+    battery estimate — run on it through the vault (node_rpc). Its
+    workings are cameras_page.js."""
     body = (
         _pairing_banner(pending)
         + "<h1>Cameras</h1>"
         "<p class='muted small'>Takeloom Camera phones connect to this vault. A phone that hasn't paired with it "
         "yet asks to above; in the app, ⚙ › Scan for server finds it. Recording nodes (takeloom on the studio "
-        "machines) start and stop the phones' recordings through here.</p>"
-        "<div id='cams' style='display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:1em'></div>"
+        "machines) start and stop the phones' recordings through here, and keep each camera's name, lens and "
+        "which one the live stream shows. <span id='cm-status'></span></p>"
+        + _node_picker("cm") +
+        "<p id='cm-program'></p>"
+        "<div id='cams' style='display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:1em'></div>"
         "<h2>Recording nodes</h2><p id='nodes' class='muted'></p>"
-        "<script>(function(){"
-        "function esc(t){return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;');}"
-        "function load(){fetch('/cameras/data').then(function(r){return r.json();}).then(function(j){"
-        "var rec={};j.recording.forEach(function(r){rec[r.device_id]=r.session;});"
-        "var el=document.getElementById('cams');"
-        "if(!j.cameras.length){el.innerHTML=\"<p class='muted'>No phones connected.</p>\";}"
-        "else{var seen={};j.cameras.forEach(function(c){seen[c.device_id]=1;"
-        "var id='cam-'+c.device_id.replace(/[^\\w-]/g,'_'),box=document.getElementById(id);"
-        "if(!box){box=document.createElement('div');box.id=id;"
-        "box.innerHTML=\"<img style='width:100%;aspect-ratio:16/9;object-fit:contain;background:#000;border-radius:6px'><p class='small'></p>\";}"
-        "el.appendChild(box);var s=c.status||{};"
-        "box.querySelector('img').src='/cameras/'+encodeURIComponent(c.device_id)+'/preview.jpg?'+Date.now();"
-        "box.querySelector('p').innerHTML='<b>'+esc(c.client_name)+'</b> <span class=muted>'+esc(c.ip)+' · app '+esc(c.app_version)+'</span><br>'+"
-        "(s.width?esc(s.width+'×'+s.height+' '+(s.fps||'')+' fps'):'')+"
-        "(s.battery!=null?' · battery '+Math.round(100*s.battery)+'%'+(s.charging?' (charging)':''):'')+"
-        "(s.live_width?' · live '+esc(s.live_width+'×'+s.live_height)+' '+((s.live_bitrate||0)/1e6).toFixed(1)+' Mbps':'')+"
-        "(rec[c.device_id]?'<br><b>● recording</b> '+esc(rec[c.device_id]):'');});"
-        "Array.prototype.slice.call(el.children).forEach(function(b){if(b.id&&b.id.indexOf('cam-')==0&&"
-        "!j.cameras.some(function(c){return 'cam-'+c.device_id.replace(/[^\\w-]/g,'_')==b.id;}))el.removeChild(b);});"
-        "var empty=el.querySelector('p.muted:not(.small)');if(empty&&j.cameras.length)empty.remove();}"
-        "document.getElementById('nodes').textContent=(j.nodes.length?j.nodes.map(function(n){return n.label+' ('+n.ip+')'+(n.active?' — in charge of the phones':'');}).join(', '):'None connected.')+"
-        "(j.streams&&j.streams.length?'  ·  Streaming live: '+j.streams.map(function(s){return s.session+' (showing '+s.program+')';}).join(', '):'');"
-        "}).catch(function(){}).then(function(){setTimeout(load,1500);});}"
-        "load();})();</script>"
+        f"<script>{_CAMERAS_JS.read_text()}</script>"
     )
     return page("Cameras", body)
 

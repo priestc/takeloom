@@ -21,6 +21,10 @@ What's different from a phone connected here:
 - no live video reaches this machine, so no full-resolution preview of a
   phone, and no streaming from here (the vault streams).
 
+The same connection carries the vault's web UI's operations on this node
+(cameras, projects and setlists: node_rpc.py), which is how this node is
+controlled from anywhere else now that remote mode is gone.
+
 `takeloom server` uses this instead of listening for phones itself
 whenever its remote vault says it has a camera hub (`camera_hub` in its
 ping).
@@ -31,6 +35,7 @@ from __future__ import annotations
 import socket
 import threading
 import time
+from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit
 
@@ -76,6 +81,8 @@ class VaultCameraHub:
         self._samples: list[tuple[int, int]] = []  # (rtt, offset)
         self._ping_id = 0
         self._recording_starts: dict[tuple[str, str], int] = {}
+        self.backend = None  # the LocalBackend it's attached to: what the vault's web UI runs operations on
+        self._uploads: dict[str, Path] = {}
         self._live_starts: dict[tuple[str, str], tuple[int, int | None]] = {}
         self._on_preview: Callable[[str, bytes], None] = lambda _d, _j: None
         self._on_change: Callable[[], None] = lambda: None
@@ -204,10 +211,60 @@ class VaultCameraHub:
                     int(msg.get("first_live_pts_ns") or 0), msg.get("first_live_clock_offset_ns"))
         elif kind == "recording_failed":
             self._log(f"Takeloom Camera {msg.get('device_id')} recording failed: {msg.get('error')}")
+        elif kind == "rpc":
+            threading.Thread(target=self._run_rpc, args=(msg,), name="vault-rpc", daemon=True).start()
+        elif kind == "file_chunk":
+            self._file_chunk(msg)
         elif kind == "control":
             if not msg.get("active") and msg.get("by"):
                 self._log(f"Takeloom Camera: {msg['by']} has taken charge of the phones; "
                           "they'll get this machine's settings again when it next records")
+
+    # --- the vault's web UI, running operations here (node_rpc.py) ---
+
+    def _file_chunk(self, msg: dict) -> None:
+        """A file from the browser (a backing track to add), in base64
+        pieces ahead of the operation that uses it ("upload": its id)."""
+        import base64
+        import tempfile
+        upload_id = str(msg.get("id") or "")
+        if not upload_id.isalnum():
+            return
+        with self._lock:
+            path = self._uploads.get(upload_id)
+            if path is None:
+                name = Path(str(msg.get("name") or "upload")).name or "upload"
+                path = Path(tempfile.mkdtemp(prefix="takeloom-upload-")) / name
+                self._uploads[upload_id] = path
+        with open(path, "ab") as f:
+            f.write(base64.b64decode(str(msg.get("data") or "")))
+
+    def _run_rpc(self, msg: dict) -> None:
+        from ..backend import BackendError
+        from ..node_rpc import dispatch
+        args = dict(msg.get("args") or {})
+        upload = None
+        if args.get("upload"):
+            with self._lock:
+                upload = self._uploads.pop(str(args.pop("upload")), None)
+            if upload is None:
+                self._send({"kind": "rpc_result", "id": msg.get("id"), "ok": False, "error": "The upload didn't arrive."})
+                return
+            args["source_path"] = str(upload)
+        try:
+            if self.backend is None:
+                raise BackendError("This recording node isn't ready yet.")
+            result = dispatch(self.backend, str(msg.get("op") or ""), args)
+            reply = {"kind": "rpc_result", "id": msg.get("id"), "ok": True, "result": result}
+        except Exception as e:  # noqa: BLE001 — every failure goes back to the browser
+            reply = {"kind": "rpc_result", "id": msg.get("id"), "ok": False,
+                     "error": str(e) if isinstance(e, BackendError) else f"{type(e).__name__}: {e}"}
+        finally:
+            if upload is not None:
+                import shutil
+                shutil.rmtree(upload.parent, ignore_errors=True)
+        if not self._send(reply):
+            self._log(f"Couldn't send the result of {msg.get('op')} back to the vault")
 
     def _ping_once(self) -> None:
         self._ping_id += 1

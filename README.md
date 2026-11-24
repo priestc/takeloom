@@ -91,8 +91,11 @@ lossless left stays FLAC, since it's the only lossless copy. It needs takeloom-v
 
 The remote vault is a separate small server, `takeloom-vault` (this repo's
 [`vault_server/`](vault_server/README.md) folder), running on the storage machine. It also
-serves a web page for browsing sessions and watching their videos. Takeloom pairs with it
-the same way Remote mode pairs: click **Pair...** next to "Remote vault server" in Studio
+serves a web page for browsing sessions and watching their videos, and for controlling the
+recording nodes connected to it (each phone's lens and which one the stream shows, and every
+node's projects and setlists): there's no remote mode, every takeloom UI runs on its own
+machine's hardware, and the vault's web page is how a node is controlled from anywhere else.
+Takeloom pairs with it: click **Pair...** next to "Remote vault server" in Studio
 Setup (or run `takeloom vault pair tank2.lan`), then approve the code shown on the vault's web
 page. `takeloom vault status` checks the connection. If you have projects from before the vault existed, run
 `takeloom migrate-sessions-to-vault` once to move everything in — safe to re-run,
@@ -104,8 +107,9 @@ already-migrated projects are skipped.
 takeloom ui
 ```
 
-Opens a desktop window (built with tkinter). Currently implements the Studio Setup screen —
-the same fields as `takeloom setup-studio` — with more screens to follow.
+Opens a desktop window (built with tkinter) on this machine's own hardware: Record, Studio
+Setup, Recording Devices, and This Computer (version and development mode). To control
+another machine (the Mac Mini's headless `takeloom server`), use the vault's web page.
 
 ### Creating a Project
 
@@ -197,9 +201,9 @@ with its position on the session's audio timeline, so the streamed video can be
 rebuilt afterwards from each camera's own recording. The program camera is the main
 camera until another is picked.
 
-Like the main window, it drives the Mac Mini's `takeloom server`: `--remote=IP`, an
-"always connect" remote, or a server running on the same machine. The main window
-keeps its video for now.
+Like the main window, it runs on this machine's own cameras. For a headless node (the
+Mac Mini's `takeloom server`), the vault's web page has the same controls on its Cameras
+page. The main window keeps its video for now.
 
 ## Project Structure
 

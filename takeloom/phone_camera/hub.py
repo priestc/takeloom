@@ -16,9 +16,10 @@ with attach_phone_camera_hub(). The backend uses it to:
   session's videos, point the phone at the vault to upload it there
   directly (set_callbacks' upload_redirect) and follow its progress there.
 
-Every connection runs on its own thread, like RemoteServer's. Auth is the
-same LAN-only pairing flow, sharing RemoteServer's token list
-(config.remote_authorized_clients) and its request_authorization callback.
+Only for a node with no remote vault: otherwise the phones connect to the
+vault (vault_hub.py). Every connection runs on its own thread. Auth is a
+LAN-only pairing flow: tokens in config.remote_authorized_clients, approved
+through `takeloom server`'s request_authorization callback.
 """
 
 from __future__ import annotations

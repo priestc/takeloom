@@ -343,5 +343,5 @@ class StreamingFrame(ttk.Frame):
         if error:
             messagebox.showerror("Save failed", error)
             return
-        target = f"remote ({self.app_state.remote_name})" if self.app_state.backend.is_remote() else "local config"
+        target = "local config"
         self.status_var.set(f"Saved to {target}")

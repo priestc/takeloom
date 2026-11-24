@@ -109,9 +109,9 @@ import json
 import socket
 import struct
 
-# REMOTE_SERVER_PORT + 1 — fixed for the same reason that one is (see
-# takeloom/remote/protocol.py): an app and a server that can only ever
-# agree on a port in advance can never drift apart.
+# Fixed: an app and a server that can only ever agree on a port in advance
+# can never drift apart. (The vault serves the phones on this same port,
+# beside its web pages: vault_server's camera_hub.py.)
 CAMERA_SERVER_PORT = 51824
 
 FRAME_JSON = 1

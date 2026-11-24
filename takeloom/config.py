@@ -146,41 +146,6 @@ class Instrument:
         return bool(self.midi_device.strip())
 
 
-@dataclass
-class KnownRemote:
-    """A remote takeloom instance this machine can connect to as a client.
-
-    No port field: every takeloom instance listens on the same fixed
-    remote.protocol.REMOTE_SERVER_PORT, so there's nothing per-remote to
-    remember or drift out of sync."""
-    host: str
-    token: str = ""  # "" until the first successful pairing/authorization
-    label: str = ""  # defaults to the server's reported hostname once paired
-    always_connect: bool = False  # auto-connect to this remote on startup
-
-
-def _dedupe_known_remotes(remotes: list[KnownRemote]) -> list[KnownRemote]:
-    """Collapse multiple entries for the same host into one, keeping whichever
-    fields are actually set. Guards against (and self-heals) a duplicate
-    left behind by an older "Add Remote" that didn't check for an existing
-    entry first — if "Always connect" ever ended up on the token-less
-    duplicate, the paired token lived on the *other* entry and every launch
-    re-triggered pairing, since it was never that entry's token that got
-    updated on approval."""
-    merged: dict[str, KnownRemote] = {}
-    order: list[str] = []
-    for r in remotes:
-        existing = merged.get(r.host)
-        if existing is None:
-            merged[r.host] = r
-            order.append(r.host)
-        else:
-            existing.token = existing.token or r.token
-            existing.label = existing.label or r.label
-            existing.always_connect = existing.always_connect or r.always_connect
-    return [merged[h] for h in order]
-
-
 def _migrate_backup_server(data: dict) -> None:
     """The remote vault used to be an rsync destination ("backup_server":
     "host:/path"); it's a takeloom-vault server on that same host now.
@@ -399,8 +364,10 @@ class StudioConfig:
     development_mode: bool | None = None
     window_width: int = 1100  # remembered main window size, so it reopens as it was left
     window_height: int = 650
-    known_remotes: list[KnownRemote] = field(default_factory=list)  # remotes this machine can connect to
-    remote_authorized_clients: list[AuthorizedClient] = field(default_factory=list)  # clients allowed to connect in
+    # Takeloom Camera phones paired with this machine (phone_camera/hub.py),
+    # for a node with no remote vault: the phones connect to the vault
+    # otherwise. (Named from remote mode, which also paired laptops here.)
+    remote_authorized_clients: list[AuthorizedClient] = field(default_factory=list)
     input_labels: list[InputLabel] = field(default_factory=list)
     instruments: list[Instrument] = field(default_factory=list)
 
@@ -494,8 +461,7 @@ class StudioConfig:
         _migrate_backup_server(data)
         input_labels = [InputLabel(**_filtered(il, InputLabel)) for il in data.pop("input_labels", [])]
         instruments = [Instrument(**_filtered(i, Instrument)) for i in data.pop("instruments", [])]
-        known_remotes_raw = [KnownRemote(**_filtered(r, KnownRemote)) for r in data.pop("known_remotes", [])]
-        known_remotes = _dedupe_known_remotes(known_remotes_raw)
+        data.pop("known_remotes", None)  # remote mode's, gone
         remote_authorized_clients = [
             AuthorizedClient(**_filtered(c, AuthorizedClient)) for c in data.pop("remote_authorized_clients", [])
         ]
@@ -510,7 +476,6 @@ class StudioConfig:
             **filtered,
             input_labels=input_labels,
             instruments=instruments,
-            known_remotes=known_remotes,
             remote_authorized_clients=remote_authorized_clients,
             known_cameras=known_cameras,
             compressor_settings=compressor_settings,

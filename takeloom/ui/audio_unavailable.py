@@ -16,20 +16,13 @@ ERROR_COLOR = "#b00020"
 
 
 def build_audio_unavailable_notice(
-    parent: tk.Misc, is_remote: bool, on_installed: Callable[[], None],
+    parent: tk.Misc, on_installed: Callable[[], None],
 ) -> ttk.Frame:
     """A frame (not yet placed) explaining the empty device list. With a
     local backend missing PortAudio on Debian/Ubuntu, it carries an
     "Install PortAudio" button that calls `on_installed` once it succeeds
     (normally the screen's own Reload Devices)."""
     frame = ttk.Frame(parent)
-    if is_remote:
-        # The devices are the server's; nothing to diagnose or fix from here.
-        text = ("Could not query audio devices on the remote machine "
-                "(sounddevice unavailable there — is PortAudio installed on it?).")
-        ttk.Label(frame, text=text, foreground=ERROR_COLOR, wraplength=520, justify="left").pack(anchor="w")
-        return frame
-
     ttk.Label(
         frame, text=portaudio_support.describe_problem(), foreground=ERROR_COLOR,
         wraplength=520, justify="left",

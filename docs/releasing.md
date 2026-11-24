@@ -8,8 +8,8 @@ in development mode.
 
 A pipx install can follow GitHub's `main` instead of releases: on each
 launch, `takeloom ui` reinstalls from `main` if it's moved, and restarts
-(`update_check.py`). Turn it on or off in the Remote tab's "This
-Computer's Takeloom" section, or with `takeloom dev-mode on|off`. It takes
+(`update_check.py`). Turn it on or off in the This Computer
+tab, or with `takeloom dev-mode on|off`. It takes
 effect the next time the UI opens:
 
 - on, in a release install: switches to `main`;

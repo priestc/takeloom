@@ -1,9 +1,8 @@
 """Record page: pick an instrument + project, choose a track from the
 project's setlist, preview the camera, and record a take.
 
-Everything here goes through `app_state.backend` — in local mode that's a
-`LocalBackend` talking directly to this machine's hardware; in remote mode
-it's a `RemoteBackend` talking over the network to another takeloom instance.
+Everything here goes through `app_state.backend`, a `LocalBackend` talking
+directly to this machine's hardware.
 This frame itself never touches `sounddevice`/`cv2`/`ffmpeg` directly: all
 device/take/camera-preview work happens inside the backend, and this frame
 just reflects whatever state it reports back (via `recording_status`/
@@ -481,10 +480,7 @@ class RecordFrame(ttk.Frame):
             left, text="Video Check", command=self._on_toggle_video_check,
         )
         self.video_check_button.grid(row=row, column=0, columnspan=2, pady=(4, 0))
-        if self.app_state.backend.is_remote():
-            self.video_check_button.state(["disabled"])
-            self.video_check_button.grid_remove()
-        elif not self.config_obj.instruments or not self._project_names:
+        if not self.config_obj.instruments or not self._project_names:
             self.video_check_button.state(["disabled"])
 
     # --- connected instruments panel (top of left column) ---

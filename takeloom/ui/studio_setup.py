@@ -6,9 +6,8 @@ plus the input-label and instrument sections of `setup-recording-devices`
 and `setup-instruments` — grouped here because instruments are just names
 attached to input labels, so editing both together avoids bouncing between
 tabs. Sample rate/buffer/output device/camera/Stream Deck selection stays
-on the Recording Devices tab (see recording_devices.py). Reads/writes
-whichever machine's config `app_state.backend` currently points at — local
-by default, or a connected remote instance's config in remote mode.
+on the Recording Devices tab (see recording_devices.py). Reads/writes this
+machine's own config.
 
 The Instruments table's Detect-all and per-row Train buttons, and the
 Min/Max Hz fields they drove (Backend.start_detect_all/start_instrument_
@@ -757,7 +756,7 @@ class StudioSetupFrame(ttk.Frame):
 
         if not self.input_devices:
             build_audio_unavailable_notice(
-                self.content, self.app_state.backend.is_remote(), self._on_reload_devices,
+                self.content, self._on_reload_devices,
             ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
             row += 1
 
@@ -1060,5 +1059,5 @@ class StudioSetupFrame(ttk.Frame):
         if error:
             messagebox.showerror("Save failed", error)
             return
-        target = f"remote ({self.app_state.remote_name})" if self.app_state.backend.is_remote() else "local config"
+        target = "local config"
         self.status_var.set(f"Saved to {target}")

@@ -2,9 +2,8 @@
 continuous metronome click, watch it back, and dial in the audio/video
 offsets used to correct AV sync on real takes.
 
-Camera-based calibration is local-only (see backend.LocalBackend/RemoteBackend)
-— when app_state.backend is a RemoteBackend, this tab shows a static notice
-instead of the controls. Persistent (like Record/Remote): it can hold a live
+Camera-based calibration runs on this machine's own hardware. Persistent
+(like Record): it can hold a live
 audio stream + ffmpeg camera capture mid-test, which a tab-switch rebuild
 would kill outright.
 """
@@ -53,10 +52,6 @@ class LatencyFrame(ttk.Frame):
 
     def _load(self) -> None:
         backend = self.app_state.backend
-        if backend.is_remote():
-            self.after(0, self._build_remote_notice)
-            return
-
         def worker() -> None:
             try:
                 config = backend.get_config()
@@ -67,16 +62,6 @@ class LatencyFrame(ttk.Frame):
             self.after(0, lambda: self._on_loaded(config, cameras, error))
 
         threading.Thread(target=worker, daemon=True).start()
-
-    def _build_remote_notice(self) -> None:
-        if not self.winfo_exists():
-            return
-        for child in self.winfo_children():
-            child.destroy()
-        ttk.Label(
-            self, text="Camera latency measurement only works on the local instance.",
-            foreground="#b00020",
-        ).pack(anchor="w")
 
     def _on_loaded(self, config: StudioConfig | None, cameras: list[tuple[str, str]], error: str | None) -> None:
         if not self.winfo_exists():

@@ -57,6 +57,9 @@ Browser UI:
                                  data from GET /completed/data)
     POST /completed/mix|preferred-take|trim|export|working-title,  GET /completed/backing/<file>, /completed/export-status
     GET  /clients                paired devices
+    POST /nodes/<id>/rpc         {"op", "args"}: run an operation on a recording node (BROWSER_NODE_OPS;
+                                 camera_hub.py's node_rpc); POST /nodes/<id>/upload?name= a file for one
+    GET  /projects               a node's projects and setlists, edited through it (web.py's projects_page)
     GET  /cameras                connected Takeloom Camera phones and recording nodes (camera_hub.py;
                                  its data from GET /cameras/data, previews /cameras/<id>/preview.jpg)
     GET  /media/<vault path>     file download/stream, with Range support (for <video> seeking)
@@ -76,6 +79,7 @@ import re
 import socket
 import sys
 from http import HTTPStatus
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -129,6 +133,22 @@ class _HTTPError(Exception):
     def __init__(self, status: HTTPStatus, message: str) -> None:
         super().__init__(message)
         self.status = status
+
+
+# What the web UI may run on a recording node (takeloom's node_rpc.py),
+# with how long each may take: its cameras, and its projects and setlists.
+BROWSER_NODE_OPS: dict[str, float] = {
+    "hostname": 10, "is_recording": 10, "session_cameras": 15, "camera_batteries": 15, "camera_versions": 15,
+    "get_program_camera": 10, "set_program_camera": 15, "get_camera_framing": 10, "set_camera_framing": 15,
+    "list_projects": 15, "get_setlist": 30, "save_setlist": 30, "create_project": 30,
+    "get_filter_slot_previews": 60, "add_local_backing_track": 600, "add_youtube_backing_track": 1800,
+    "add_inspiration_track_by_id": 600, "add_song_set_slot": 120, "find_inspiration_track": 60,
+    "search_inspiration_artists": 30, "search_inspiration_titles": 30, "search_inspiration_by_filter": 120,
+}
+# Asked for constantly (polling, typing): not logged.
+_QUIET_NODE_OPS = {"hostname", "is_recording", "session_cameras", "camera_batteries", "camera_versions", "get_program_camera",
+                   "get_camera_framing", "list_projects", "get_setlist", "get_filter_slot_previews",
+                   "search_inspiration_artists", "search_inspiration_titles"}
 
 
 class VaultHTTPServer(ThreadingHTTPServer):
@@ -347,6 +367,10 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._redirect("/")
             if path.startswith("/completed/"):
                 return self._completed_post(path[len("/completed/"):])
+            if m := re.fullmatch(r"/nodes/(\w+)/rpc", path):
+                return self._node_rpc(m.group(1))
+            if m := re.fullmatch(r"/nodes/(\w+)/upload", path):
+                return self._node_upload(m.group(1))
             if m := re.fullmatch(r"/clients/(\w+)/revoke", path):
                 if auth.revoke(m.group(1)):
                     log(f"Paired client {m.group(1)} revoked via web UI from {self.ip}")
@@ -360,6 +384,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._html(web.clients_page(list(auth.clients), auth.pending_requests()))
         if path == "/cameras":
             return self._html(web.cameras_page(auth.pending_requests()))
+        if path == "/projects":
+            return self._html(web.projects_page(auth.pending_requests()))
         if path == "/cameras/data":
             hub = self.server.camera_hub
             return self._json({"cameras": hub.cameras(), "nodes": hub.nodes(), "streams": hub.streams(),
@@ -497,6 +523,37 @@ class _Handler(BaseHTTPRequestHandler):
             log(f"{label} ({self.ip}) deleted: {', '.join(paths)}")
             return self._json({})
         raise _HTTPError(HTTPStatus.NOT_FOUND, f"No API route {method} /api{path}")
+
+    # --- the web UI's operations on a recording node (camera_hub.py's node_rpc) ---
+
+    def _node_rpc(self, node_id: str) -> None:
+        from .camera_hub import RpcError
+        body = self._read_json()
+        op, args = str(body.get("op") or ""), body.get("args") or {}
+        if op not in BROWSER_NODE_OPS or not isinstance(args, dict):
+            return self._json({"error": f"{op!r} can't be run from the web UI"}, HTTPStatus.BAD_REQUEST)
+        try:
+            result = self.server.camera_hub.node_rpc(node_id, op, args, timeout=BROWSER_NODE_OPS[op])
+        except RpcError as e:
+            return self._json({"error": str(e)}, HTTPStatus.BAD_GATEWAY)
+        if op not in _QUIET_NODE_OPS:
+            node = self.server.camera_hub.node(node_id)
+            log(f"Web UI ({self.ip}) ran {op} on {node.label if node else node_id}")
+        return self._json(result)
+
+    def _node_upload(self, node_id: str) -> None:
+        from .camera_hub import RpcError
+        length = int(self.headers.get("Content-Length") or 0)
+        name = Path((parse_qs(urlsplit(self.path).query).get("name") or ["upload"])[0]).name or "upload"
+        if not 0 < length <= 2 * 1024 ** 3:
+            raise _HTTPError(HTTPStatus.BAD_REQUEST, "A file of up to 2 GB is required")
+        self._body_read = True
+        try:
+            upload = self.server.camera_hub.send_file(node_id, name, self.rfile, length)
+        except RpcError as e:
+            self.close_connection = True
+            return self._json({"error": str(e)}, HTTPStatus.BAD_GATEWAY)
+        return self._json({"upload": upload})
 
     # --- the Completed Takes page's changes (completed.py) ---
 

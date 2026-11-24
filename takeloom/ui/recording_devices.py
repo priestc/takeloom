@@ -97,7 +97,7 @@ class RecordingDevicesFrame(ttk.Frame):
 
         if not self.devices:
             build_audio_unavailable_notice(
-                self, self.app_state.backend.is_remote(), self._on_reload_devices,
+                self, self._on_reload_devices,
             ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 8))
             row += 1
 
@@ -320,5 +320,5 @@ class RecordingDevicesFrame(ttk.Frame):
         if error:
             messagebox.showerror("Save failed", error)
             return
-        target = f"remote ({self.app_state.remote_name})" if self.app_state.backend.is_remote() else "local config"
+        target = "local config"
         self.status_var.set(f"Saved to {target}")

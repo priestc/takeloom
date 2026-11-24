@@ -1,46 +1,18 @@
-"""Wire format for remote mode: newline-delimited JSON over a persistent TCP
-socket, one JSON object per line.
+"""The operations the vault's web UI can run on a recording node.
 
-    {"kind": "hello", "token": "...", "client_name": "..."}             client -> server, first line
-    {"kind": "hello_pending"}                                            server -> client, only while waiting
-                                                                          on a human to approve/deny pairing
-    {"kind": "hello_ack", "ok": true, "hostname": "...", "token": "..."} server -> client, only on first-time pairing
-    {"kind": "hello_ack", "ok": true, "hostname": "..."}                 server -> client, known token
-    {"kind": "hello_ack", "ok": false, "error": "..."}                   server -> client, then closes
-
-    {"kind": "request",  "id": 17, "op": "get_config", "args": {}}       client -> server
-    {"kind": "response", "id": 17, "ok": true,  "result": {...}}         server -> client
-    {"kind": "response", "id": 17, "ok": false, "error": "message"}      server -> client
-
-    {"kind": "event", "event": "recording_status", "data": {...}}       server -> client, unsolicited
-    {"kind": "event", "event": "preview_frame", "data": {"camera": "<camera_device>", "jpeg_b64": "..."}}
-
-No TLS. A client with no token (or an unrecognized one) triggers an
-interactive pairing request on the server — the local user approves or
-denies it, and on approval the server mints a token just for that client
-and returns it once in `hello_ack`. Recognized tokens are compared with
-`hmac.compare_digest`. This is a LAN-trust feature (like the remote
-vault server's own pairing — see takeloom/vault_client.py), not meant for
-untrusted networks.
-
-`dispatch()` is the server-side op table: every `Backend` method that's safe
-to expose directly over the wire. `subscribe_preview`/`unsubscribe_preview`
-aren't Backend methods — they manage a per-connection camera-preview
-subscription and are handled directly by the server's connection handler.
+The browser talks to the vault (tank2); the vault passes each operation to
+the node over the node's connection to it (phone_camera/vault_hub.py's
+"rpc" messages; the vault's camera_hub.py relays them), and the node runs
+it here against its own LocalBackend. This op table is what remote mode
+(a takeloom UI controlling another machine's takeloom server) used to
+expose; remote mode is gone, every UI runs on its own machine's hardware,
+and controlling a node from elsewhere is the vault's web UI's job.
 """
 
 from __future__ import annotations
 
-from ..backend import Backend, BackendError, StartRecordingRequest
-from ..config import StudioConfig
-
-# Fixed for every takeloom instance rather than user-configurable: a
-# per-machine editable port let a client's remembered port drift out of sync
-# with whatever the server actually bound (exactly what happened during the
-# jampy -> takeloom rename), silently breaking the pairing until re-added by
-# hand. One constant everyone agrees on in advance eliminates that class of
-# bug entirely.
-REMOTE_SERVER_PORT = 51823
+from .backend import Backend, BackendError, StartRecordingRequest
+from .config import StudioConfig
 
 
 def dispatch(backend: Backend, op: str, args: dict) -> dict:

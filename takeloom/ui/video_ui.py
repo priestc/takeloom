@@ -23,16 +23,14 @@ it'll last at the drain rate the server has learned for that phone
 
 A separate window from the main UI, which is left as it is for now; the
 plan is for this to take over video entirely and the main UI to become
-audio-only. Like the main UI it's usually a remote-control terminal for the
-Mac Mini's `takeloom server`: --remote, an "always connect" remote, or a
-server running on this same machine; otherwise it runs on this machine's own
-cameras (no Takeloom Camera phones: only the server hosts those).
+audio-only. It runs on this machine's own cameras, and the vault's phones
+once its backend connects to them; the headless Mac Mini's cameras are
+controlled from the vault's web UI (its Cameras page) instead.
 """
 
 from __future__ import annotations
 
 import io
-import socket
 import tkinter as tk
 
 from ..backend import BackendError
@@ -412,10 +410,9 @@ class VideoUIFrame(tk.Frame):
 
     def _update_status(self, message: str = "") -> None:
         label = next((lbl for d, lbl in self._cameras if d == self._program), "")
-        where = f"  ·  {self.app_state.remote_name}" if self.app_state.remote_name else ""
         program = f"Program: {label}" if label else "No program camera"
         live = "  ·  streaming" if self._streaming else ""
-        self.status_var.set(program + live + where + (f"  ·  {message}" if message else ""))
+        self.status_var.set(program + live + (f"  ·  {message}" if message else ""))
 
     # --- frames ---
 
@@ -488,14 +485,6 @@ class VideoUIFrame(tk.Frame):
             self._backend.off_event(self._on_backend_event)
 
 
-def _local_server_running(port: int) -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-            return True
-    except OSError:
-        return False
-
-
 def _build_tabs(root: tk.Misc, app_state: AppState) -> None:
     """Cameras (the switcher: VideoUIFrame) and Settings: every video and
     camera setting, moved here from the main window, which is for audio.
@@ -531,11 +520,12 @@ def _build_tabs(root: tk.Misc, app_state: AppState) -> None:
     settings.bind("<<NotebookTabChanged>>", show_section)
 
 
-def run(remote_ip: str | None = None) -> None:
+def run() -> None:
+    """This machine's cameras. (Controlling a recording node's cameras from
+    elsewhere — the headless Mac Mini's, say — is the vault's web UI's
+    Cameras page.)"""
     from pathlib import Path
 
-    from ..remote.protocol import REMOTE_SERVER_PORT
-    from .app import _show_connect_screen
     from .desktop_entry import WM_CLASS_NAME
     from .platform_style import normalize as normalize_platform_style
 
@@ -549,26 +539,5 @@ def run(remote_ip: str | None = None) -> None:
     root.geometry("1280x820")
 
     app_state = AppState()
-
-    def build() -> None:
-        _build_tabs(root, app_state)
-
-    app_state.build_ui = build
-
-    # Which takeloom to drive: --remote, else an "always connect" remote,
-    # else a server on this machine (the Mac Mini), else this machine itself.
-    config = app_state.local_backend.get_config()
-    host = remote_ip
-    if host is None:
-        always = next((r for r in config.known_remotes if r.always_connect), None)
-        if always is not None:
-            host = always.host
-        elif _local_server_running(REMOTE_SERVER_PORT):
-            host = "127.0.0.1"
-    if host is None:
-        build()
-    else:
-        known = next((r for r in config.known_remotes if r.host == host), None)
-        _show_connect_screen(root, app_state, host, REMOTE_SERVER_PORT, known.token if known else "",
-                             on_connected=build, on_run_locally=build)
+    _build_tabs(root, app_state)
     root.mainloop()

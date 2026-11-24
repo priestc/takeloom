@@ -1,11 +1,9 @@
-"""Backend abstraction: everything a UI tab needs, independent of whether the
-data/hardware lives on this machine or a remote takeloom instance.
+"""Backend abstraction: everything a UI tab needs.
 
 `LocalBackend` talks directly to local config, disk, and audio/video
-hardware — this is the historical behavior of the UI tabs, just extracted
-behind an interface. `RemoteBackend` (in `takeloom/remote/backend.py`) adapts
-the same interface over the network to a `RemoteServer` running elsewhere,
-which itself wraps its own `LocalBackend`.
+hardware — the UI tabs' behavior, extracted behind an interface. (It once
+had a remote twin for remote mode; that's gone. The vault's web UI reaches
+a recording node's LocalBackend through node_rpc.py instead.)
 
 Nothing in this module touches tkinter. Callers on the UI side are
 responsible for running blocking calls on a background thread and
@@ -142,9 +140,6 @@ class Backend(ABC):
 
     @abstractmethod
     def hostname(self) -> str: ...
-
-    def is_remote(self) -> bool:
-        return False
 
     def close(self) -> None:
         pass
@@ -1106,7 +1101,7 @@ class Backend(ABC):
         behind (see phone_camera/app_version.py)."""
         ...
 
-    # --- camera latency test (local-only; RemoteBackend refuses) ---
+    # --- camera latency test (this machine's hardware) ---
 
     @abstractmethod
     def start_latency_test(self, instrument_name: str, camera_device: str, play_metronome: bool = True) -> None: ...
@@ -1114,7 +1109,7 @@ class Backend(ABC):
     @abstractmethod
     def stop_latency_test(self) -> None: ...
 
-    # --- instrument train (local-only; RemoteBackend refuses) ---
+    # --- instrument train (this machine's hardware) ---
     #
     # Studio Setup's per-instrument "Train" button — see
     # audio/instrument_classifier.py for the underlying analysis. Opens
@@ -1149,7 +1144,7 @@ class Backend(ABC):
         phase "idle" only when it actually stopped something."""
         ...
 
-    # --- detect-all (local-only; RemoteBackend refuses) ---
+    # --- detect-all (this machine's hardware) ---
     #
     # Studio Setup's single "Detect" button, above the instrument table
     # rather than next to any one row — opens every configured
@@ -1284,7 +1279,7 @@ class Backend(ABC):
         "stopped" only when it actually stopped something."""
         ...
 
-    # --- video check (local-only; RemoteBackend refuses) ---
+    # --- video check (this machine's hardware) ---
 
     @abstractmethod
     def start_video_check(self, req: StartRecordingRequest) -> None:
@@ -2371,6 +2366,8 @@ class LocalBackend(Backend):
         """Use Takeloom Camera phones connected to `hub` (phone_camera/
         hub.py) as cameras — only `takeloom server` runs one."""
         self._phone_hub = hub
+        if hasattr(hub, "backend"):
+            hub.backend = self  # the vault's web UI runs operations here through it (node_rpc.py)
         hub.set_callbacks(
             on_preview=self._on_phone_preview,
             on_change=self._on_phone_cameras_changed,
@@ -5750,7 +5747,7 @@ class LocalBackend(Backend):
                 "video_path": str(active.final_video),
             })
 
-    # --- instrument train (local-only; RemoteBackend refuses) ---
+    # --- instrument train (this machine's hardware) ---
 
     def _open_instrument_test_engine(self, instrument_name: str):
         """Shared setup for start_instrument_train: resolves instrument_
@@ -5925,7 +5922,7 @@ class LocalBackend(Backend):
         )
         engine.set_instrument_sink(tuner.process_block)
 
-    # --- Detect-all (local-only; RemoteBackend refuses) ---
+    # --- Detect-all (this machine's hardware) ---
 
     def _open_channel_classifier_streams(
         self, config: StudioConfig, on_channel_detected, on_channel_active=None, on_channel_stats=None,
@@ -6397,7 +6394,7 @@ class LocalBackend(Backend):
             self._start_monitoring_locked()
         self._emit("auto_detect_status", {"phase": "stopped"})
 
-    # --- Video check (local-only; RemoteBackend refuses) ---
+    # --- Video check (this machine's hardware) ---
 
     def start_video_check(self, req: StartRecordingRequest) -> None:
         with self._record_lock:
@@ -6573,7 +6570,7 @@ class LocalBackend(Backend):
                 "has_video": False,
             })
 
-    # --- continuous multi-track session recording (local-only; RemoteBackend refuses) ---
+    # --- continuous multi-track session recording (this machine's hardware) ---
 
     def _log_session_event(
         self, event_type: str, details: str = "",

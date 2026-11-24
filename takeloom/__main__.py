@@ -257,19 +257,14 @@ def setup_recording_devices() -> None:
 
 
 @main.command(name="ui")
-@click.option(
-    "--remote", "remote_ip", default=None,
-    help="Connect to a remote takeloom instance at this IP/host on launch (e.g. --remote=192.168.1.190). "
-         "Uses a stored token if this host is already a known remote (Remote tab); otherwise this "
-         "triggers a pairing request that the other machine's user must approve.",
-)
-def ui_command(remote_ip: str | None) -> None:
-    """Launch the graphical Takeloom interface."""
+def ui_command() -> None:
+    """Launch the graphical Takeloom interface, on this machine's own
+    hardware. (To control another machine, use the vault's web UI.)"""
     from . import update_check
     update_check.check_and_restart(StudioConfig.load(), log=click.echo)
 
     from .ui.app import run
-    run(remote_ip=remote_ip)
+    run()
 
 
 @main.command(name="camera-testflight")
@@ -441,18 +436,13 @@ def install_launcher_command() -> None:
 
 
 @main.command(name="video-ui")
-@click.option(
-    "--remote", "remote_ip", default=None,
-    help="Connect to the takeloom server at this IP/host (e.g. --remote=192.168.1.200). Default: an "
-         "\"always connect\" remote, else a server running on this machine, else this machine itself.",
-)
-def video_ui_command(remote_ip: str | None) -> None:
+def video_ui_command() -> None:
     """Open the video window: every camera along the top, the program
     ("out") camera large in the middle. Click a camera (or press its number)
     to make it the program camera, which the live stream shows; each switch
     during a session is logged so the stream can be rebuilt."""
     from .ui.video_ui import run
-    run(remote_ip=remote_ip)
+    run()
 
 
 @main.command(name="detect-test")
@@ -460,9 +450,7 @@ def detect_test_command() -> None:
     """Open a standalone window listing every configured instrument and
     recording device, and light up an instrument the moment it's heard
     playing on its own input — a hardware/cabling check independent of
-    the main app. Local hardware only, same as the detect-all mechanism
-    it's built on (see Backend.start_detect_all's docstring) — there's no
-    --remote option."""
+    the main app."""
     from . import update_check
     update_check.check_and_restart(StudioConfig.load(), log=click.echo)
 
@@ -476,23 +464,20 @@ def detect_test_command() -> None:
     help="Strip ANSI color codes from server log output.",
 )
 def server_command(disable_color: bool) -> None:
-    """Run the remote-control server. This is the only way to host a
-    takeloom instance for other clients to connect to — the GUI's Remote tab
-    is connect-only. Always listens on the fixed remote.protocol.
-    REMOTE_SERVER_PORT (not configurable — see that module for why), and
-    only accepts connections from the local network.
-    """
+    """Run headless as a recording node, driven by the Stream Deck (the
+    Mac Mini's launchd service). It's controlled from elsewhere through
+    the vault's web UI: the node keeps a connection to the vault
+    (phone_camera/vault_hub.py), which carries the phones and the web UI's
+    operations on this machine (node_rpc.py)."""
     from .backend import BackendError, LocalBackend, StartRecordingRequest
     from .recording_driver import RecordingDeckDriver
-    from .remote.protocol import REMOTE_SERVER_PORT
-    from .remote.server import RemoteServer
     from .rig_watcher import RigWatcher
 
     def log(msg: str, err: bool = False) -> None:
         # Errors print in red so they stand out in a scrolling headless log;
         # everything else stays the terminal's default color. Detected by the
         # explicit `err` flag or an "error" substring, since most log lines
-        # here (and the ones threaded through RemoteServer/RecordingDeckDriver,
+        # here (and the ones threaded through RecordingDeckDriver,
         # whose `log` callback only takes a message) don't carry a separate
         # severity of their own.
         #
@@ -510,19 +495,18 @@ def server_command(disable_color: bool) -> None:
             click.secho(stamped, fg="red" if is_error else None, err=err)
 
     backend = LocalBackend()
-    listen_port = REMOTE_SERVER_PORT
 
     # Deliberately no sleep_guard.track_backend(backend) here: a headless
     # server machine should be free to let its own screensaver/sleep kick
     # in regardless of recording state — only a UI actually being watched
-    # (local or a Remote client) has a reason to hold it off. See
+    # has a reason to hold it off. See
     # AppState.recording_active, which does that for the UI side.
 
     def on_streaming_event(event: str, data: dict) -> None:
         # The only backend event this headless console prints on its own
         # (everything else is either driven by StreamDeck key presses,
         # which RecordingDeckDriver already narrates via `log`, or is
-        # display-only state a connected Remote client would show). A
+        # display-only state). A
         # streaming session has no on-screen status anywhere in this
         # context otherwise, so without this, a stream starting, YouTube
         # accepting (or rejecting) the title API calls, and the stream
@@ -557,14 +541,7 @@ def server_command(disable_color: bool) -> None:
             log("Cannot prompt for approval (no interactive terminal attached) — denying.", err=True)
             return False
 
-    server = RemoteServer(backend, listen_port, request_authorization, log=log)
-    try:
-        server.start()
-    except OSError as e:
-        log(f"Error: could not start server: {e}", err=True)
-        raise SystemExit(1)
-
-    log(f"takeloom server listening on port {listen_port} (host: {backend.hostname()}, ip: {backend.ip_address()})")
+    log(f"takeloom server running (host: {backend.hostname()}, ip: {backend.ip_address()})")
 
     # Takeloom Camera phones (camera_app/): they connect to the remote
     # vault, which has a camera hub (vault_server's camera_hub.py) — this
@@ -648,17 +625,10 @@ def server_command(disable_color: bool) -> None:
         )
 
     def _open_video_check_result(path: Path, has_video: bool) -> None:
-        # Always open locally — the server is often where the real
-        # monitoring (headphones/speakers) actually lives, so whoever's
-        # sitting at it needs to review the result too, not just whoever's
-        # on a connected Remote client. Also send it to any connected Remote
-        # client (chunked, since it can be tens of MB) so whichever machine
-        # an operator is actually sitting at can review it in its own
-        # native player.
+        # Opened here: the server is where the real monitoring
+        # (headphones/speakers) lives, so whoever's sitting at it reviews it.
         from .video.capture import open_in_default_player
         open_in_default_player(path)
-        if server.client_count > 0:
-            server.broadcast_file("video_check_result", path, extra={"has_video": has_video})
 
     driver = RecordingDeckDriver(
         backend, resolve_start_request=_resolve_headless_request,
@@ -700,7 +670,6 @@ def server_command(disable_color: bool) -> None:
     finally:
         log("\nStopping server...")
         watcher.stop()
-        server.stop()
         driver.disconnect()
         try:
             if backend.is_session_active():
