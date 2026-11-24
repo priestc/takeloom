@@ -42,6 +42,19 @@ from .video.live_footer import footer_text as live_footer_text
 from .audio.sync_click import VERSION as SYNC_CLICK_VERSION
 
 
+def _sounddevice_unavailable_message(e: Exception) -> str:
+    """BackendError text for a failed `import sounddevice` — with the
+    install command when it's PortAudio that's missing (see
+    portaudio_support.py)."""
+    message = f"sounddevice unavailable: {e}"
+    if "portaudio" in str(e).lower():
+        from .portaudio_support import install_command
+        command = install_command()
+        if command:
+            message += f"\nInstall PortAudio with:  {command}"
+    return message
+
+
 class BackendError(Exception):
     """Raised by any Backend method on failure. Message is safe to show to the user."""
 
@@ -5567,7 +5580,7 @@ class LocalBackend(Backend):
             try:
                 import sounddevice as sd
             except Exception as e:
-                raise BackendError(f"sounddevice unavailable: {e}") from e
+                raise BackendError(_sounddevice_unavailable_message(e)) from e
 
             from .audio.devices import resolve_device
             out_dev = resolve_device(sd, config.output_device, "output")
@@ -5724,7 +5737,7 @@ class LocalBackend(Backend):
         try:
             import sounddevice as sd
         except Exception as e:
-            raise BackendError(f"sounddevice unavailable: {e}") from e
+            raise BackendError(_sounddevice_unavailable_message(e)) from e
 
         from .audio.devices import resolve_device
         in_dev = resolve_device(sd, input_info.device, "input")
@@ -5975,7 +5988,7 @@ class LocalBackend(Backend):
             import numpy as np
             import sounddevice as sd
         except Exception as e:
-            raise BackendError(f"sounddevice unavailable: {e}") from e
+            raise BackendError(_sounddevice_unavailable_message(e)) from e
         from .audio.devices import match_device_rate_settings, resolve_device
 
         midi_instruments = [inst for inst in config.instruments if inst.is_midi]
@@ -6383,7 +6396,7 @@ class LocalBackend(Backend):
             try:
                 import sounddevice as sd  # noqa: F401 — just confirms it's importable before real work starts
             except Exception as e:
-                raise BackendError(f"sounddevice unavailable: {e}") from e
+                raise BackendError(_sounddevice_unavailable_message(e)) from e
 
             # Video Check is played the same way a real take is, so it
             # always runs Recording Monitoring (zero-latency hardware
@@ -6679,7 +6692,7 @@ class LocalBackend(Backend):
         try:
             import sounddevice as sd  # noqa: F401 — just confirms it's importable before real work starts
         except Exception as e:
-            raise BackendError(f"sounddevice unavailable: {e}") from e
+            raise BackendError(_sounddevice_unavailable_message(e)) from e
 
         # Only a real recording session captures raw MIDI alongside the
         # audio — see audio/midi_log.py and _end_session below. None for

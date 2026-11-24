@@ -34,6 +34,7 @@ from ..audio.pitch import TUNING_PRESETS_BY_LABEL, format_tuning, parse_tuning
 from ..backend import BackendError
 from ..config import INSTRUMENT_LABELS, Instrument, InputLabel, StudioConfig
 from .app_state import AppState
+from .audio_unavailable import build_audio_unavailable_notice
 from .instrument_colors import make_label_badge
 
 FIELDS = [
@@ -755,9 +756,8 @@ class StudioSetupFrame(ttk.Frame):
         row += 1
 
         if not self.input_devices:
-            ttk.Label(
-                self.content, text="Could not query audio devices (sounddevice unavailable).",
-                foreground="#b00020",
+            build_audio_unavailable_notice(
+                self.content, self.app_state.backend.is_remote(), self._on_reload_devices,
             ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
             row += 1
 

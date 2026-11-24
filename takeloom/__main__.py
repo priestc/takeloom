@@ -104,7 +104,8 @@ def setup_recording_devices() -> None:
             click.echo(f"  [{i}] {d['name']}  (in={ins}, out={outs})")
         click.echo()
     except Exception:
-        click.echo("Could not query audio devices (sounddevice unavailable).\n")
+        from .portaudio_support import describe_problem
+        click.echo(describe_problem() + "\n")
 
     # Sample rate
     sr_choices = [str(r) for r in VALID_SAMPLE_RATES]

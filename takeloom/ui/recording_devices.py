@@ -17,6 +17,7 @@ from tkinter import messagebox, ttk
 from ..backend import BackendError
 from ..config import StudioConfig, VALID_BUFFER_SIZES, VALID_SAMPLE_RATES
 from .app_state import AppState
+from .audio_unavailable import build_audio_unavailable_notice
 
 
 class RecordingDevicesFrame(ttk.Frame):
@@ -95,9 +96,8 @@ class RecordingDevicesFrame(ttk.Frame):
         row += 1
 
         if not self.devices:
-            ttk.Label(
-                self, text="Could not query audio devices (sounddevice unavailable).",
-                foreground="#b00020",
+            build_audio_unavailable_notice(
+                self, self.app_state.backend.is_remote(), self._on_reload_devices,
             ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 8))
             row += 1
 

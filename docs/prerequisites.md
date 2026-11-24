@@ -18,7 +18,7 @@ python3 --version
 
 Required by `sounddevice` for real-time audio input/output (recording and playback).
 
-Without it, commands like `setup-recording-devices` and `start-session` will fail with "sounddevice unavailable" or an `OSError` about missing `libportaudio`.
+Without it, Takeloom can't list or open audio devices; it says so and shows the install command (on Debian/Ubuntu, Recording Devices and Studio Setup also offer an **Install PortAudio** button, which runs `apt-get install libportaudio2` through a `pkexec` password prompt). The `.deb` package already depends on it — this only comes up for pip/pipx installs.
 
 ### libsndfile
 
