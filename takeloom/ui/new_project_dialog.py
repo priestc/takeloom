@@ -18,7 +18,7 @@ class NewProjectDialog(tk.Toplevel):
 
     def __init__(self, master: tk.Misc, backend: Backend, on_created: Callable[[str], None]) -> None:
         super().__init__(master)
-        self.title("New Project")
+        self.title("New Setlist")
         self.resizable(False, False)
         self.transient(master)
 
@@ -28,7 +28,7 @@ class NewProjectDialog(tk.Toplevel):
         frame = ttk.Frame(self, padding=16)
         frame.pack(fill="both", expand=True)
 
-        ttk.Label(frame, text="Project name").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(frame, text="Setlist name").grid(row=0, column=0, sticky="w", padx=(0, 8))
         self.name_var = tk.StringVar()
         self.name_entry = ttk.Entry(frame, textvariable=self.name_var, width=40)
         self.name_entry.grid(row=0, column=1, sticky="w")

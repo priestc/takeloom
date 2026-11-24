@@ -55,11 +55,12 @@ Browser UI:
     GET  /sessions/<name>        one session: video, songs, files
     GET  /completed              every completed take, by song, with a mixer (completed.py; its
                                  data from GET /completed/data)
+    GET  /completed/titled       songs with takes and a working title (for "add by working title")
     POST /completed/mix|preferred-take|trim|export|working-title,  GET /completed/backing/<file>, /completed/export-status
     GET  /clients                paired devices
     POST /nodes/<id>/rpc         {"op", "args"}: run an operation on a recording node (BROWSER_NODE_OPS;
                                  camera_hub.py's node_rpc); POST /nodes/<id>/upload?name= a file for one
-    GET  /projects               a node's projects and setlists, edited through it (web.py's projects_page)
+    GET  /setlists               a node's setlists, edited through it (web.py's projects_page; /projects redirects)
     GET  /cameras                connected Takeloom Camera phones and recording nodes (camera_hub.py;
                                  its data from GET /cameras/data, previews /cameras/<id>/preview.jpg)
     GET  /media/<vault path>     file download/stream, with Range support (for <video> seeking)
@@ -384,8 +385,10 @@ class _Handler(BaseHTTPRequestHandler):
             return self._html(web.clients_page(list(auth.clients), auth.pending_requests()))
         if path == "/cameras":
             return self._html(web.cameras_page(auth.pending_requests()))
-        if path == "/projects":
+        if path == "/setlists":
             return self._html(web.projects_page(auth.pending_requests()))
+        if path == "/projects":
+            return self._redirect("/setlists")  # its old name
         if path == "/cameras/data":
             hub = self.server.camera_hub
             return self._json({"cameras": hub.cameras(), "nodes": hub.nodes(), "streams": hub.streams(),
@@ -397,6 +400,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(HTTPStatus.OK, jpeg, "image/jpeg", {"Cache-Control": "no-store"})
         if path == "/completed":
             return self._html(web.completed_page(auth.pending_requests()))
+        if path == "/completed/titled":
+            return self._json({"songs": self.server.library.titled_songs()})
         if path == "/completed/data":
             songs, projects = self.server.library.songs()
             return self._json({"songs": songs, "projects": projects, "pending": len(self.server.library.edits())})

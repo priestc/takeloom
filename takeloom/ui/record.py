@@ -400,7 +400,7 @@ class RecordFrame(ttk.Frame):
         default_project = self.config_obj.last_selected_project
         if default_project not in self._project_names:
             default_project = self._project_names[0] if self._project_names else ""
-        ttk.Label(left, text="Project").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Label(left, text="Setlist").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
         project_row = ttk.Frame(left)
         project_row.grid(row=row, column=1, sticky="w")
         self.project_var = tk.StringVar(value=default_project)
@@ -409,7 +409,7 @@ class RecordFrame(ttk.Frame):
         )
         self.project_combo.pack(side="left")
         self.project_combo.bind("<<ComboboxSelected>>", self._on_project_change)
-        ttk.Button(project_row, text="+ New Project", command=self._on_new_project).pack(side="left", padx=(6, 0))
+        ttk.Button(project_row, text="+ New Setlist", command=self._on_new_project).pack(side="left", padx=(6, 0))
         row += 1
 
         if not self.config_obj.instruments:
@@ -886,7 +886,7 @@ class RecordFrame(ttk.Frame):
 
     def _on_add_to_setlist(self) -> None:
         if not self._project_name:
-            messagebox.showerror("Cannot add", "Select a project first.")
+            messagebox.showerror("Cannot add", "Select a setlist first.")
             return
         AddToSetlistChooser(self, self.app_state.backend, self._project_name, self._refresh_setlist_from_server)
 
@@ -910,7 +910,7 @@ class RecordFrame(ttk.Frame):
 
     def _on_setlist_loaded(self, data: dict | None, error: str | None) -> None:
         if error or data is None:
-            self.selection_var.set(f"Could not load project: {error}")
+            self.selection_var.set(f"Could not load setlist: {error}")
             self._hide_loading_overlay()
             return
         self._setlist = Setlist.from_dict(data)
@@ -1567,7 +1567,7 @@ class RecordFrame(ttk.Frame):
             messagebox.showerror("Cannot start", "Still listening for an instrument — play something first.")
             return None
         if not self._project_name:
-            messagebox.showerror("Cannot start", "Select a project first.")
+            messagebox.showerror("Cannot start", "Select a setlist first.")
             return None
 
         if self._selected_track_index is not None:

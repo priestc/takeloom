@@ -144,7 +144,7 @@ class StreamingFrame(ttk.Frame):
         ttk.Label(
             self,
             text="Connect a YouTube account to have each session's stream titled automatically with the "
-                 "studio, musician, project, and date. RTMP (the stream key above) can't carry a title on its "
+                 "studio, musician, setlist, and date. RTMP (the stream key above) can't carry a title on its "
                  "own, so this needs its own Google sign-in: create an OAuth Client ID (type \"Desktop app\") in "
                  "the Google Cloud Console for a project with the YouTube Data API v3 enabled, then paste its "
                  "Client ID and Secret below.",
@@ -182,7 +182,7 @@ class StreamingFrame(ttk.Frame):
 
         ttk.Label(
             self,
-            text="Placeholders: {date}, {studio}, {studio-location}, {musician}, {project}, {instrument name}.",
+            text="Placeholders: {date}, {studio}, {studio-location}, {musician}, {setlist}, {instrument name}.",
             foreground="#666666",
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 10))
         row += 1

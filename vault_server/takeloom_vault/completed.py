@@ -324,6 +324,30 @@ class Library:
                 names_.append(entry["name"])
         return out, projects
 
+    def titled_songs(self) -> list[dict]:
+        """Every song with a completed take and a working title, for adding
+        to another setlist ("add by working title" on the Setlists page):
+        {"name", "working_title", "instruments", "entry"} — `entry` its
+        setlist entry (backing track, preferred takes, trim; queued edits
+        applied), copied as is: takes are filed by the song's name, so the
+        copy keeps them, and stays the same song everywhere."""
+        titles = working_titles(self.vault.root)
+        if not titles:
+            return []
+        found: dict[str, dict] = {}
+        for r in self._records():
+            entry = r["entry"]
+            name = entry["name"]
+            takes = {label: t for label, t in (entry.get("preferred_takes") or {}).items()
+                     if isinstance(t, dict) and t.get("filename")}
+            if name not in titles or not takes or entry.get("is_inspiration_filter"):
+                continue
+            # The record with the most instruments, if it's in several.
+            if name not in found or len(takes) > len(found[name]["instruments"]):
+                found[name] = {"name": name, "working_title": titles[name], "instruments": sorted(takes),
+                               "entry": entry}
+        return sorted(found.values(), key=lambda s: s["working_title"].lower())
+
     # --- queued setlist edits ---
 
     def edits(self) -> list[dict]:

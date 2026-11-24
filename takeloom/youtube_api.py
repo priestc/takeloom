@@ -322,7 +322,8 @@ def render_stream_template(
         "{studio}": studio,
         "{studio-location}": studio_location,
         "{musician}": musician,
-        "{project}": project,
+        "{setlist}": project,
+        "{project}": project,  # {setlist}'s old name
         "{instrument name}": instrument,
     }
     result = template

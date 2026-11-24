@@ -37,7 +37,7 @@ class ThisComputerFrame(ttk.Frame):
         ttk.Label(
             frame, foreground="#666666", wraplength=560, justify="left",
             text="To control another machine (the Mac Mini's takeloom server, say), use the vault's web page: "
-                 "its Cameras and Projects pages reach every recording node connected to the vault.",
+                 "its Cameras and Setlists pages reach every recording node connected to the vault.",
         ).pack(anchor="w", pady=(8, 0))
 
         if not update_check.development_mode_available():

@@ -90,7 +90,8 @@ def render_template(template: str, data: dict) -> str:
         when = started
     values = {
         "{date}": when, "{studio}": data.get("studio_name", ""), "{studio-location}": data.get("studio_location", ""),
-        "{musician}": data.get("musician", ""), "{project}": data.get("project", ""),
+        "{musician}": data.get("musician", ""), "{setlist}": data.get("project", ""),
+        "{project}": data.get("project", ""),  # {setlist}'s old name
         "{instrument name}": data.get("instrument", ""),
     }
     for placeholder, value in values.items():

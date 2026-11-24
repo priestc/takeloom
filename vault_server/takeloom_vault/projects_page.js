@@ -1,5 +1,5 @@
-// The Projects page (web.py's projects_page): a recording node's projects
-// and setlists, edited through the vault (POST /nodes/<id>/rpc, which runs
+// The Setlists page (web.py's projects_page): a recording node's setlists
+// (a "project" in the code is a setlist file), edited through the vault (POST /nodes/<id>/rpc, which runs
 // takeloom's node_rpc.py there). The setlist is the node's: every change
 // is saved straight back to it (save_setlist), as the Record tab does.
 (function () {
@@ -56,7 +56,7 @@
       project = j.projects.indexOf(keep) >= 0 ? keep : (j.projects[0] || "");
       sel.value = project;
       return loadSetlist();
-    }).catch(function (e) { status("Couldn't list the projects: " + e.message, true); });
+    }).catch(function (e) { status("Couldn't list the setlists: " + e.message, true); });
   }
   function loadSetlist() {
     if (!project) { setlist = null; render(); return Promise.resolve(); }
@@ -76,7 +76,8 @@
     }).then(function () {
       busy = false; status("Saved."); setTimeout(function () { if (!busy) status(""); }, 2000);
       if (refreshPreviews) rpc("get_filter_slot_previews", {project_name: project}).then(function (p) { previews = p.previews || []; render(); }, function () {});
-    }).catch(function (e) { busy = false; status("Not saved: " + e.message, true); loadSetlist(); });
+      return true;
+    }).catch(function (e) { busy = false; status("Not saved: " + e.message, true); loadSetlist(); return false; });
   }
 
   // --- the setlist ---
@@ -84,6 +85,7 @@
   function render() {
     var body = $("pj-tracks");
     body.innerHTML = "";
+    if (titled.length) renderTitled();
     if (!setlist) return;
     var tracks = setlist.tracks || [];
     $("pj-count").textContent = tracks.length + " track" + (tracks.length === 1 ? "" : "s");
@@ -243,8 +245,52 @@
     rpc("add_song_set_slot", {project_name: project, label: label, songs: songs}).then(added("the song set"), failed);
   }
 
+  // By working title: a song that already has completed takes and a
+  // working title (GET /completed/titled), added as the same setlist entry
+  // it is elsewhere, backing track and takes included.
+  var titled = [];
+  function loadTitled() {
+    fetch("/completed/titled").then(function (r) { return r.json(); }).then(function (j) {
+      titled = j.songs || [];
+      renderTitled();
+    }).catch(function (e) { $("wt-list").textContent = "Couldn't load them: " + e.message; });
+  }
+  function renderTitled() {
+    var box = $("wt-list"), f = $("wt-filter").value.trim().toLowerCase();
+    var have = {};
+    ((setlist && setlist.tracks) || []).forEach(function (t) { have[t.name] = 1; });
+    box.innerHTML = "";
+    var shown = titled.filter(function (s) {
+      return !f || s.working_title.toLowerCase().indexOf(f) >= 0 || s.name.toLowerCase().indexOf(f) >= 0;
+    });
+    if (!titled.length) { box.innerHTML = "<p class='muted small'>No song has both completed takes and a working title yet.</p>"; return; }
+    shown.forEach(function (s) {
+      var already = !!have[s.name];
+      var label = el("label", {"class": "small", style: "display:block" + (already ? ";opacity:.5" : "")}, [
+        el("input", {type: "checkbox", "data-name": s.name}), " ", el("b", {text: s.working_title}),
+        el("span", {"class": "muted", text: "  " + (s.name !== s.working_title ? s.name + " · " : "") +
+          s.instruments.join(", ") + (already ? " · already in this setlist" : "")})]);
+      if (already) label.querySelector("input").disabled = true;
+      box.appendChild(label);
+    });
+  }
+  function addTitled() {
+    var names = Array.prototype.slice.call($("wt-list").querySelectorAll("input:checked")).map(function (x) { return x.getAttribute("data-name"); });
+    if (!names.length) { status("Tick at least one song.", true); return; }
+    if (!setlist) return;
+    var have = {};
+    setlist.tracks.forEach(function (t) { have[t.name] = 1; });
+    var added = 0;
+    names.forEach(function (n) {
+      var s = titled.find(function (x) { return x.name === n; });
+      if (s && !have[n]) { setlist.tracks.push(JSON.parse(JSON.stringify(s.entry))); have[n] = 1; added++; }
+    });
+    render(); renderTitled();
+    save().then(function (ok) { if (ok && added) status("Added " + added + " song" + (added === 1 ? "" : "s") + "."); });
+  }
+
   function newProject() {
-    var name = (prompt("New project's name:") || "").trim();
+    var name = (prompt("New setlist's name:") || "").trim();
     if (!name) return;
     rpc("create_project", {name: name}).then(function (j) { project = j.name || name; return loadProjects(); }, function (e) { status("Couldn't create it: " + e.message, true); });
   }
@@ -261,10 +307,13 @@
   $("insp-go").addEventListener("click", addInspiration);
   $("ss-search").addEventListener("click", searchSet);
   $("ss-go").addEventListener("click", addSet);
+  $("wt-go").addEventListener("click", addTitled);
+  $("wt-filter").addEventListener("input", renderTitled);
   Array.prototype.forEach.call(document.querySelectorAll(".tabs button"), function (b) {
     b.addEventListener("click", function () {
       Array.prototype.forEach.call(document.querySelectorAll(".tabs button"), function (x) { x.classList.toggle("on", x === b); });
       Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (t) { t.style.display = t.id === b.getAttribute("data-tab") ? "" : "none"; });
+      if (b.getAttribute("data-tab") === "t-wt") loadTitled();
     });
   });
   loadNodes().then(loadProjects);

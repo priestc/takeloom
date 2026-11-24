@@ -82,7 +82,7 @@ def page(title: str, body: str) -> str:
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         f"<title>{escape(title)} · Takeloom Vault</title><style>{_CSS}</style></head><body>"
         "<header><a class='brand' href='/'>Takeloom Vault</a><a href='/'>Sessions</a>"
-        "<a href='/completed'>Completed takes</a><a href='/projects'>Projects</a><a href='/cameras'>Cameras</a><a href='/clients'>Paired devices</a></header>"
+        "<a href='/completed'>Completed takes</a><a href='/setlists'>Setlists</a><a href='/cameras'>Cameras</a><a href='/clients'>Paired devices</a></header>"
         f"{body}</body></html>"
     )
 
@@ -345,7 +345,7 @@ def sessions_page(vault: Vault, logs: dict[str, dict], pending: list[PairingRequ
             )
         )
     table = (
-        "<table><tr><th>Date</th><th>Project</th><th>Instrument</th><th>Length</th><th>Songs</th>"
+        "<table><tr><th>Date</th><th>Setlist</th><th>Instrument</th><th>Length</th><th>Songs</th>"
         "<th>Takes</th><th>Video</th><th>Size</th></tr>" + "".join(rows) + "</table>"
         if rows else "<p class='muted'>No sessions in the vault yet.</p>"
     )
@@ -593,7 +593,7 @@ def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor
     pub = {
         "connected": creds is not None,
         "title": published.get("title") or youtube.default_title(
-            data or {}, (creds or {}).get("title_template") or "{date} * {musician} * {project}",
+            data or {}, (creds or {}).get("title_template") or "{date} * {musician} * {setlist}",
             working_titles(editor.vault.root)),
         "description": youtube.render_template((creds or {}).get("description_template") or "", data or {}),
         "privacy": published.get("asked_privacy") or (creds or {}).get("visibility") or "unlisted",
@@ -858,7 +858,7 @@ def completed_page(pending: list[PairingRequest]) -> str:
         "Click a song to load its takes into the mixer. <span id='ct-pending'></span></p>"
         "<div class='ct'><div id='mixer'></div><div>"
         "<div class='filters'><label>Filter by title <input id='ct-title' type='search'></label>"
-        "<label>Project <select id='ct-project'><option value=''>All projects</option></select></label></div>"
+        "<label>Setlist <select id='ct-project'><option value=''>All setlists</option></select></label></div>"
         "<table><thead><tr><th>Name</th><th>Working title</th><th>Backing source</th><th>Instruments</th></tr></thead>"
         "<tbody id='ct-songs'></tbody></table></div></div>"
         f"<script>{_COMPLETED_JS.read_text()}</script>"
@@ -877,22 +877,24 @@ def _node_picker(prefix: str) -> str:
 
 
 def projects_page(pending: list[PairingRequest]) -> str:
-    """A recording node's projects and setlists, edited through the vault
-    (camera_hub.py's node_rpc; its workings are projects_page.js)."""
+    """A recording node's setlists (called projects in the code: a project
+    is a setlist file), edited through the vault (camera_hub.py's
+    node_rpc; its workings are projects_page.js)."""
     body = (
         _pairing_banner(pending)
-        + "<h1>Projects <button id='pj-reload'>⟳ Reload</button></h1>"
-        "<p class='muted small'>Each recording node keeps its own projects and setlists; they're edited on it, through "
+        + "<h1>Setlists <button id='pj-reload'>⟳ Reload</button></h1>"
+        "<p class='muted small'>Each recording node keeps its own setlists; they're edited on it, through "
         "the vault. <span id='pj-status'></span></p>"
         + _node_picker("pj") +
         "<div id='pj-main'>"
-        "<p>Project <select id='pj-project'></select> <button id='pj-new'>+ New project</button> "
+        "<p>Setlist <select id='pj-project'></select> <button id='pj-new'>+ New setlist</button> "
         "<span id='pj-count' class='muted small'></span></p>"
         "<table><thead><tr><th>#</th><th>Song</th><th>Source</th><th>Length</th><th></th></tr></thead>"
         "<tbody id='pj-tracks'></tbody></table>"
         "<h2>Add to the setlist</h2>"
         "<div class='tabs'><button class='on' data-tab='t-file'>File</button><button data-tab='t-yt'>YouTube</button>"
-        "<button data-tab='t-insp'>Inspiration</button><button data-tab='t-set'>Song set</button></div>"
+        "<button data-tab='t-insp'>Inspiration</button><button data-tab='t-set'>Song set</button>"
+        "<button data-tab='t-wt'>By working title</button></div>"
         "<div class='tab' id='t-file'><p>An audio or video file (a video's sound is used). "
         "<input type='file' id='add-file' accept='audio/*,video/*'> "
         "Name <input id='add-file-name' placeholder='(the file name)'> <button class='ok' id='add-file-go'>Add</button></p></div>"
@@ -912,10 +914,15 @@ def projects_page(pending: list[PairingRequest]) -> str:
         "<div id='ss-results' style='max-height:20em;overflow:auto'></div>"
         "<p>Add the ticked songs to <select id='ss-target'></select> named <input id='ss-label'> "
         "<button class='ok' id='ss-go'>Add</button></p></div>"
+        "<div class='tab' id='t-wt' style='display:none'><p class='muted small'>Songs that already have completed "
+        "takes and a working title (Completed takes page). Each is added as the same song, with its backing track "
+        "and takes. <input id='wt-filter' type='search' placeholder='Filter'></p>"
+        "<div id='wt-list' style='max-height:24em;overflow:auto'></div>"
+        "<p><button class='ok' id='wt-go'>Add the ticked songs</button></p></div>"
         "</div>"
         f"<script>{_PROJECTS_JS.read_text()}</script>"
     )
-    return page("Projects", body)
+    return page("Setlists", body)
 
 
 def cameras_page(pending: list[PairingRequest]) -> str:

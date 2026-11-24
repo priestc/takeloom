@@ -10,7 +10,7 @@ Takeloom handles continuous audio recording, playback mixing, session logging, a
 
 - Python 3.9+
 - PortAudio, libsndfile, ffmpeg (system libraries)
-- yt-dlp (optional, system binary) — only needed to add YouTube URLs as backing tracks from the New Project dialog
+- yt-dlp (optional, system binary) — only needed to add YouTube URLs as backing tracks from Add to Setlist (or the vault's Setlists page)
 
 See [Prerequisites](docs/prerequisites.md) for install instructions for each operating system.
 
@@ -93,7 +93,7 @@ The remote vault is a separate small server, `takeloom-vault` (this repo's
 [`vault_server/`](vault_server/README.md) folder), running on the storage machine. It also
 serves a web page for browsing sessions and watching their videos, and for controlling the
 recording nodes connected to it (each phone's lens and which one the stream shows, and every
-node's projects and setlists): there's no remote mode, every takeloom UI runs on its own
+node's setlists — "project" in the code and file layout is the same thing: a setlist file): there's no remote mode, every takeloom UI runs on its own
 machine's hardware, and the vault's web page is how a node is controlled from anywhere else.
 Takeloom pairs with it: click **Pair...** next to "Remote vault server" in Studio
 Setup (or run `takeloom vault pair tank2.lan`), then approve the code shown on the vault's web

@@ -335,7 +335,7 @@ class StudioConfig:
     youtube_oauth_refresh_token: str = ""  # "" means not connected
     # Filled in per session by render_stream_template() — see its docstring
     # for the available {placeholder} names.
-    youtube_title_template: str = "{date} * {musician} * {project}"
+    youtube_title_template: str = "{date} * {musician} * {setlist}"
     youtube_description_template: str = "{studio}, {studio-location}, {instrument name}"
     youtube_broadcast_visibility: str = "unlisted"  # "public" | "unlisted" | "private"
     # This computer's install follows GitHub's main, updating on each

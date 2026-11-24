@@ -66,7 +66,7 @@
         " waiting for takeloom to pick up (on its next sync, or when a session opens)." : "";
       var sel = $("ct-project"), keep = sel.value;
       sel.innerHTML = "";
-      sel.appendChild(el("option", {value: "", text: "All projects"}));
+      sel.appendChild(el("option", {value: "", text: "All setlists"}));
       Object.keys(j.projects).sort().forEach(function (p) { sel.appendChild(el("option", {value: p, text: p})); });
       sel.value = keep in j.projects ? keep : "";
       renderList();

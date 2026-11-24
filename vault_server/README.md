@@ -55,6 +55,9 @@ revokes one itself once its device is no longer authorized there.
   and its raw files (FLAC with an inline player, MIDI, the log).
   **Delete session…** removes it and the takes it filed (takeloom drops them from its setlists
   on its next sync).
+- `/setlists`: a recording node's setlists, edited on it through this vault: reorder, rename, delete,
+  and add songs from a file, YouTube, the inspiration server, a song set, or **by working title** (a
+  song that already has completed takes and a working title, added with its backing track and takes).
 - `/cameras`: the Takeloom Camera phones connected to this vault (`camera_hub.py`; they connect
   here, on this same port, not to a recording node), with their previews, and the recording
   nodes that start and stop their recordings through it. A session's live stream comes from here
