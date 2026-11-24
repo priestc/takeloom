@@ -1,7 +1,7 @@
 #!/bin/sh
 # Render the logo (docs/logo/logo.html) to transparent PNGs, with headless
 # Chrome, trimmed to the mark: the README's, the vault's YouTube watermark,
-# and the app icon (its T scrap). Needs Google Chrome and a Python with Pillow
+# and the app icons, takeloom's and the Camera app's (its T scrap). Needs Google Chrome and a Python with Pillow
 # (takeloom's own venv has it). Run from anywhere; network needed for the
 # Google Fonts.
 set -e
@@ -29,22 +29,47 @@ PYEOF
 }
 shot "s=240" docs/logo/takeloom-logo.png 2400 700
 "$PY" -c "import sys; from PIL import Image; im = Image.open(sys.argv[1]); im.thumbnail((960, 960), Image.LANCZOS); im.save(sys.argv[2], optimize=True)" docs/logo/takeloom-logo.png vault_server/takeloom_vault/logo.png
-# The app icon (takeloom/data/icon.png): the T scrap alone on a dark
-# rounded tile, laid out on macOS's icon grid (an 824 tile in a 1024 canvas)
-# so it sits the same size as other apps' icons in the Dock.
+# The app icons, all the T scrap alone on the same dark tile (#111):
+# - takeloom/data/icon.png: a rounded tile on macOS's icon grid (an 824 tile
+#   in a 1024 canvas), so it sits the same size as other apps' in the Dock.
+# - the Camera app's iOS icon: one opaque 1024 square (iOS rounds it).
+# - the Camera app's Android adaptive-icon foreground: a 108dp canvas, the
+#   scrap inside the middle 66dp circle every launcher's mask keeps; the
+#   tile color is res/values/ic_launcher_background.xml.
 shot "s=700&only=0" "$tmp/t.png" 1400 1400
-"$PY" - "$tmp/t.png" takeloom/data/icon.png <<'PYEOF'
+"$PY" - "$tmp/t.png" <<'PYEOF'
 import sys
 from PIL import Image, ImageDraw
+TILE_COLOR = (17, 17, 17, 255)
+t = Image.open(sys.argv[1]).convert("RGBA")
+
+def scrap(width, height):
+    s = t.copy()
+    s.thumbnail((width, height), Image.LANCZOS)
+    return s
+
+def centered(canvas, s):
+    canvas.alpha_composite(s, ((canvas.width - s.width) // 2, (canvas.height - s.height) // 2))
+    return canvas
+
 S, TILE, RADIUS = 1024, 824, 185
-icon = Image.new("RGBA", (S, S))
 mask = Image.new("L", (S, S))
 ImageDraw.Draw(mask).rounded_rectangle([(S - TILE) // 2] * 2 + [(S + TILE) // 2 - 1] * 2, RADIUS, fill=255)
-icon.paste((17, 17, 17, 255), mask=mask)
-t = Image.open(sys.argv[1]).convert("RGBA")
-t.thumbnail((TILE, round(TILE * 0.7)), Image.LANCZOS)
-icon.alpha_composite(t, ((S - t.width) // 2, (S - t.height) // 2))
-icon.resize((512, 512), Image.LANCZOS).save(sys.argv[2], optimize=True)
-print(sys.argv[2], "(512, 512)")
+icon = Image.new("RGBA", (S, S))
+icon.paste(TILE_COLOR, mask=mask)
+out = "takeloom/data/icon.png"
+centered(icon, scrap(TILE, round(TILE * 0.7))).resize((512, 512), Image.LANCZOS).save(out, optimize=True)
+print(out)
+
+out = "camera_app/ios/TakeloomCamera/Assets.xcassets/AppIcon.appiconset/icon-1024.png"
+centered(Image.new("RGBA", (S, S), TILE_COLOR), scrap(S, round(S * 0.7))).convert("RGB").save(out, optimize=True)
+print(out)
+
+FG = 432
+safe = FG * 66 / 108  # the circle's diameter
+h = safe / (1 + (t.width / t.height) ** 2) ** 0.5  # the scrap's diagonal fits it
+out = "camera_app/android/app/src/main/res/drawable-nodpi/ic_launcher_foreground.png"
+centered(Image.new("RGBA", (FG, FG)), scrap(FG, int(h))).save(out, optimize=True)
+print(out)
 PYEOF
 rm -rf "$tmp"
