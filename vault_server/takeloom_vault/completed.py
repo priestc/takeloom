@@ -15,7 +15,11 @@ edits/ack), which takes it off the queue: from then on the uploaded
 setlists already say the same thing.
 
 Song mixes (mixes/<song>.json) and exported mixes (final_mixes/<song>.mp3)
-are this server's own now; takeloom no longer writes either.
+are this server's own now; takeloom no longer writes either. So are songs'
+working titles (working_titles.json, {song name: working title}): what a
+song's called on YouTube — the title a session's upload is given, and the
+name in the footer drawn over its video (footer.py, youtube.py) — while
+the setlists keep the name it was recorded under.
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ import numpy as np
 from .store import Vault, _atomic_write
 
 EDITS_FILE = "setlist_edits.json"
+WORKING_TITLES_FILE = "working_titles.json"
 TAKE_AUDIO_EXTS = (".mp3", ".flac")
 # Backing-track formats sent to the browser as they are; anything else (an
 # .opus, say) is decoded to FLAC first.
@@ -126,6 +131,17 @@ def _encode(data: np.ndarray, out: Path, codec: list[str]) -> None:
         tmp.unlink(missing_ok=True)
         raise EditError(f"Couldn't encode {out.name}: {result.stderr.decode(errors='replace').strip()[-200:]}")
     tmp.replace(out)
+
+
+def working_titles(root: Path) -> dict[str, str]:
+    """{song name: working title} — only songs that have one."""
+    try:
+        data = json.loads((root / WORKING_TITLES_FILE).read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v).strip() for k, v in data.items() if isinstance(v, str) and v.strip()}
 
 
 class Library:
@@ -248,7 +264,8 @@ class Library:
         {"name", "backing_source", "backing_track", "trim_start_seconds",
         "trim_end_seconds", "takes": [{"instrument", "filename",
         "take_number", "has_video", "recorded_at", "alternates": [...]}],
-        "unpreferred": {label: [take, ...]}, "mix": saved mix or None} —
+        "unpreferred": {label: [take, ...]}, "mix": saved mix or None,
+        "working_title": "" if none} —
         and each project's song names (for filtering by project)."""
         records = self._records()
         files = self._take_files()
@@ -285,6 +302,7 @@ class Library:
                 }
             for label, takes in scans[key].items():
                 song["scan"].setdefault(label, takes)
+        titles = working_titles(self.vault.root)
         out = []
         for song in sorted(songs.values(), key=lambda s: s["name"].lower()):
             takes = sorted(song.pop("takes").values(), key=lambda t: t["instrument"])
@@ -292,6 +310,7 @@ class Library:
             song["takes"] = takes
             song["unpreferred"] = {label: t for label, t in sorted(song.pop("scan").items()) if label not in labels}
             song["mix"] = self.mix(song["name"])
+            song["working_title"] = titles.get(song["name"], "")
             out.append(song)
         projects: dict[str, list[str]] = {}
         for r in records:
@@ -385,6 +404,23 @@ class Library:
         with self._lock:
             _atomic_write(path, json.dumps(mix, indent=2).encode())
         return mix
+
+    # --- working titles ---
+
+    def set_working_title(self, track_name: str, title: str) -> str:
+        """Set (or, with "", clear) a song's working title."""
+        if not track_name:
+            raise EditError("Can't give a working title without a song name.")
+        title = " ".join(title.split())[:100]  # YouTube's title limit
+        with self._lock:
+            titles = working_titles(self.vault.root)
+            if title:
+                titles[track_name] = title
+            else:
+                titles.pop(track_name, None)
+            _atomic_write(self.vault.root / WORKING_TITLES_FILE,
+                          json.dumps(dict(sorted(titles.items())), indent=2).encode())
+        return title
 
     # --- backing tracks, as heard ---
 

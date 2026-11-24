@@ -81,7 +81,8 @@
     body.innerHTML = "";
     var shown = 0;
     data.songs.forEach(function (song) {
-      if (title && song.name.toLowerCase().indexOf(title) < 0) return;
+      if (title && song.name.toLowerCase().indexOf(title) < 0 &&
+          (song.working_title || "").toLowerCase().indexOf(title) < 0) return;
       if (inProject && !inProject.has(song.name)) return;
       shown++;
       var open = !!expanded[song.name];
@@ -92,6 +93,7 @@
       var row = el("tr", {"class": "song" + (mixer && mixer.song.name === song.name ? " on" : ""),
                           onclick: function () { loadSong(song.name, false); }}, [
         el("td", {}, [toggle, el("b", {text: song.name})]),
+        el("td", {}, [workingTitle(song)]),
         el("td", {"class": "muted small", text: SOURCES[song.backing_source] || "—"}),
         badges
       ]);
@@ -99,7 +101,7 @@
       if (open) {
         song.takes.forEach(function (t) {
           body.appendChild(el("tr", {"class": "take"}, [
-            el("td", {colspan: "3"}, [badge(t.instrument),
+            el("td", {colspan: "4"}, [badge(t.instrument),
               el("span", {text: " take " + t.take_number + " · " + ago(t.recorded_at) + (t.has_video ? " · video" : "") +
                 (t.available ? "" : " · audio not in the vault")})])
           ]));
@@ -107,6 +109,28 @@
       }
     });
     $("ct-count").textContent = shown + (shown === data.songs.length ? "" : " of " + data.songs.length);
+  }
+
+  // A song's working title: its name on YouTube (the upload's title and
+  // the video's footer). Saved as it's changed; Enter saves too.
+  function workingTitle(song) {
+    var input = el("input", {type: "text", maxlength: "100", placeholder: "Working title", "class": "wt",
+                             onclick: function (ev) { ev.stopPropagation(); },
+                             onkeydown: function (ev) { ev.stopPropagation(); if (ev.key === "Enter") input.blur(); }});
+    input.value = song.working_title || "";
+    input.addEventListener("change", function () {
+      input.classList.remove("wt-saved", "wt-failed");
+      post("/completed/working-title", {track_name: song.name, working_title: input.value}).then(function (j) {
+        song.working_title = j.working_title;
+        input.value = j.working_title;
+        input.classList.add("wt-saved");
+        input.title = "Saved";
+      }, function (e) {
+        input.classList.add("wt-failed");
+        input.title = "Couldn't save: " + e.message;
+      });
+    });
+    return input;
   }
 
   // --- the mixer ---

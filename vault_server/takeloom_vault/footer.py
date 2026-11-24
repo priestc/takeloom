@@ -12,6 +12,10 @@ for sessions whose camera videos are clean — the session log's
 "video_footer": "none" (takeloom marks them); an older session's videos
 already carry their footer, so it isn't added twice.
 
+A song with a working title (set on the Completed Takes page,
+completed.py's working_titles) is named by it rather than by its setlist
+name.
+
 Times are on the session's timeline (the mix's: session time 0 is the
 mix's first sample), like the editor's cuts.
 """
@@ -30,10 +34,21 @@ def _text(*parts: str) -> str:
     return SEPARATOR.join(p for p in parts if p)
 
 
-def schedule(data: dict) -> list[list]:
+def songs(data: dict) -> list[str]:
+    """The session's songs (setlist names), in the order they were loaded."""
+    found: list[str] = []
+    for e in data.get("events") or []:
+        name = e.get("track_name")
+        if name and e.get("frame") is not None and name not in found:
+            found.append(name)
+    return found
+
+
+def schedule(data: dict, titles: dict[str, str] | None = None) -> list[list]:
     """[[start_s, text], ...] in order: before the first song just
     musician / instrument / date, then for each song as it's loaded its
-    name too (and the instrument and wall-clock time it came up). The
+    name too — its working title if `titles` has one — (and the instrument
+    and wall-clock time it came up). The
     camera's name is added where it's shown (with_camera), since it changes
     with every cut."""
     sample_rate = data.get("sample_rate") or 48000
@@ -49,7 +64,8 @@ def schedule(data: dict) -> list[list]:
             continue
         current = name
         start = max(0.0, (frame - mix_start) / sample_rate)
-        text = _text(musician, e.get("instrument") or data.get("instrument", ""), e.get("wall_time", ""), name)
+        shown = (titles or {}).get(name) or name
+        text = _text(musician, e.get("instrument") or data.get("instrument", ""), e.get("wall_time", ""), shown)
         if start <= entries[-1][0]:
             entries[-1] = [entries[-1][0], text]  # replaces the opening (or an instantly superseded) one
         else:

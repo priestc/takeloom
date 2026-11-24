@@ -55,7 +55,7 @@ Browser UI:
     GET  /sessions/<name>        one session: video, songs, files
     GET  /completed              every completed take, by song, with a mixer (completed.py; its
                                  data from GET /completed/data)
-    POST /completed/mix|preferred-take|trim|export,  GET /completed/backing/<file>, /completed/export-status
+    POST /completed/mix|preferred-take|trim|export|working-title,  GET /completed/backing/<file>, /completed/export-status
     GET  /clients                paired devices
     GET  /media/<vault path>     file download/stream, with Range support (for <video> seeking)
     GET  /takes/<filename>/video  a take's video (as the API route above)
@@ -477,6 +477,11 @@ class _Handler(BaseHTTPRequestHandler):
                 if not isinstance(volumes, dict) or not isinstance(muted, list):
                     raise EditError("'volumes' must be an object and 'muted' a list")
                 return self._json(library.save_mix(str(body.get("track_name") or ""), volumes, muted))
+            if what == "working-title":
+                song = str(body.get("track_name") or "")
+                title = library.set_working_title(song, str(body.get("working_title") or ""))
+                log(f"From {self.ip}: {song!r}'s working title -> {title!r}")
+                return self._json({"working_title": title})
             if what == "preferred-take":
                 edit = library.set_preferred_take(
                     str(body.get("take_filename") or ""), str(body.get("instrument") or ""),

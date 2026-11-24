@@ -61,14 +61,17 @@ revokes one itself once its device is no longer authorized there.
   originals), each instrument's preferred take, and the backing-track trim. Setlists are
   takeloom's, so those last two are queued (`setlist_edits.json`) and shown straight away;
   takeloom makes them on its next sync and acknowledges them. Per-instrument compressor
-  settings (takeloom's Studio Setup) aren't applied here.
+  settings (takeloom's Studio Setup) aren't applied here. Each song also has a **Working
+  title** field (`working_titles.json`, the vault's own): a session's YouTube upload is titled
+  with its songs' working titles (" / " between them) and the footer drawn over its video names
+  each song by its working title, instead of its setlist name.
 
 No login: anyone on the local network can browse. The API needs a paired token.
 
 ## What it stores
 
 Everything takeloom keeps in its vault: `sessions/`, `completed_takes/`, `backing_tracks/`,
-`mixes/` (the Completed Takes page's saved mixes), `final_mixes/` (exported song mixes),
+`mixes/` (the Completed Takes page's saved mixes), `working_titles.json` (its songs' working titles), `final_mixes/` (exported song mixes),
 `projects/` (setlists), and the root files `inspiration_takes.json` and `backing_tuning.json`.
 Takeloom keeps them in sync after each session (`takeloom vault sync`).
 

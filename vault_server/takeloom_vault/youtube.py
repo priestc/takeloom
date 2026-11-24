@@ -98,6 +98,18 @@ def render_template(template: str, data: dict) -> str:
     return template.strip()
 
 
+def default_title(data: dict, template: str, titles: dict[str, str]) -> str:
+    """What a session's upload is called to start with: its songs' working
+    titles (completed.py's working_titles; a song without one by its
+    setlist name), " / " between them, if any of its songs has one —
+    otherwise takeloom's title template."""
+    from .footer import songs
+    names = songs(data)
+    if any(titles.get(n) for n in names):
+        return " / ".join(titles.get(n) or n for n in names)[:100]
+    return render_template(template, data)
+
+
 # --- the upload ---
 
 def _access_token(creds: dict) -> str:

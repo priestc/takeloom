@@ -42,6 +42,9 @@ audio { width: 100%; max-width: 520px; }
 .songs button { font-size: .85em; padding: .1em .6em; }
 form { display: inline; }
 .badge { display: inline-block; color: #fff; font-size: .75em; font-weight: 600; padding: .05em .45em; border-radius: 4px; margin-right: .25em; }
+.wt { width: 100%; min-width: 10em; box-sizing: border-box; }
+.wt.wt-saved { border-color: #2e9d57; }
+.wt.wt-failed { border-color: #d33; }
 .ct { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1.6em; align-items: start; }
 @media (max-width: 800px) { .ct { grid-template-columns: 1fr; } }
 #mixer { position: sticky; top: .5em; border: 1px solid var(--line); border-radius: 8px; padding: .8em 1em; }
@@ -574,15 +577,18 @@ def _edit_editor(name: str, rel: str, videos: list[tuple[str, str, str]], editor
     urls = [_media_url(f"{rel}/{file}") for _title, file, _label in videos]
     final = (f"<p id='ed-final'>Final video: <a href='{_media_url(rel + '/edit.mp4')}'>edit.mp4</a></p>"
              if status.get("state") == "done" else "<p id='ed-final'></p>")
-    # Publishing the edit to YouTube (youtube.py): its title from takeloom's
-    # title template, or what it was last published as.
+    # Publishing the edit to YouTube (youtube.py): its title what it was
+    # last published as, or its songs' working titles, or from takeloom's
+    # title template.
     from . import youtube
+    from .completed import working_titles
     creds = youtube.credentials()
     published = publisher.status(name) if publisher is not None else {"state": "none"}
     pub = {
         "connected": creds is not None,
-        "title": published.get("title") or youtube.render_template((creds or {}).get("title_template") or
-                                                                   "{date} * {musician} * {project}", data or {}),
+        "title": published.get("title") or youtube.default_title(
+            data or {}, (creds or {}).get("title_template") or "{date} * {musician} * {project}",
+            working_titles(editor.vault.root)),
         "description": youtube.render_template((creds or {}).get("description_template") or "", data or {}),
         "privacy": published.get("asked_privacy") or (creds or {}).get("visibility") or "unlisted",
         "status": published,
@@ -847,7 +853,7 @@ def completed_page(pending: list[PairingRequest]) -> str:
         "<div class='ct'><div id='mixer'></div><div>"
         "<div class='filters'><label>Filter by title <input id='ct-title' type='search'></label>"
         "<label>Project <select id='ct-project'><option value=''>All projects</option></select></label></div>"
-        "<table><thead><tr><th>Name</th><th>Backing source</th><th>Instruments</th></tr></thead>"
+        "<table><thead><tr><th>Name</th><th>Working title</th><th>Backing source</th><th>Instruments</th></tr></thead>"
         "<tbody id='ct-songs'></tbody></table></div></div>"
         f"<script>{_COMPLETED_JS.read_text()}</script>"
     )

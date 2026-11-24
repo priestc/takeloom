@@ -332,7 +332,8 @@ class EditRenderer:
         work = directory / (".edit-work-youtube" if for_youtube else ".edit-work")
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir()
-        entries = footer.schedule(data) if for_youtube and footer.wanted(data) and self.draws_text else None
+        from .completed import working_titles
+        entries = footer.schedule(data, working_titles(self.vault.root)) if for_youtube and footer.wanted(data) and self.draws_text else None
         logo = LOGO if for_youtube and LOGO.is_file() else None
         nice = ["nice", "-n", "10"] if shutil.which("nice") else []
         started = time.monotonic()
