@@ -6563,8 +6563,13 @@ class LocalBackend(Backend):
         ))
         if session.stream_switcher is not None:
             # The live stream's footer follows the song (live_footer.py).
-            session.stream_switcher.set_footer(live_footer_text(
-                session.musician, session.inst.full_name, session.events))
+            if hasattr(session.stream_switcher, "set_footer_parts"):
+                from .video.live_footer import footer_parts
+                session.stream_switcher.set_footer_parts(*footer_parts(
+                    session.musician, session.inst.full_name, session.events))
+            else:
+                session.stream_switcher.set_footer(live_footer_text(
+                    session.musician, session.inst.full_name, session.events))
         # Written to disk on every event, not just once at clean session
         # end — session_log.json used to only exist at all once
         # _end_session ran, so a crash (power loss, the process being
@@ -6771,7 +6776,32 @@ class LocalBackend(Backend):
         # The live stream: one StreamSwitcher (video/stream_switcher.py) fed
         # stream-quality frames by every camera below, streaming whichever
         # is the program camera (set_program_camera, from the video-ui).
-        if config.streaming_enabled and config.youtube_stream_key and cameras:
+        vault_streams = hasattr(self._phone_hub, "recorder")  # the phones, and so the stream, are the vault's
+        if config.streaming_enabled and config.youtube_stream_key and cameras and vault_streams:
+            # phone_camera/vault_stream.py: the vault makes the stream; this
+            # machine sends its mix and what to show.
+            from .phone_camera.vault_stream import VaultStream
+            from .streaming import youtube_rtmp_url
+            from .video.live_footer import footer_parts
+            stream_switcher = VaultStream(
+                self._phone_hub, config.vault_server, config.vault_server_token, self.hostname(), session_dir.name,
+                [youtube_rtmp_url(config.youtube_stream_key),
+                 *(t.strip() for t in config.streaming_extra_targets if t.strip())],
+                sample_rate=config.sample_rate, channels=engine.mix_channels,
+                width=config.streaming_video_width, bitrate_kbps=config.streaming_bitrate_kbps,
+                program=self._resolve_program_camera(cameras), labels=dict(cameras),
+                footer=footer_parts(inst.musician or config.studio_musician, inst.full_name, [], wall_timestamp()),
+                on_status=lambda status, active: self._emit("streaming_status", {"status": status, "active": active}),
+            )
+            if (
+                config.youtube_oauth_client_id
+                and config.youtube_oauth_client_secret
+                and config.youtube_oauth_refresh_token
+            ):
+                youtube_broadcast_id = self._create_youtube_broadcast(config, project, inst)
+            if not stream_switcher.start():
+                stream_switcher = None
+        elif config.streaming_enabled and config.youtube_stream_key and cameras:
             from .streaming import LiveAudioFeeder, StreamTarget, fifo_supported, youtube_rtmp_url
             if fifo_supported():
                 from .video.stream_switcher import StreamSwitcher
@@ -6880,11 +6910,13 @@ class LocalBackend(Backend):
             self._emit("preview_resumed", {})
 
         if stream_switcher is not None and (video_recorder is not None or extra_cameras):
-            engine.set_stream_sink(stream_feeder.push)
-            self._emit("streaming_status", {"status": "Streaming live to YouTube.", "active": True})
-        elif stream_feeder is not None:
+            engine.set_stream_sink(stream_switcher.push_audio if stream_feeder is None else stream_feeder.push)
+            self._emit("streaming_status", {"status": "Streaming live to YouTube"
+                                            + (" from the vault." if stream_feeder is None else "."), "active": True})
+        elif stream_switcher is not None or stream_feeder is not None:
             # No camera actually started: nothing to stream.
-            stream_feeder.stop()
+            if stream_feeder is not None:
+                stream_feeder.stop()
             if stream_switcher is not None:
                 stream_switcher.stop()
             stream_feeder = stream_switcher = None

@@ -17,22 +17,27 @@ def join(*parts: str) -> str:
     return SEPARATOR.join(p for p in parts if p)
 
 
-def footer_text(musician: str, instrument: str, events, session_start: str = "") -> str:
-    """`events`: the session's events so far (backend.py's _SessionEvent,
-    or session-log dicts). Before the first song: musician / instrument /
-    when the session started; then the latest song's, with the instrument
-    and wall-clock time it came up."""
+def footer_parts(musician: str, instrument: str, events, session_start: str = "") -> tuple[list[str], str | None]:
+    """(the footer's parts, the song it names or None). `events`: the
+    session's events so far (backend.py's _SessionEvent, or session-log
+    dicts). Before the first song: musician / instrument / when the session
+    started; then the latest song's, with the instrument and wall-clock
+    time it came up. (The vault's stream puts the song's working title in
+    its place: vault_server's live_stream.py.)"""
     def get(e, key):
         return e.get(key) if isinstance(e, dict) else getattr(e, key, None)
 
     start = next((get(e, "wall_time") or "" for e in events if get(e, "event_type") == "session_start"),
                  session_start)
-    text = join(musician, instrument, start)
-    current = None
+    parts, song = [musician, instrument, start], None
     for e in events:
         name = get(e, "track_name")
-        if not name or get(e, "frame") is None or name == current:
+        if not name or get(e, "frame") is None or name == song:
             continue
-        current = name
-        text = join(musician, get(e, "instrument") or instrument, get(e, "wall_time") or "", name)
-    return text
+        song = name
+        parts = [musician, get(e, "instrument") or instrument, get(e, "wall_time") or "", name]
+    return [p for p in parts if p], song
+
+
+def footer_text(musician: str, instrument: str, events, session_start: str = "") -> str:
+    return join(*footer_parts(musician, instrument, events, session_start)[0])

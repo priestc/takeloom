@@ -362,7 +362,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._html(web.cameras_page(auth.pending_requests()))
         if path == "/cameras/data":
             hub = self.server.camera_hub
-            return self._json({"cameras": hub.cameras(), "nodes": hub.nodes(),
+            return self._json({"cameras": hub.cameras(), "nodes": hub.nodes(), "streams": hub.streams(),
                                "recording": [{"session": s, "device_id": d} for s, d in hub.recording()]})
         if m := re.fullmatch(r"/cameras/([^/]+)/preview\.jpg", path):
             jpeg = self.server.camera_hub.preview(m.group(1))

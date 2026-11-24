@@ -245,8 +245,8 @@ def camera_key(device_id: str, detected_name: str) -> str:
 # (copy_fields), so the two windows, open side by side, never undo each
 # other's changes.
 STREAMING_FIELDS = (
-    "streaming_enabled", "youtube_stream_key", "streaming_video_width", "streaming_bitrate_kbps",
-    "youtube_oauth_client_id", "youtube_oauth_client_secret", "youtube_oauth_refresh_token",
+    "streaming_enabled", "youtube_stream_key", "streaming_extra_targets", "streaming_video_width",
+    "streaming_bitrate_kbps", "youtube_oauth_client_id", "youtube_oauth_client_secret", "youtube_oauth_refresh_token",
     "youtube_title_template", "youtube_description_template", "youtube_broadcast_visibility",
 )
 LATENCY_FIELDS = ("latency_compensation_ms", "video_latency_compensation_ms")
@@ -374,6 +374,10 @@ class StudioConfig:
     compressor_settings: dict[str, CompressorSettings] = field(default_factory=dict)
     streaming_enabled: bool = False  # stream every session live while it records; see takeloom/streaming.py
     youtube_stream_key: str = ""  # from YouTube Studio's "Go Live" stream settings
+    # More places to stream to at the same time as YouTube: full RTMP(S)
+    # URLs, stream key included (rtmp://live.twitch.tv/app/<key>, ...).
+    # Only when the vault makes the stream (phone_camera/vault_stream.py).
+    streaming_extra_targets: list[str] = field(default_factory=list)
     # Matches STREAM_QUALITY_PRESETS[0] in takeloom/streaming.py — the
     # Streaming tab's quality dropdown writes both together as one unit.
     streaming_video_width: int = 1280  # 0 means "stream at the source resolution, unscaled"

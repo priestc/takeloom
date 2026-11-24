@@ -5,6 +5,22 @@ stream key — no Google sign-in required. This page is only about the *optional
 step: connecting a YouTube account so each session's stream gets a real title and
 description instead of whatever was last set on that stream key.
 
+## Where the stream comes from
+
+When the phones connect to the vault (takeloom-vault 0.18+, see
+[takeloom-camera.md](takeloom-camera.md)), the **vault** makes the stream, not the
+recording node: the phones' live feeds are already there, and it's wired to the router.
+The node sends only its live mix (about 1.5 Mbps) and what to show: the program camera
+(video-ui, the Stream Deck) and the footer. The vault puts each song's working title
+(Completed Takes page) in the footer. Only the phones can be shown; a webcam plugged into
+the node can't, so with one as the program camera the picture holds on the last phone.
+The vault's stream log is the session's `stream.log` on the vault, and its Cameras page
+shows a stream while it's live.
+
+To stream somewhere besides YouTube at the same time, list full RTMP(S) URLs, stream key
+included, in `streaming_extra_targets` in `studio_config.json` on the node (for example
+`["rtmp://live.twitch.tv/app/<key>"]`).
+
 ## Why you have to create your own Google Cloud project
 
 RTMP (the stream key) has no metadata channel at all — there's no way to set a title

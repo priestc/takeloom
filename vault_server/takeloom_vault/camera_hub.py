@@ -47,6 +47,9 @@ Messages on a node's connection:
                    {"kind": "start_recording", "device_id", "session_id", "live_file", "upload_file"}
                    {"kind": "stop_recording", "device_id", "session_id"}
 
+A node streaming a session opens a second connection (role "stream";
+live_stream.py has its messages): the vault makes the stream.
+
 A camera, as a node is told about it: {"device_id", "client_name",
 "platform", "ip", "app_version", "device_model", "status",
 "clock_offset_ns", "clock_rtt_ns", "live_latency_ns"}.
@@ -326,6 +329,10 @@ class CameraHub:
         self._pending_ips: set[str] = set()
         # (session_id, device_id) -> LiveRecorder, while a session records
         self._live: dict[tuple[str, str], LiveRecorder] = {}
+        # Everything else watching every phone's live feed (live_stream.py):
+        # fn(device_id, pts_ns, keyframe, data).
+        self._taps: list[Callable[[str, int, bool, bytes], None]] = []
+        self._streams: list = []
         self._registry_lock = threading.Lock()
 
     # --- queries (the web page) ---
@@ -346,6 +353,20 @@ class CameraHub:
     def recording(self) -> list[tuple[str, str]]:
         with self._lock:
             return list(self._live)
+
+    def streams(self) -> list[dict]:
+        with self._lock:
+            return [{"session": st.session_id, "program": st.labels.get(st._program) or st._program}
+                    for st in self._streams]
+
+    def add_video_tap(self, tap) -> None:
+        with self._lock:
+            self._taps.append(tap)
+
+    def remove_video_tap(self, tap) -> None:
+        with self._lock:
+            if tap in self._taps:
+                self._taps.remove(tap)
 
     # --- where each phone's recording goes ---
 
@@ -409,6 +430,9 @@ class CameraHub:
                 return
             if hello.get("role") == "node":
                 self._handle_node(sock, hello, ip)
+                return
+            if hello.get("role") == "stream":
+                self._handle_stream(sock, hello, ip)
                 return
             client = self._authenticate(sock, hello, ip)
             if client is None:
@@ -485,6 +509,49 @@ class CameraHub:
             with self._lock:
                 if node in self._nodes:
                     self._nodes.remove(node)
+
+    # --- a node's live stream (live_stream.py) ---
+
+    def _handle_stream(self, sock: socket.socket, hello: dict, ip: str) -> None:
+        from .live_stream import FRAME_AUDIO, LiveStream
+        client = self.auth.authenticate(str(hello.get("token") or ""), ip)
+        if client is None:
+            sock.sendall(encode_json({"kind": "stream_ack", "ok": False,
+                                      "error": "Unrecognized vault token: pair this machine with the vault first."}))
+            return
+        node = _Node(sock, str(hello.get("client_name") or client.label), ip)
+        stream = LiveStream(self, self.vault, hello, self._log,
+                            lambda status, active: node.send_json({"kind": "stream_status", "status": status,
+                                                                   "active": active}))
+        if not stream.start():
+            node.send_json({"kind": "stream_ack", "ok": False, "error": "The vault couldn't start the stream."})
+            stream.stop()
+            return
+        node.send_json({"kind": "stream_ack", "ok": True})
+        with self._lock:
+            self._streams.append(stream)
+        try:
+            while True:
+                frame_type, payload = read_frame(sock)
+                if frame_type == FRAME_AUDIO:
+                    stream.push_audio(payload)
+                elif frame_type == FRAME_JSON:
+                    msg = decode_json(payload)
+                    kind = msg.get("kind")
+                    if kind == "program":
+                        stream.set_program(str(msg.get("camera") or ""))
+                    elif kind == "footer":
+                        stream.set_footer(msg.get("parts") or [], msg.get("song"))
+                    elif kind == "stop":
+                        break
+        except (OSError, ConnectionError, ProtocolError) as e:
+            self._log(f"Stream connection from {node.label} ({ip}) dropped: {type(e).__name__}: {e}")
+        finally:
+            with self._lock:
+                if stream in self._streams:
+                    self._streams.remove(stream)
+            stream.stop()
+            node.send_json({"kind": "stream_status", "status": "Stream ended.", "active": False})
 
     def _on_node_message(self, node: _Node, msg: dict) -> None:
         kind = msg.get("kind")
@@ -581,8 +648,14 @@ class CameraHub:
                         cam.live_latency_ns = latency if prev is None else (prev * 15 + latency) // 16
                     with self._lock:
                         recorders = [r for (s, d), r in self._live.items() if d == cam.device_id]
+                        taps = list(self._taps)
                     for r in recorders:
                         r.push(pts_ns, keyframe, data)
+                    for tap in taps:
+                        try:
+                            tap(cam.device_id, pts_ns, keyframe, data)
+                        except Exception:  # noqa: BLE001 — never lose the phone over a viewer
+                            pass
                 elif frame_type == FRAME_PREVIEW:
                     cam.preview = payload
                     self._to_nodes(encode_node_preview(cam.device_id, payload))
