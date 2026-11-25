@@ -19,10 +19,17 @@ class Settings(context: Context) {
         get() = prefs.getString("serverHost", "") ?: ""
         set(value) = prefs.edit().putString("serverHost", value).apply()
 
-    /** Name shown on the server (pairing prompt, camera picker). */
-    var deviceName: String
-        get() = prefs.getString("deviceName", null) ?: deviceModel
-        set(value) = prefs.edit().putString("deviceName", value).apply()
+    /** Name shown on the server (pairing prompt, Cameras page, log). */
+    val deviceName: String
+        get() = customName.ifEmpty { deviceModel }
+
+    /** The name given in Settings ("" if none: the phone's model is used). */
+    var customName: String
+        get() = (prefs.getString("deviceName", null) ?: "").trim().takeIf { it != deviceModel } ?: ""
+        set(value) {
+            val name = value.trim()
+            prefs.edit().apply { if (name.isEmpty()) remove("deviceName") else putString("deviceName", name) }.apply()
+        }
 
     /**
      * The phone's model, readable: the device's own marketing name where

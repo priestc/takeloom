@@ -10,10 +10,24 @@ enum Settings {
         set { defaults.set(newValue, forKey: "serverHost") }
     }
 
-    /// Name shown on the server (pairing prompt, camera picker).
+    /// Name shown on the server (pairing prompt, Cameras page, log).
     static var deviceName: String {
-        get { defaults.string(forKey: "deviceName") ?? UIDevice.current.name }
-        set { defaults.set(newValue, forKey: "deviceName") }
+        customName.isEmpty ? UIDevice.current.name : customName
+    }
+
+    /// The name given in Settings ("" if none). iOS only gives apps
+    /// "iPhone" for the device's own name, so without one every iPhone
+    /// looks alike on the vault. (Older builds saved that "iPhone" here
+    /// on every Save; it counts as no name.)
+    static var customName: String {
+        get {
+            let name = (defaults.string(forKey: "deviceName") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return name == UIDevice.current.name ? "" : name
+        }
+        set {
+            let name = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if name.isEmpty { defaults.removeObject(forKey: "deviceName") } else { defaults.set(name, forKey: "deviceName") }
+        }
     }
 
     /// Stable per-install identity; the server keys a camera on it.

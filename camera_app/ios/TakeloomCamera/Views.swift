@@ -316,12 +316,20 @@ struct SettingsView: View {
                             }
                         }
                     }
-                    TextField("This phone's name", text: $name)
                 } header: {
                     Text("takeloom server")
                 } footer: {
                     Text("The Mac running `takeloom server`. Scan to find it on this Wi-Fi, or type its address. "
                          + "The first connection has to be approved there.")
+                }
+                Section {
+                    TextField("Name (e.g. Drum cam)", text: $name)
+                        .autocorrectionDisabled()
+                } header: {
+                    Text("This phone")
+                } footer: {
+                    Text("How this phone is named on the vault's Cameras page and in its log, to tell it from the "
+                         + "other phones. Left blank, it's just \"\(UIDevice.current.name)\".")
                 }
                 Section("Camera") {
                     Picker("Camera", selection: $front) {
@@ -358,7 +366,7 @@ struct SettingsView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        Settings.deviceName = name.isEmpty ? UIDevice.current.name : name
+                        Settings.customName = name
                         if model.recordingSession == nil,
                            front != model.useFrontCamera || quality != model.quality {
                             model.applyCameraSettings(front: front, quality: quality)
@@ -370,7 +378,7 @@ struct SettingsView: View {
             }
             .onAppear {
                 host = model.serverHost
-                name = Settings.deviceName
+                name = Settings.customName
                 front = model.useFrontCamera
                 quality = model.quality
             }

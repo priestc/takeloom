@@ -588,8 +588,9 @@ class MainActivity : Activity() {
             setText(settings.serverHost)
         }
         val nameField = EditText(this).apply {
-            hint = "This phone's name"
-            setText(settings.deviceName)
+            hint = "Name (e.g. Drum cam)"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            setText(settings.customName)
         }
         val cameraGroup = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
         val back = RadioButton(this).apply { text = "Back camera"; id = View.generateViewId() }
@@ -623,6 +624,11 @@ class MainActivity : Activity() {
                     }
                 }
             }
+        })
+        form.addView(TextView(this).apply {
+            text = "This phone's name, on the vault's Cameras page and in its log. " +
+                "Left blank, it's \"${settings.deviceModel}\"."
+            setPadding(0, dp(16), 0, 0)
         })
         form.addView(nameField)
         form.addView(cameraGroup)
@@ -662,7 +668,7 @@ class MainActivity : Activity() {
             .setView(android.widget.ScrollView(this).apply { addView(form) })
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Save") { _, _ ->
-                settings.deviceName = nameField.text.toString().trim().ifEmpty { settings.deviceName }
+                settings.customName = nameField.text.toString()
                 val host = hostField.text.toString().trim()
                 settings.serverHost = host
                 val wantFront = cameraGroup.checkedRadioButtonId == front.id
