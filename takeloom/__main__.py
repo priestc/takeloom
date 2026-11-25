@@ -575,16 +575,16 @@ def server_command(disable_color: bool) -> None:
     # Optional attached StreamDeck: fully drives a session with no UI client
     # needed at all, via the same RecordingDeckDriver the Tk UI uses. With
     # no track picker of its own, this context always targets the last-used
-    # project + instrument (from config) and the next untaken track.
+    # project + instrument (from config), starting at the top of the setlist.
     def _resolve_headless_request() -> StartRecordingRequest | None:
         cfg = backend.get_config()
         project_name, instrument_name = cfg.last_selected_project, cfg.last_selected_instrument
         if not project_name or not instrument_name:
             log("StreamDeck: no last-used project/instrument — start one from a connected client first.")
             return None
-        index = backend.next_untaken_track_index(project_name, instrument_name)
+        index = backend.next_session_track_index(project_name, instrument_name)
         if index is None:
-            log(f"StreamDeck: no more tracks in '{project_name}' need a take for '{instrument_name}'.")
+            log(f"StreamDeck: the setlist '{project_name}' has no tracks.")
             return None
         return StartRecordingRequest(
             project_name=project_name, instrument_name=instrument_name, track_index=index,
@@ -1325,9 +1325,9 @@ def start_session(instrument: str, project_name: str | None) -> None:
         raise SystemExit(1)
 
     def _resolve_cli_request() -> StartRecordingRequest | None:
-        index = backend.next_untaken_track_index(project.name, inst.full_name)
+        index = backend.next_session_track_index(project.name, inst.full_name)
         if index is None:
-            click.echo(f"All tracks already have a take for '{inst.full_name}'.")
+            click.echo(f"The setlist '{project.name}' has no tracks.")
             return None
         return StartRecordingRequest(
             project_name=project.name, instrument_name=inst.full_name, track_index=index,
@@ -1346,7 +1346,7 @@ def start_session(instrument: str, project_name: str | None) -> None:
     elif driver.streamdeck.last_error:
         click.echo(f"StreamDeck: found a device but could not connect — {driver.streamdeck.last_error}")
 
-    # Load the first untaken track, same as the headless server's "r" does
+    # Load the first setlist track, same as the headless server's "r" does
     # on first press — here it happens automatically on launch, matching
     # this command's previous behavior of loading a track immediately.
     req = _resolve_cli_request()

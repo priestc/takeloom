@@ -387,8 +387,7 @@ class StudioConfig:
         """instrument_name's (a full_name) own label — what actually
         keys TrackEntry.preferred_takes/take filenames (see
         processing/splicer.py), used wherever "does this song still need
-        a take" is decided (backend.py's next_untaken_track_index/
-        _resolve_filter_slot/_advance_locked, ui/record.py's setlist
+        a take" is decided (ui/record.py's setlist
         checkmark) so that, say, a Telecaster take counts as satisfying a
         slot for a Stratocaster too, since both are "electric-guitar".
         Falls back to instrument_name itself if it doesn't resolve to a

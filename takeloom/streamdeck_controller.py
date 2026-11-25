@@ -733,7 +733,7 @@ class StreamDeckController:
         two-button layout (RECORDING_IDLE_BUTTONS: "Start Local" / "Start
         Streaming"); update_recording_page swaps to the full in-session
         layout — Record/Unpause/Stop toggle, Next Track (always available —
-        advances to the next untaken track, discarding an in-progress take
+        advances to the next setlist track, discarding an in-progress take
         first if one's active), Restart (dimmed unless actually recording),
         the Live/Production monitor toggle, and volume controls (dials if
         available, else buttons) — once a session actually opens, and back

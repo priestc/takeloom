@@ -232,27 +232,23 @@ class Backend(ABC):
     @abstractmethod
     def save_setlist(self, project_name: str, setlist_data: dict) -> None: ...
 
-    def next_untaken_track_index(
+    def next_session_track_index(
         self, project_name: str, instrument_name: str, start_index: int = 0,
     ) -> int | None:
-        """Index of the first setlist track from start_index onward that
-        doesn't already have a take for instrument_name's label (takes
-        are filed by label — see TrackEntry.preferred_takes — so any
-        instrument sharing it counts, not just instrument_name itself),
-        or None if every remaining track already has one. Pure setlist
-        query on top of get_setlist() — concrete here (not per-subclass)
-        since it needs no hardware access and works identically for
-        Local and Remote.
+        """Index of the setlist track a session starting at start_index
+        plays first, or None if the setlist has no tracks from there on.
+        Songs that already have a take for instrument_name are NOT
+        skipped: a session plays the setlist in order, and a song that
+        comes up again just gets another take (the next take number,
+        which becomes the preferred one — see processing/splicer.py).
+        instrument_name is unused, kept so callers don't change if a
+        per-instrument rule comes back.
 
         The single shared "what's next" primitive every recording-driving
-        context (Tk UI's StreamDeck Next key, headless takeloom server,
-        the CLI) uses instead of each reimplementing this search."""
+        context (headless takeloom server, the CLI) uses instead of each
+        reimplementing this search."""
         setlist = Setlist.from_dict(self.get_setlist(project_name))
-        label = self.get_config().label_for_instrument(instrument_name)
-        for i in range(start_index, len(setlist.tracks)):
-            if setlist.tracks[i].get_take_for_instrument(label) is None:
-                return i
-        return None
+        return start_index if 0 <= start_index < len(setlist.tracks) else None
 
     @abstractmethod
     def create_project(self, name: str) -> str:
@@ -852,8 +848,8 @@ class Backend(ABC):
 
     @abstractmethod
     def next_track(self) -> None:
-        """Skip to the next setlist track that still needs a take for the
-        session's instrument, and start playing it immediately. The
+        """Skip to the next setlist track (whether or not it already has a
+        take), and start playing it immediately. The
         in-progress song, if any, is logged as skipped (no take). Also what
         the backend itself does automatically when a song plays to its
         natural end."""
@@ -5032,8 +5028,8 @@ class LocalBackend(Backend):
         - download every not-yet-local backing track now, so no mid-session
           multi-MB download + FLAC/opus write.
 
-        Only slots/tracks that still need a take for `inst`'s label are
-        touched. Best-effort per track: a slot that can't be resolved, or a
+        Every slot/track is touched — a song that already has a take
+        still comes up in the session for another one. Best-effort per track: a slot that can't be resolved, or a
         download that fails, is reported and skipped — it just isn't in the
         returned dict / stays absent on disk, and surfaces its error again
         (loudly, via _resolve_filter_slot_for_session / _load_track_locked)
@@ -5046,11 +5042,7 @@ class LocalBackend(Backend):
         {setlist index -> further queued draws} to seed queued_filter_picks).
         Called with self._record_lock held."""
         from .inspiration import InspirationError, download_inspiration_track
-        label = inst.label
-        pending = [
-            (i, t) for i, t in enumerate(project.setlist.tracks)
-            if t.get_take_for_instrument(label) is None
-        ]
+        pending = list(enumerate(project.setlist.tracks))
         resolved_picks: dict[int, TrackEntry] = {}
         queued_picks: dict[int, list[TrackEntry]] = {}
         if not pending:
@@ -5118,12 +5110,10 @@ class LocalBackend(Backend):
     def _advance_locked(
         self, session: "_ActiveSession", status_prefix: str = "", announce_done: bool = True,
     ) -> TrackEntry | None:
-        """Find and load the next setlist track after the current one that
-        still needs a take for the session's instrument's label (takes
-        are filed by label — see TrackEntry.preferred_takes — so any
-        instrument sharing it counts) — skipping both tracks with takes
-        already on disk and ones completed earlier in this same session
-        (the setlist doesn't learn about those until post-processing).
+        """Find and load the next setlist track after the current one,
+        skipping only ones completed earlier in this same session. A song
+        that already has a take on disk is NOT skipped — it comes up
+        again for another take.
         A song set slot that's currently loaded and has depth left (see
         _next_filter_draw_locked) serves its next song first instead.
         Returns the loaded track (resolved, if the setlist position found
@@ -5141,12 +5131,9 @@ class LocalBackend(Backend):
             self._load_track_locked(session, next_draw, session.current_track_index, config)
             return next_draw
         start = (session.current_track_index + 1) if session.current_track_index is not None else 0
-        label = session.inst.label
         index = None
         for i in range(start, len(tracks)):
-            if i in session.completed_track_indices:
-                continue
-            if tracks[i].get_take_for_instrument(label) is None:
+            if i not in session.completed_track_indices:
                 index = i
                 break
         if index is None:
@@ -5157,7 +5144,7 @@ class LocalBackend(Backend):
             if announce_done:
                 self._emit("recording_status", {
                     "phase": "waiting",
-                    "status": status_prefix + "No more tracks need a take — press Stop to end the session.",
+                    "status": status_prefix + "End of the setlist — press Stop to end the session.",
                     "track_name": None,
                 })
             return None
@@ -5309,7 +5296,7 @@ class LocalBackend(Backend):
         """Called (off the audio thread) when the backing track plays to its
         end — the moment a take completes. Logs song_end (post-processing
         turns that into the actual take file later; nothing is finalized
-        here) and auto-advances: the next track that needs a take starts
+        here) and auto-advances: the next setlist track starts
         playing by itself after a short breather, no key press needed. If
         that was the last one, the session ends right here — same as
         pressing Stop — rather than sitting open waiting for it."""

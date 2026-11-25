@@ -10,7 +10,7 @@ Tk-specific, nothing terminal-specific. A context supplies two hooks:
   Play is pressed to actually open a session (see identify_state below).
   The Tk UI answers from whatever's selected in its Setlist/Inspiration
   picker; the headless server and CLI answer from the last-used project/
-  instrument plus the next untaken track.
+  instrument, starting at the top of the setlist.
 - `on_video_check_result(path, has_video)`: how to hand off a finished
   video check — there's no Stream Deck button for starting one anymore
   (key index 3 is now the Live/Production monitor toggle, "m"), but a
