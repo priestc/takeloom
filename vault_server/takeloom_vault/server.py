@@ -51,7 +51,9 @@ API — every route except /api/pair* needs `Authorization: Bearer <token>`:
 
 Browser UI:
 
-    GET  /                       session list (+ pending pairing requests)
+    GET  /                       stats: hours recorded, in all and per instrument, and each
+                                 instrument's last session (+ pending pairing requests)
+    GET  /sessions               session list
     GET  /sessions/<name>        one session: video, songs, files
     GET  /completed              every completed take, by song, with a mixer (completed.py; its
                                  data from GET /completed/data)
@@ -365,7 +367,7 @@ class _Handler(BaseHTTPRequestHandler):
                 except FileNotFoundError:
                     raise _HTTPError(HTTPStatus.NOT_FOUND, f"No session named {name!r}") from None
                 log(f"Session {name} deleted via web UI from {self.ip}, with its {len(takes)} take(s)")
-                return self._redirect("/")
+                return self._redirect("/sessions")
             if path.startswith("/completed/"):
                 return self._completed_post(path[len("/completed/"):])
             if m := re.fullmatch(r"/nodes/(\w+)/rpc", path):
@@ -380,6 +382,8 @@ class _Handler(BaseHTTPRequestHandler):
         if method not in ("GET", "HEAD"):
             raise _HTTPError(HTTPStatus.METHOD_NOT_ALLOWED, "Method not allowed")
         if path == "/":
+            return self._html(web.stats_page(vault.all_session_logs(), auth.pending_requests()))
+        if path == "/sessions":
             return self._html(web.sessions_page(vault, vault.all_session_logs(), auth.pending_requests()))
         if path == "/clients":
             return self._html(web.clients_page(list(auth.clients), auth.pending_requests()))

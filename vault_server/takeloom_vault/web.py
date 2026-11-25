@@ -72,6 +72,10 @@ tr.take td { border-bottom: none; padding: .15em .6em .15em 2.2em; font-size: .8
 .ac { position: relative; display: inline-block; }
 .ac .list { position: absolute; left: 0; right: 0; top: 100%; z-index: 5; background: var(--bg, #fff); border: 1px solid var(--line); border-top: none; max-height: 18em; overflow: auto; }
 .sugg { padding: .25em .5em; cursor: pointer; font-size: .9em; } .sugg:hover { background: #8882; }
+.stats { display: flex; gap: 1em; flex-wrap: wrap; margin-bottom: 1.4em; }
+.stat { border: 1px solid var(--line); border-radius: 8px; padding: .7em 1.1em; min-width: 9em; }
+.stat .n { font-size: 1.8em; font-weight: 600; font-variant-numeric: tabular-nums; }
+td.num { font-variant-numeric: tabular-nums; }
 .lens.on, .air.on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
 """
 
@@ -81,7 +85,7 @@ def page(title: str, body: str) -> str:
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         f"<title>{escape(title)} · Takeloom Vault</title><style>{_CSS}</style></head><body>"
-        "<header><a class='brand' href='/'>Takeloom Vault</a><a href='/'>Sessions</a>"
+        "<header><a class='brand' href='/'>Takeloom Vault</a><a href='/'>Stats</a><a href='/sessions'>Sessions</a>"
         "<a href='/completed'>Completed takes</a><a href='/setlists'>Setlists</a><a href='/cameras'>Cameras</a><a href='/clients'>Paired devices</a></header>"
         f"{body}</body></html>"
     )
@@ -351,6 +355,89 @@ def sessions_page(vault: Vault, logs: dict[str, dict], pending: list[PairingRequ
     )
     refresh = "<meta http-equiv='refresh' content='5'>" if pending else ""
     return page("Sessions", refresh + _pairing_banner(pending) + f"<h1>Sessions <span class='muted small'>{len(rows)}</span></h1>" + table)
+
+
+def _session_start(data: dict) -> datetime.datetime | None:
+    events = data.get("events") or []
+    try:
+        return datetime.datetime.strptime(events[0]["wall_time"], "%Y-%m-%d %H:%M:%S") if events else None
+    except (KeyError, ValueError):
+        return None
+
+
+def _session_length(data: dict) -> float:
+    events = data.get("events") or []
+    try:
+        return max(0.0, float(events[-1].get("timestamp") or 0)) if events else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _format_hours(seconds: float) -> str:
+    h, m = divmod(int(round(seconds / 60)), 60)
+    return f"{h}h {m:02d}m" if h else f"{m}m"
+
+
+def _format_ago(when: datetime.datetime, now: datetime.datetime) -> str:
+    days = (now.date() - when.date()).days
+    if days <= 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    if days < 60:
+        return f"{days} days ago"
+    if days < 730:
+        return f"{days // 30} months ago"
+    return f"{days // 365} years ago"
+
+
+def stats_page(logs: dict[str, dict], pending: list[PairingRequest], now: datetime.datetime | None = None) -> str:
+    """The home page: how much has been recorded, in all and per
+    instrument, and how long since each instrument last had a session."""
+    now = now or datetime.datetime.now()
+    total = 0.0
+    per: dict[str, dict] = {}
+    for data in logs.values():
+        length = _session_length(data)
+        total += length
+        name = data.get("instrument") or "Unknown instrument"
+        row = per.setdefault(name, {"seconds": 0.0, "sessions": 0, "takes": 0, "last": None, "last_name": ""})
+        row["seconds"] += length
+        row["sessions"] += 1
+        row["takes"] += _take_count(data) or 0
+        start = _session_start(data)
+        if start and (row["last"] is None or start > row["last"]):
+            row["last"] = start
+    total_takes = sum(r["takes"] for r in per.values())
+    tiles = "".join(
+        f"<div class='stat'><div class='n'>{escape(n)}</div><div class='muted small'>{escape(label)}</div></div>"
+        for n, label in (
+            (_format_hours(total), "recorded in all"),
+            (str(len(logs)), "sessions"),
+            (str(total_takes), "takes"),
+            (str(len(per)), "instruments"),
+        )
+    )
+    rows = "".join(
+        "<tr><td>{name}</td><td class='num'>{hours}</td><td class='num'>{sessions}</td><td class='num'>{takes}</td>"
+        "<td>{ago}</td></tr>".format(
+            name=escape(name),
+            hours=_format_hours(r["seconds"]),
+            sessions=r["sessions"],
+            takes=r["takes"],
+            ago=(f"{_format_ago(r['last'], now)} <span class='muted small'>· {escape(r['last'].strftime('%a %b %-d, %Y'))}</span>"
+                 if r["last"] else "<span class='muted'>unknown</span>"),
+        )
+        for name, r in sorted(per.items(), key=lambda kv: kv[1]["seconds"], reverse=True)
+    )
+    table = (
+        "<h2>By instrument</h2><table><tr><th>Instrument</th><th>Recorded</th><th>Sessions</th><th>Takes</th>"
+        "<th>Last session</th></tr>" + rows + "</table>"
+        if per else "<p class='muted'>No sessions in the vault yet.</p>"
+    )
+    refresh = "<meta http-equiv='refresh' content='5'>" if pending else ""
+    return page("Stats", refresh + _pairing_banner(pending) + "<h1>Stats</h1>"
+                f"<div class='stats'>{tiles}</div>" + table + "<p class='small'><a href='/sessions'>All sessions →</a></p>")
 
 
 _EDIT_COLORS = ["#2a6db0", "#d0702a", "#2e9d4f", "#9b4fc4", "#c4a72a", "#c44f6d"]
